@@ -17,6 +17,7 @@ mod protect;
 mod thread;
 mod timer_period;
 mod vtable;
+mod window;
 
 use config::Config;
 use std::env::current_exe;
@@ -176,6 +177,12 @@ unsafe fn install_hooks() {
 
         timer_period::install(host_exe);
         gdi_caps::install(host_exe);
+        window::install(
+            host_exe,
+            &cfg.window,
+            cfg.display.resolution.dimensions(),
+            cfg.display.mode,
+        );
     }
 }
 
