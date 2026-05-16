@@ -7,6 +7,7 @@ use crate::iat_hook;
 use crate::log::flush;
 use std::ffi::c_void;
 use std::process::abort;
+use std::slice::from_mut as slice_from_mut;
 use tracing::info;
 use windows_sys::Win32::Foundation::{HANDLE, HMODULE, HWND};
 use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
@@ -148,7 +149,13 @@ unsafe extern "system" fn hook_create_thread(
     unsafe {
         let h = real_create_thread(sec, stack, start, param, flags, tid_out);
         let start_va = start.map_or(0, |f| f as usize);
-        let tid = if tid_out.is_null() { 0 } else { *tid_out };
+        // `tid_out` is caller-controlled; we route through `safe_read` rather than
+        // a direct deref so an invalid (but non-null) pointer logs `tid=0`
+        // instead of AV'ing inside the hook.
+        let mut tid: u32 = 0;
+        if !tid_out.is_null() {
+            safe_read(tid_out, slice_from_mut(&mut tid));
+        }
         info!(
             kind = "thread_spawned",
             tid,

@@ -155,9 +155,13 @@ unsafe extern "system" fn hook_create_window_ex_a(
             lp_param,
         );
 
-        if is_main && !hwnd.is_null() {
+        if is_main
+            && !hwnd.is_null()
+            && APPLIED
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+        {
             apply(hwnd, &STATE.get().unwrap().restyle, lp_window_name);
-            APPLIED.store(true, Ordering::Release);
         }
         hwnd
     }
