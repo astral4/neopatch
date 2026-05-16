@@ -7,14 +7,19 @@
 
 mod config;
 mod iat;
+mod log;
 mod modules;
 mod patches;
 mod protect;
 mod thread;
 mod vtable;
 
+use config::Config;
+use std::env::current_exe;
 use std::ffi::c_void;
+use std::fs::read;
 use std::mem::transmute;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use vtable::FnSlot;
 use windows_sys::Win32::Foundation::{E_FAIL, HINSTANCE, HMODULE, MAX_PATH};
@@ -136,6 +141,21 @@ pub unsafe extern "system" fn DirectInput8Create(
 
 unsafe fn install_hooks() {
     unsafe {
+        // If `current_exe` fails, the configuration path is `None`
+        // and `install_dir` falls back to "." for the log root.
+        let host_exe_path = current_exe().ok();
+        let exe_dir = host_exe_path.as_deref().and_then(Path::parent);
+
+        let cfg = exe_dir
+            .and_then(|d| read(d.join("neopatch.ini")).ok())
+            .map_or_else(Config::default, |b| Config::parse(&config::decode_text(&b)));
+        let cfg = config::CONFIG.get_or_init(|| cfg);
+
+        // Initialize logging first so the earliest install events are captured.
+        // Minidumps land in `log::dump_dir`, the per-session directory next to `events.log`.
+        let install_dir = exe_dir.map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+        log::init(&install_dir, &cfg.log, host_exe_path.as_deref(), cfg);
+
         // `DllMain` runs on the `LoadLibrary` caller.
         // For a static-imported, DLL this is the process' main thread.
         thread::set_main_id(GetCurrentThreadId());
