@@ -8,10 +8,12 @@
 mod modules;
 mod protect;
 mod thread;
+mod vtable;
 
 use std::ffi::c_void;
 use std::mem::transmute;
 use std::sync::OnceLock;
+use vtable::FnSlot;
 use windows_sys::Win32::Foundation::{E_FAIL, HINSTANCE, HMODULE, MAX_PATH};
 use windows_sys::Win32::System::LibraryLoader::{
     DisableThreadLibraryCalls, GetProcAddress, LoadLibraryW,
@@ -38,24 +40,6 @@ macro_rules! match_named {
     };
 }
 
-/// A function-pointer cell suitable for storage as `static OnceLock<FnSlot>`.
-#[derive(Clone, Copy)]
-struct FnSlot(unsafe extern "system" fn());
-
-impl FnSlot {
-    fn new(p: *mut ()) -> Option<Self> {
-        if p.is_null() {
-            return None;
-        }
-        Some(Self(unsafe {
-            transmute::<*mut (), unsafe extern "system" fn()>(p)
-        }))
-    }
-    fn as_ptr(self) -> *mut () {
-        self.0 as *mut ()
-    }
-}
-
 static REAL_DIRECT_INPUT_8_CREATE: OnceLock<FnSlot> = OnceLock::new();
 
 #[unsafe(no_mangle)]
@@ -70,6 +54,9 @@ pub unsafe extern "system" fn DllMain(
     }
     unsafe {
         DisableThreadLibraryCalls(hinst as HMODULE);
+        // Lets the vtable patcher distinguish "already our hook" (idempotent re-entry)
+        // from a shim-layer chain like `apphelp.dll`'s `CreateDevice` hijack.
+        vtable::set_our_dll_handle(hinst as HMODULE);
         // We cache the real `DirectInput8Create` first because
         // the proxy export must work even if hook installation fails.
         load_real_dinput8();
