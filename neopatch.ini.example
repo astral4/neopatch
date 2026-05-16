@@ -1,0 +1,107 @@
+; neopatch configuration for Touhou 15 ~ Legacy of Lunatic Kingdom (th15.exe v1.00b)
+;
+; Place this file next to th15.exe and name it "neopatch.ini".
+; All keys are optional and will fall back to default values.
+; Section names, key names, and values are case-insensitive.
+; Comments start with ";" or "#" and cause everything after them
+; on the same line to be ignored. Values can be wrapped in
+; matching double quotes ("...") or single quotes ('...').
+; When using neopatch, the game follows this file instead of th15.cfg.
+
+
+; Frame/tick rate caps. Higher rates speed everything up.
+; 0 completely uncaps the tick rate and makes the game run
+; as fast as your CPU and GPU can handle.
+[framerate]
+; Tick rate in normal gameplay. Default: 60
+game_fps = 60
+
+; Tick rate while fast-forwarding through replays. Default: 240
+replay_skip_fps = 240
+
+; Tick rate while slowing down in replays. Default: 30
+replay_slow_fps = 30
+
+
+[display]
+; Display mode. Default: Windowed
+;   Windowed
+;   Fullscreen
+mode = Windowed
+
+; Game resolution. Default: 1280x960
+;   640x480
+;   960x720
+;   1280x960
+resolution = 1280x960
+
+; Fullscreen refresh rate selection. Ignored in windowed mode.
+; Default: NativeMultiple
+;   Native           - the desktop's current refresh rate
+;   NativeMultiple   - highest multiple of 60 not exceeding the desktop
+;                      refresh rate (e.g. 120 on 144 Hz, 60 on 100 Hz)
+;   <integer>        - force a specific rate in Hz; if your display
+;                      doesn't actually support this refresh rate at
+;                      the chosen resolution, then running the game
+;                      will fail; use Native or NativeMultiple for
+;                      a guaranteed-supported refresh rate
+refresh_rate = NativeMultiple
+
+
+[window]
+; Outer window position in screen coordinates. Default: 0, 0
+x = 0
+y = 0
+
+; Client-area size. Default: uses the [display] resolution
+; width  = 1280
+; height = 960
+
+; Window styling. Default: Borderless for Fullscreen; Frameless for Windowed
+;   Framed       - title bar with minimize/maximize/close buttons
+;   Frameless    - no caption or border, but minimize/maximize/close still works
+;   Borderless   - pure pixel rectangle; no styling
+; frame = Frameless
+
+; Whether to keep the game window above all other windows. Default: false
+always_on_top = false
+
+
+[process]
+; Process priority class. Default: Unchanged
+;   Unchanged
+;   Idle
+;   BelowNormal
+;   Normal
+;   AboveNormal
+;   High
+priority = Unchanged
+
+; CPU affinity bitmask, one bit per logical core.
+; Useful on hybrid Intel CPUs for making the game run on P-cores over E-cores.
+; Accepts decimal, hex (0x), octal (0o), or binary (0b).
+; Default: 0 (no affinity specified)
+; affinity_mask = 0xFF
+
+
+; Each session writes log data to the directory <log_dir>/<session_id>/.
+[log]
+; Log verbosity. Each level includes all higher-priority levels. Default: info
+;   off
+;   error
+;   warn
+;   info
+;   debug
+;   trace
+level = info
+
+; Number of past sessions to retain logs for.
+; Older ones are deleted at startup, before the new session is logged.
+; Default: 10
+sessions_to_keep = 10
+
+; The log root directory. Quote the path if it contains spaces.
+; Default behavior: write to <install_dir>\neopatch_logs\,
+; falling back to %LOCALAPPDATA%\neopatch\logs\ if the
+; installation directory isn't writable (e.g. Program Files).
+; log_dir = "C:\Users\me\neopatch_logs"
