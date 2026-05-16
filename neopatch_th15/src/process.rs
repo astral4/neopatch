@@ -13,31 +13,21 @@ use windows_sys::Win32::System::Threading::{
 pub(crate) fn apply(cfg: &ProcessCfg) {
     if let Some(pc) = priority_class(cfg.priority) {
         let ok = unsafe { SetPriorityClass(GetCurrentProcess(), pc) };
-        let os_error = if ok == 0 {
-            unsafe { GetLastError() }
-        } else {
-            0
-        };
         info!(
             kind = "set_priority_class",
             priority = %cfg.priority,
             pc = format_args!("{pc:#x}"),
             ok = ok != 0,
-            os_error = format_args!("{os_error:#x}"),
+            os_error = format_args!("{:#x}", last_error_if(ok == 0)),
         );
     }
     if let Some(mask) = cfg.affinity_mask {
         let ok = unsafe { SetProcessAffinityMask(GetCurrentProcess(), mask.get() as usize) };
-        let os_error = if ok == 0 {
-            unsafe { GetLastError() }
-        } else {
-            0
-        };
         info!(
             kind = "set_affinity_mask",
             mask = format_args!("{:#x}", mask.get()),
             ok = ok != 0,
-            os_error = format_args!("{os_error:#x}"),
+            os_error = format_args!("{:#x}", last_error_if(ok == 0)),
         );
     }
     apply_mmcss();
@@ -47,16 +37,15 @@ pub(crate) fn apply(cfg: &ProcessCfg) {
 fn apply_mmcss() {
     let mut task_idx: u32 = 0;
     let h = unsafe { AvSetMmThreadCharacteristicsW(w!("Games").as_ptr(), &raw mut task_idx) };
-    let os_error = if h.is_null() {
-        unsafe { GetLastError() }
-    } else {
-        0
-    };
     info!(
         kind = "mmcss_register",
         ok = !h.is_null(),
-        os_error = format_args!("{os_error:#x}"),
+        os_error = format_args!("{:#x}", last_error_if(h.is_null())),
     );
+}
+
+fn last_error_if(failed: bool) -> u32 {
+    if failed { unsafe { GetLastError() } } else { 0 }
 }
 
 fn priority_class(p: PriorityClass) -> Option<PROCESS_CREATION_FLAGS> {

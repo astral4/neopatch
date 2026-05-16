@@ -298,20 +298,11 @@ pub(crate) fn install_handlers() {
 /// Use this for caller-controlled pointers where a direct deref would crash on a bad input.
 /// See `safe_read_stack` for more details.
 pub(crate) fn safe_read<T: Copy>(src: *const T, buf: &mut [T]) -> usize {
-    if src.is_null() {
-        return 0;
-    }
-    let mut bytes_read: usize = 0;
-    let _ = unsafe {
-        ReadProcessMemory(
-            GetCurrentProcess(),
-            src.cast::<c_void>(),
-            buf.as_mut_ptr().cast::<c_void>(),
-            size_of_val(buf),
-            &raw mut bytes_read,
-        )
-    };
-    bytes_read / size_of::<T>()
+    rpm(
+        src.cast::<c_void>(),
+        buf.as_mut_ptr().cast::<c_void>(),
+        size_of_val(buf),
+    ) / size_of::<T>()
 }
 
 /// Best-effort copy of up to `N` `u32`s starting at `esp`.
@@ -319,22 +310,25 @@ pub(crate) fn safe_read<T: Copy>(src: *const T, buf: &mut [T]) -> usize {
 /// Partial trailing dwords (`ReadProcessMemory` stopping mid-`u32` at a page boundary) are zeroed.
 /// Slots past the return value retain whatever the caller initialized them to.
 pub(crate) fn safe_read_stack<const N: usize>(esp: u32, out: &mut [u32; N]) -> usize {
-    if esp == 0 {
+    let src: *const u32 = with_exposed_provenance(esp as usize);
+    let bytes = rpm(
+        src.cast::<c_void>(),
+        out.as_mut_ptr().cast::<c_void>(),
+        size_of_val(out),
+    );
+    let words = bytes / size_of::<u32>();
+    if !bytes.is_multiple_of(size_of::<u32>()) && words < N {
+        out[words] = 0;
+    }
+    words
+}
+
+/// Returns bytes read; 0 on null source or `ReadProcessMemory` failure.
+fn rpm(src: *const c_void, dst: *mut c_void, len: usize) -> usize {
+    if src.is_null() {
         return 0;
     }
     let mut bytes_read: usize = 0;
-    let _ = unsafe {
-        ReadProcessMemory(
-            GetCurrentProcess(),
-            with_exposed_provenance::<c_void>(esp as usize),
-            out.as_mut_ptr().cast::<c_void>(),
-            N * size_of::<u32>(),
-            &raw mut bytes_read,
-        )
-    };
-    let words_read = bytes_read / size_of::<u32>();
-    if !bytes_read.is_multiple_of(size_of::<u32>()) && words_read < N {
-        out[words_read] = 0;
-    }
-    words_read
+    let _ = unsafe { ReadProcessMemory(GetCurrentProcess(), src, dst, len, &raw mut bytes_read) };
+    bytes_read
 }
