@@ -3,8 +3,8 @@
 use crate::protect::with_writable;
 use crate::vtable::FnSlot;
 use std::ffi::{CStr, c_char};
-use std::mem::{MaybeUninit, offset_of};
-use std::ptr::copy_nonoverlapping;
+use std::mem::offset_of;
+use std::ptr::{read_unaligned, write_unaligned};
 use std::sync::OnceLock;
 use tracing::{info, warn};
 use windows_sys::Win32::Foundation::HMODULE;
@@ -89,36 +89,21 @@ impl Original {
     }
 }
 
-unsafe fn read_at<T: Copy>(base: *const u8, offset: usize) -> T {
-    unsafe {
-        let mut buf = MaybeUninit::<T>::uninit();
-        copy_nonoverlapping(
-            base.add(offset),
-            buf.as_mut_ptr().cast::<u8>(),
-            size_of::<T>(),
-        );
-        buf.assume_init()
-    }
-}
-
-unsafe fn write_at<T: Copy>(base: *mut u8, offset: usize, val: T) {
-    unsafe {
-        let src: *const T = &raw const val;
-        copy_nonoverlapping(src.cast::<u8>(), base.add(offset), size_of::<T>());
-    }
-}
-
 unsafe fn data_directory(module: HMODULE, idx: usize) -> Option<(*const u8, u32)> {
     unsafe {
         let base = module.cast::<u8>().cast_const();
-        let e_magic: u16 = read_at(base, offset_of!(IMAGE_DOS_HEADER, e_magic));
+        let e_magic: u16 = read_unaligned(base.add(offset_of!(IMAGE_DOS_HEADER, e_magic)).cast());
         if e_magic != IMAGE_DOS_SIGNATURE {
             return None;
         }
         // Treat negative `e_lfanew` as malformed rather than wrapping.
-        let e_lfanew: i32 = read_at(base, offset_of!(IMAGE_DOS_HEADER, e_lfanew));
+        let e_lfanew: i32 = read_unaligned(base.add(offset_of!(IMAGE_DOS_HEADER, e_lfanew)).cast());
         let nt_base = base.add(usize::try_from(e_lfanew).ok()?);
-        let signature: u32 = read_at(nt_base, offset_of!(IMAGE_NT_HEADERS32, Signature));
+        let signature: u32 = read_unaligned(
+            nt_base
+                .add(offset_of!(IMAGE_NT_HEADERS32, Signature))
+                .cast(),
+        );
         if signature != IMAGE_NT_SIGNATURE {
             return None;
         }
@@ -126,11 +111,16 @@ unsafe fn data_directory(module: HMODULE, idx: usize) -> Option<(*const u8, u32)
         let dd_offset = offset_of!(IMAGE_NT_HEADERS32, OptionalHeader)
             + offset_of!(IMAGE_OPTIONAL_HEADER32, DataDirectory)
             + idx * size_of::<IMAGE_DATA_DIRECTORY>();
-        let va: u32 = read_at(
-            nt_base,
-            dd_offset + offset_of!(IMAGE_DATA_DIRECTORY, VirtualAddress),
+        let va: u32 = read_unaligned(
+            nt_base
+                .add(dd_offset + offset_of!(IMAGE_DATA_DIRECTORY, VirtualAddress))
+                .cast(),
         );
-        let size: u32 = read_at(nt_base, dd_offset + offset_of!(IMAGE_DATA_DIRECTORY, Size));
+        let size: u32 = read_unaligned(
+            nt_base
+                .add(dd_offset + offset_of!(IMAGE_DATA_DIRECTORY, Size))
+                .cast(),
+        );
         if va == 0 || size == 0 {
             return None;
         }
@@ -160,9 +150,10 @@ unsafe fn patch_iat(
 
         let mut desc_offset: usize = 0;
         loop {
-            let dll_name_rva: u32 = read_at(
-                imp_dir,
-                desc_offset + offset_of!(IMAGE_IMPORT_DESCRIPTOR, Name),
+            let dll_name_rva: u32 = read_unaligned(
+                imp_dir
+                    .add(desc_offset + offset_of!(IMAGE_IMPORT_DESCRIPTOR, Name))
+                    .cast(),
             );
             if dll_name_rva == 0 {
                 break;
@@ -171,21 +162,23 @@ unsafe fn patch_iat(
             // `OriginalFirstThunk` holds names and `FirstThunk` holds live pointers.
             // Some loaders strip `OriginalFirstThunk`, so we fall back to `FirstThunk`.
             // The `Anonymous` union aliases OFT.
-            let oft: u32 = read_at(
-                imp_dir,
-                desc_offset + offset_of!(IMAGE_IMPORT_DESCRIPTOR, Anonymous),
+            let oft: u32 = read_unaligned(
+                imp_dir
+                    .add(desc_offset + offset_of!(IMAGE_IMPORT_DESCRIPTOR, Anonymous))
+                    .cast(),
             );
-            let ft: u32 = read_at(
-                imp_dir,
-                desc_offset + offset_of!(IMAGE_IMPORT_DESCRIPTOR, FirstThunk),
+            let ft: u32 = read_unaligned(
+                imp_dir
+                    .add(desc_offset + offset_of!(IMAGE_IMPORT_DESCRIPTOR, FirstThunk))
+                    .cast(),
             );
             let lookup_rva = if oft != 0 { oft } else { ft };
 
             let mut i: usize = 0;
             loop {
-                let entry: u32 = read_at(
-                    base,
-                    lookup_rva as usize + i * size_of::<IMAGE_THUNK_DATA32>(),
+                let entry: u32 = read_unaligned(
+                    base.add(lookup_rva as usize + i * size_of::<IMAGE_THUNK_DATA32>())
+                        .cast(),
                 );
                 if entry == 0 {
                     break;
@@ -200,12 +193,12 @@ unsafe fn patch_iat(
                         let slot_offset = ft as usize + i * size_of::<IMAGE_THUNK_DATA32>();
                         let slot_ptr = base_mut.add(slot_offset);
                         return with_writable(slot_ptr, size_of::<*mut ()>(), |_| {
-                            let old: *mut () = read_at(base, slot_offset);
+                            let old: *mut () = read_unaligned(base.add(slot_offset).cast());
                             // Set the original before publishing the hook so a caller that races in
                             // observes a populated `out_old` rather than
                             // the panic from an uncaptured read.
                             FnSlot::store_into(out_old, old, &format!("IAT hook {import_name:?}"));
-                            write_at::<*mut ()>(base_mut, slot_offset, new_fn);
+                            write_unaligned(base_mut.add(slot_offset).cast::<*mut ()>(), new_fn);
                         })
                         .is_some();
                     }
