@@ -24,6 +24,7 @@ mod th15_state;
 mod thread;
 mod timer_period;
 mod vtable;
+mod watchdog;
 mod window;
 
 use config::Config;
@@ -35,6 +36,7 @@ use std::mem::transmute;
 use std::path::{Path, PathBuf};
 use std::ptr::null;
 use std::sync::OnceLock;
+use tracing::level_filters::LevelFilter;
 use vtable::FnSlot;
 use windows_sys::Win32::Foundation::{E_FAIL, HINSTANCE, HMODULE, MAX_PATH};
 use windows_sys::Win32::System::LibraryLoader::{
@@ -175,6 +177,10 @@ unsafe fn install_hooks() {
         thread::set_main_id(GetCurrentThreadId());
 
         crash::install_handlers();
+        // The watchdog only emits at INFO level anyway.
+        if cfg.log.level >= LevelFilter::INFO {
+            watchdog::install();
+        }
 
         // Important: IAT patches should operate on th15.exe's import table, not ours!
         // Passing our `hinst` would walk the wrong import directory
