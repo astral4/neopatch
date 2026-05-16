@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = []
+members = ["neopatch_th15"]
 
 [workspace.package]
 version = "0.1.0"
