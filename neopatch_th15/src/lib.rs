@@ -174,6 +174,7 @@ unsafe fn install_hooks() {
 
         // `DllMain` runs on the `LoadLibrary` caller.
         // For a static-imported, DLL this is the process' main thread.
+        // We do this before `watchdog::install` so the watchdog has the TID at startup.
         thread::set_main_id(GetCurrentThreadId());
 
         crash::install_handlers();
