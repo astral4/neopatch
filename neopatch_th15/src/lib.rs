@@ -13,6 +13,7 @@ mod gdi_caps;
 mod iat;
 mod log;
 mod modules;
+mod pacer;
 mod patches;
 mod process;
 mod protect;
@@ -22,6 +23,7 @@ mod vtable;
 mod window;
 
 use config::Config;
+use pacer::Pacer;
 use std::env::current_exe;
 use std::ffi::c_void;
 use std::fs::read;
@@ -187,6 +189,8 @@ unsafe fn install_hooks() {
         );
         dialog_dismiss::install(host_exe);
         exit_hooks::install(host_exe);
+
+        _ = pacer::PACER.set(Pacer::new(cfg.framerate.game_fps));
     }
 }
 
