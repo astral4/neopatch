@@ -202,6 +202,7 @@ unsafe fn install_hooks() {
         d3d9::install(host_exe);
 
         th15_patches::apply_basic();
+        th15_patches::install_destructor_hook();
     }
 }
 
