@@ -8,7 +8,7 @@
 //! and helps enforce consistent formatting.
 
 use crate::config::{Config, LogCfg};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::env::var;
 use std::fmt::{Debug, Display, Write as _};
 use std::fs::{File, OpenOptions, create_dir_all, read_dir, remove_dir_all};
@@ -95,15 +95,22 @@ pub(crate) fn init(
 }
 
 /// Drains the `BufWriter` and calls `FlushFileBuffers`.
+/// The fsync runs outside the mutex so other threads can keep emitting events
+/// while the disk sync is in flight; the underlying `HANDLE`
+/// lasts for the lifetime of the process by construction.
 pub(crate) fn flush() {
-    if let Ok(mut guard) = FILE_WRITER.lock()
-        && let Some(writer) = guard.as_mut()
-    {
+    let raw = {
+        let Ok(mut guard) = FILE_WRITER.lock() else {
+            return;
+        };
+        let Some(writer) = guard.as_mut() else {
+            return;
+        };
         drop(writer.flush());
-        let raw = writer.get_ref().as_raw_handle();
-        unsafe {
-            FlushFileBuffers(raw);
-        }
+        writer.get_ref().as_raw_handle()
+    };
+    unsafe {
+        FlushFileBuffers(raw);
     }
 }
 
@@ -160,7 +167,12 @@ fn apply_retention(log_root: &Path, keep: u32, current: &str) {
     let mut dirs: Vec<PathBuf> = entries
         .filter_map(Result::ok)
         .map(|e| e.path())
-        .filter(|p| p.is_dir() && p.file_name().is_some_and(|n| n != current))
+        .filter(|p| {
+            p.is_dir()
+                && p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n != current && is_session_id(n))
+        })
         .collect();
     // Session IDs sort lexicographically by timestamp.
     dirs.sort();
@@ -171,6 +183,17 @@ fn apply_retention(log_root: &Path, keep: u32, current: &str) {
             drop(remove_dir_all(old));
         }
     }
+}
+
+/// Returns true if `name` matches the `YYYYMMDD_HHMMSS` format of `make_session_id`;
+/// false otherwise.
+fn is_session_id(name: &str) -> bool {
+    name.len() == 15
+        && name.as_bytes()[8] == b'_'
+        && name
+            .bytes()
+            .enumerate()
+            .all(|(i, b)| i == 8 || b.is_ascii_digit())
 }
 
 fn write_manifest(
@@ -258,29 +281,40 @@ where
     }
 
     fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
-        // We use a per-thread reusable buffer instead of allocating a new `String` per event.
+        // Per-thread reusable line buffer, plus a per-thread re-entry guard.
+        // The guard handles scenarios where this thread is already inside `on_event`
+        // holding `FILE_WRITER`, faults, and the vectored handler calls `error!`
+        // and then `on_event` again. `std::sync::Mutex` is non-reentrant,
+        // so recursing into `FILE_WRITER.lock()` on the owning thread would deadlock.
+        // We'd rather drop the diagnostic line.
         thread_local! {
             static LINE_BUF: RefCell<String> = RefCell::new(String::with_capacity(512));
+            static IN_EVENT: Cell<bool> = const { Cell::new(false) };
         }
-        LINE_BUF.with(|cell| {
-            let Ok(mut line) = cell.try_borrow_mut() else {
+        IN_EVENT.with(|in_event| {
+            if in_event.get() {
                 return;
-            };
-            line.clear();
-            let ts = elapsed_secs();
-            let tid = unsafe { GetCurrentThreadId() };
-            let level = event.metadata().level();
-            _ = write!(line, "[t={ts:.3}s tid={tid}] level={level}");
-            let mut visitor = FieldVisitor { out: &mut line };
-            event.record(&mut visitor);
-            line.push('\n');
-            if let Ok(mut guard) = FILE_WRITER.lock()
-                && let Some(writer) = guard.as_mut()
-            {
-                // No per-line flush; watchdog ticks and crash/exit hooks
-                // are responsible for durability.
-                drop(writer.write_all(line.as_bytes()));
             }
+            in_event.set(true);
+            LINE_BUF.with(|cell| {
+                let mut line = cell.borrow_mut();
+                line.clear();
+                let ts = elapsed_secs();
+                let tid = unsafe { GetCurrentThreadId() };
+                let level = event.metadata().level();
+                _ = write!(line, "[t={ts:.3}s tid={tid}] level={level}");
+                let mut visitor = FieldVisitor { out: &mut line };
+                event.record(&mut visitor);
+                line.push('\n');
+                if let Ok(mut guard) = FILE_WRITER.lock()
+                    && let Some(writer) = guard.as_mut()
+                {
+                    // No per-line flush; watchdog ticks and crash/exit hooks
+                    // are responsible for durability.
+                    drop(writer.write_all(line.as_bytes()));
+                }
+            });
+            in_event.set(false);
         });
     }
 }
@@ -328,5 +362,29 @@ impl LogCap {
         }
         let n = self.count.fetch_add(1, Ordering::Relaxed);
         if n < self.limit { Some(n) } else { None }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_session_id;
+
+    #[test]
+    fn is_session_id_accepts_real_session_format() {
+        assert!(is_session_id("20260516_123045"));
+        assert!(is_session_id("00000000_000000"));
+        assert!(is_session_id("99999999_999999"));
+    }
+
+    #[test]
+    fn is_session_id_rejects_unrelated_names() {
+        assert!(!is_session_id(""));
+        assert!(!is_session_id("important_data"));
+        assert!(!is_session_id("20260516"));
+        assert!(!is_session_id("20260516_12304"));
+        assert!(!is_session_id("20260516_1230450"));
+        assert!(!is_session_id("20260516-123045"));
+        assert!(!is_session_id("2026051a_123045"));
+        assert!(!is_session_id("20260516_12304a"));
     }
 }
