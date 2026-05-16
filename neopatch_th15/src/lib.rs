@@ -7,6 +7,7 @@
 
 mod config;
 mod crash;
+mod d3d9;
 mod dialog_dismiss;
 mod exit_hooks;
 mod gdi_caps;
@@ -191,7 +192,11 @@ unsafe fn install_hooks() {
         dialog_dismiss::install(host_exe);
         exit_hooks::install(host_exe);
 
+        // We do this before `d3d9::install` because that call
+        // wires `Present` into `hook_present`, which unwraps `PACER.get()`.
         _ = pacer::PACER.set(Pacer::new(cfg.framerate.game_fps));
+
+        d3d9::install(host_exe);
     }
 }
 
