@@ -17,6 +17,7 @@ mod pacer;
 mod patches;
 mod process;
 mod protect;
+mod th15_state;
 mod thread;
 mod timer_period;
 mod vtable;
