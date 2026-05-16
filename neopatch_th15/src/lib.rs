@@ -5,6 +5,7 @@
 //! and `DllMain` runs before any game code. The exported `DirectInput8Create`
 //! forwards to the real System32 DLL we load by full path; everything else is hooks.
 
+mod modules;
 mod thread;
 
 use std::ffi::c_void;
