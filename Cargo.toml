@@ -14,7 +14,7 @@ publish = false
 
 [workspace.lints.rust]
 async_fn_in_trait = "allow"
-ffi_unwind_calls = "warn"
+ffi_unwind_calls = "deny"
 improper_ctypes = "deny"
 improper_ctypes_definitions = "deny"
 let_underscore_drop = "deny"

@@ -47,9 +47,13 @@ use windows_sys::Win32::System::SystemServices::DLL_PROCESS_ATTACH;
 use windows_sys::Win32::System::Threading::GetCurrentThreadId;
 use windows_sys::core::{GUID, HRESULT};
 
-// Throughout the codebase, we assume x86.
+// We assume x86 and abort-on-panic throughout the codebase.
+// This is load-bearing for correctness.
 #[cfg(all(not(target_arch = "x86"), not(test)))]
-compile_error!("neopatch_th15 is i686-only");
+compile_error!("neopatch is x86-only");
+
+#[cfg(all(not(panic = "abort"), not(test)))]
+compile_error!("neopatch requires `panic = \"abort\"`");
 
 /// Match `$v` against a list of `const` identifiers, returning the literal identifier name
 /// (via `stringify!`) on hit and `"?"` on miss. This lets the printed name and value
