@@ -23,13 +23,13 @@ use crate::log::LogCap;
 use crate::pacer::PACER;
 use crate::patches::{BranchKind, patch_relative_branch};
 use crate::th15_state::{ReplayMode, replay_mode};
-use crate::thread::debug_assert_main;
+use crate::thread::{MainCell, MainToken};
 use crate::vtable::{SaveOriginal, SlotPatch, capture_slot, patch_vtable_slots};
 use crate::{iat_hook, match_named, vtable_slot};
 use std::ffi::c_void;
 use std::mem::offset_of;
 use std::ptr::{null, null_mut};
-use std::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::{info, warn};
 use windows::Win32::Foundation::{HANDLE, HWND, RECT};
 use windows::Win32::Graphics::Direct3D9::{
@@ -185,20 +185,18 @@ static CHECK_DEVICE_FORMAT_LOG: LogCap = LogCap::new(64);
 static PRESENT_COUNT: AtomicU64 = AtomicU64::new(0);
 
 // `Pacer::set_fps` resets the deadline, so call it only on mode change.
-static MODE: AtomicU32 = AtomicU32::new(ReplayMode::Normal as u32);
+static MODE: MainCell<ReplayMode> = MainCell::new(ReplayMode::Normal);
 
 /// `IDirect3D9Ex*` and `adapter` from the most recent successful
 /// `CreateDeviceEx`. The pointer is a raw borrow of the COM object the
 /// game holds; valid for the device's lifetime by D3D9's contract (the
 /// device implicitly refs its parent).
+#[derive(Clone, Copy)]
 struct ResetCtx {
-    d3d9: AtomicPtr<c_void>,
-    adapter: AtomicU32,
+    d3d9: *mut c_void,
+    adapter: u32,
 }
-static RESET_CTX: ResetCtx = ResetCtx {
-    d3d9: AtomicPtr::new(null_mut()),
-    adapter: AtomicU32::new(0),
-};
+static RESET_CTX: MainCell<Option<ResetCtx>> = MainCell::new(None);
 
 pub(crate) fn present_count() -> u64 {
     PRESENT_COUNT.load(Ordering::Relaxed)
@@ -278,6 +276,7 @@ unsafe extern "system" fn hook_create_device(
     pp: *mut D3DPRESENT_PARAMETERS,
     returned_device: *mut *mut c_void,
 ) -> HRESULT {
+    let tok = MainToken::new();
     unsafe {
         // Exclusive fullscreen needs a populated `D3DDISPLAYMODEEX`; windowed needs `NULL`.
         let mut display_mode: Option<D3DDISPLAYMODEEX> = None;
@@ -343,8 +342,13 @@ unsafe extern "system" fn hook_create_device(
                 SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW,
             );
 
-            RESET_CTX.d3d9.store(this, Ordering::Release);
-            RESET_CTX.adapter.store(adapter, Ordering::Release);
+            RESET_CTX.set(
+                &tok,
+                Some(ResetCtx {
+                    d3d9: this,
+                    adapter,
+                }),
+            );
 
             install_device_hooks(dev);
             apply_device_ex_tunables(dev);
@@ -661,17 +665,15 @@ unsafe extern "system" fn hook_present(
     dest_window_override: HWND,
     dirty_region: *const RGNDATA,
 ) -> HRESULT {
-    debug_assert_main();
+    let tok = MainToken::new();
     unsafe {
         let pacer = PACER.get().unwrap();
         let observed_mode = replay_mode();
 
-        let observed = observed_mode as u32;
         // Load-then-conditional-store gates the heavier `set_fps` / `set_lead_active` pair
-        // behind an actual mode change. `MODE` is owned by this (`Present`) thread
-        // with no cross-thread reader, so `Relaxed` suffices.
-        if MODE.load(Ordering::Relaxed) != observed {
-            MODE.store(observed, Ordering::Relaxed);
+        // behind an actual mode change.
+        if MODE.get(&tok) != observed_mode {
+            MODE.set(&tok, observed_mode);
             let cfg = CONFIG.get().unwrap();
             let target = match observed_mode {
                 ReplayMode::Skip => cfg.framerate.replay_skip_fps,
@@ -684,10 +686,10 @@ unsafe extern "system" fn hook_present(
                 target_fps = target,
                 frame = PRESENT_COUNT.load(Ordering::Relaxed),
             );
-            pacer.set_fps(target);
-            pacer.set_lead_active(matches!(observed_mode, ReplayMode::Normal));
+            pacer.set_fps(&tok, target);
+            pacer.set_lead_active(&tok, matches!(observed_mode, ReplayMode::Normal));
         }
-        pacer.wait();
+        pacer.wait(&tok);
 
         // Increment before `Present` so `PRESENT_COUNT` names the in-flight frame;
         // a crash inside `Present` leaves the count at the attempted frame, not the last completed.
@@ -709,6 +711,7 @@ unsafe extern "system" fn hook_present(
 // `pick_refresh_rate` is re-applied so runtime refresh-rate toggles
 // take effect at the next `Reset`.
 unsafe extern "system" fn hook_reset(this: *mut c_void, pp: *mut D3DPRESENT_PARAMETERS) -> HRESULT {
+    let tok = MainToken::new();
     unsafe {
         let mut display_mode: Option<D3DDISPLAYMODEEX> = None;
         let (pp_before, pp_after) = match pp.as_mut() {
@@ -717,12 +720,10 @@ unsafe extern "system" fn hook_reset(this: *mut c_void, pp: *mut D3DPRESENT_PARA
                 rewrite_present_params(p);
                 if p.Windowed.0 == 0 {
                     let cfg = CONFIG.get().unwrap();
-                    apply_refresh_override(
-                        p,
-                        RESET_CTX.d3d9.load(Ordering::Acquire),
-                        RESET_CTX.adapter.load(Ordering::Acquire),
-                        cfg.display.refresh_rate,
-                    );
+                    let ctx = RESET_CTX
+                        .get(&tok)
+                        .expect("hook_reset fired before hook_create_device populated RESET_CTX");
+                    apply_refresh_override(p, ctx.d3d9, ctx.adapter, cfg.display.refresh_rate);
                     display_mode = Some(build_display_mode_ex(p, p.FullScreen_RefreshRateInHz));
                 }
                 (Some(before), Some(*p))

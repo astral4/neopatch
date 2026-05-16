@@ -20,10 +20,9 @@
 //! closed by a short QPC spin to the exact deadline. We fall back to plain `Sleep(ms-1) + spin`
 //! (with the timer resolution pinned to 1 ms by `timer_period`) on older OS versions.
 
-use crate::thread::debug_assert_main;
+use crate::thread::{MainCell, MainToken};
 use std::ffi::c_void;
 use std::ptr::{null, null_mut};
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicPtr, Ordering};
 use std::sync::{LazyLock, OnceLock};
 use std::thread::yield_now;
 use tracing::info;
@@ -53,18 +52,16 @@ static RESYNC_QPC_THRESHOLD: LazyLock<i64> =
 
 pub(crate) static PACER: OnceLock<Pacer> = OnceLock::new();
 
-#[derive(Debug)]
 pub(crate) struct Pacer {
-    // This is atomic so `set_fps` can retune without locking.
-    period_qpc: AtomicI64,
+    period_qpc: MainCell<i64>,
     /// 0 means "resync on next call."
-    deadline_qpc: AtomicI64,
+    deadline_qpc: MainCell<i64>,
     /// When true, `wait()` releases `period / 2` earlier than the deadline, which is the maximum
     /// allowed by the pacer design. The stored deadline is unaffected, so the long-run rate stays exact.
     /// This should be set to false in replay-skip/slow modes where game logic drives cadence
     /// and shaving input latency is meaningless.
-    lead_active: AtomicBool,
-    timer: AtomicPtr<c_void>,
+    lead_active: MainCell<bool>,
+    timer: MainCell<*mut c_void>,
 }
 
 impl Pacer {
@@ -72,65 +69,57 @@ impl Pacer {
     ///
     /// Resets the deadline so the next `wait()` resyncs. Otherwise, a stale deadline
     /// would chase the wrong period for several frames after a rate change.
-    ///
-    /// The two stores aren't atomic together, but this is fine because all callers
-    /// run on the `Present` thread and are serialized with `wait()`.
-    pub(crate) fn set_fps(&self, target_fps: u32) {
-        debug_assert_main();
-        self.period_qpc
-            .store(period_qpc_for(target_fps), Ordering::Relaxed);
-        self.deadline_qpc.store(0, Ordering::Relaxed);
+    pub(crate) fn set_fps(&self, tok: &MainToken, target_fps: u32) {
+        self.period_qpc.set(tok, period_qpc_for(target_fps));
+        self.deadline_qpc.set(tok, 0);
     }
 
-    pub(crate) fn set_lead_active(&self, active: bool) {
-        debug_assert_main();
-        self.lead_active.store(active, Ordering::Relaxed);
+    pub(crate) fn set_lead_active(&self, tok: &MainToken, active: bool) {
+        self.lead_active.set(tok, active);
     }
 
     pub(crate) fn new(target_fps: u32) -> Self {
         Self {
-            period_qpc: AtomicI64::new(period_qpc_for(target_fps)),
-            deadline_qpc: AtomicI64::new(0),
-            lead_active: AtomicBool::new(true),
-            timer: AtomicPtr::new(null_mut()),
+            period_qpc: MainCell::new(period_qpc_for(target_fps)),
+            deadline_qpc: MainCell::new(0),
+            lead_active: MainCell::new(true),
+            timer: MainCell::new(null_mut()),
         }
     }
 
     /// Blocks until the next frame's deadline, then advances the deadline.
     /// Call once per `Present`.
-    pub(crate) fn wait(&self) {
-        debug_assert_main();
-        let period = self.period_qpc.load(Ordering::Relaxed);
+    pub(crate) fn wait(&self, tok: &MainToken) {
+        let period = self.period_qpc.get(tok);
         if period <= 0 {
             return;
         }
         let now = qpc();
-        let mut deadline = self.deadline_qpc.load(Ordering::Relaxed);
+        let mut deadline = self.deadline_qpc.get(tok);
         if deadline == 0 || now > deadline + *RESYNC_QPC_THRESHOLD {
             // This code is reached on first call or when beyond the resync threshold.
             // Below the threshold, the fall-through path below absorbs the gap via catchup-spring.
             deadline = now + period;
-            self.deadline_qpc.store(deadline, Ordering::Relaxed);
+            self.deadline_qpc.set(tok, deadline);
             return;
         }
         // Shift only the wait target, not the stored deadline.
         // Long-run cadence still locks to `target_fps`.
-        let target = if self.lead_active.load(Ordering::Relaxed) {
+        let target = if self.lead_active.get(tok) {
             deadline - period / 2
         } else {
             deadline
         };
         if now < target {
-            self.sleep_until(target, now);
+            self.sleep_until(tok, target, now);
         }
-        self.deadline_qpc
-            .store(deadline + period, Ordering::Relaxed);
+        self.deadline_qpc.set(tok, deadline + period);
     }
 
-    fn sleep_until(&self, deadline: i64, now: i64) {
+    fn sleep_until(&self, tok: &MainToken, deadline: i64, now: i64) {
         let freq = qpc_freq();
         let remaining_qpc = deadline - now;
-        let h = self.timer_handle();
+        let h = self.timer_handle(tok);
         if h.is_null() {
             let ms = qpc_to_ms(remaining_qpc, freq);
             if ms > 1 {
@@ -154,8 +143,8 @@ impl Pacer {
         spin_until(deadline);
     }
 
-    fn timer_handle(&self) -> HANDLE {
-        let cached = self.timer.load(Ordering::Relaxed);
+    fn timer_handle(&self, tok: &MainToken) -> HANDLE {
+        let cached = self.timer.get(tok);
         if !cached.is_null() {
             return cached;
         }
@@ -177,10 +166,8 @@ impl Pacer {
             };
         }
         info!(kind = "waitable_timer", path);
-        // We are single-writer (the `Present` thread is the sole caller of `wait`),
-        // so no CAS is needed. A null `h` is stored back so the retry
-        // on the next wait still has a chance to succeed.
-        self.timer.store(h, Ordering::Relaxed);
+        // A null `h` is stored back so the retry on the next wait still has a chance to succeed.
+        self.timer.set(tok, h);
         h
     }
 }
