@@ -279,28 +279,25 @@ unsafe extern "system" fn hook_create_device(
     returned_device: *mut *mut c_void,
 ) -> HRESULT {
     unsafe {
-        let pp_before = if pp.is_null() { None } else { Some(*pp) };
-
-        if !pp.is_null() {
-            rewrite_present_params(&mut *pp);
-        }
-
         // Exclusive fullscreen needs a populated `D3DDISPLAYMODEEX`; windowed needs `NULL`.
-        // We bind late so the struct is only built when the pointer is non-null.
-        let mut display_mode;
-        let display_mode_ptr: *mut D3DDISPLAYMODEEX = if !pp.is_null() && (*pp).Windowed.0 == 0 {
-            let p = &mut *pp;
-            let cfg = CONFIG.get().unwrap();
-            apply_refresh_override(p, this, adapter, cfg.display.refresh_rate);
-            display_mode = build_display_mode_ex(p, p.FullScreen_RefreshRateInHz);
-            &raw mut display_mode
-        } else {
-            null_mut()
+        let mut display_mode: Option<D3DDISPLAYMODEEX> = None;
+        let (pp_before, pp_after) = match pp.as_mut() {
+            Some(p) => {
+                let before = *p;
+                rewrite_present_params(p);
+                if p.Windowed.0 == 0 {
+                    let cfg = CONFIG.get().unwrap();
+                    apply_refresh_override(p, this, adapter, cfg.display.refresh_rate);
+                    display_mode = Some(build_display_mode_ex(p, p.FullScreen_RefreshRateInHz));
+                }
+                (Some(before), Some(*p))
+            }
+            None => (None, None),
         };
+        let display_mode_ptr: *mut D3DDISPLAYMODEEX =
+            display_mode.as_mut().map_or(null_mut(), |m| &raw mut *m);
 
-        let pp_after = if pp.is_null() { None } else { Some(*pp) };
-        // We log the configuration before the `CreateDeviceEx` call in case
-        // there's a crash inside `CreateDeviceEx`, so we can troubleshoot.
+        // Log before the `CreateDeviceEx` call so we have visibility if it crashes inside.
         info!(
             kind = "create_device_call",
             this = format_args!("{this:p}"),
@@ -693,9 +690,7 @@ unsafe extern "system" fn hook_present(
         pacer.wait();
 
         // Increment before `Present` so `PRESENT_COUNT` names the in-flight frame;
-        // a crash inside `Present` should leave the count at the attempted frame,
-        // not the last completed. The watchdog reads `PRESENT_COUNT` once per second for cadence;
-        // no additional per-frame heartbeat is needed here.
+        // a crash inside `Present` leaves the count at the attempted frame, not the last completed.
         PRESENT_COUNT.fetch_add(1, Ordering::Relaxed);
 
         call_real_present(this, src_rect, dst_rect, dest_window_override, dirty_region)
@@ -715,27 +710,27 @@ unsafe extern "system" fn hook_present(
 // take effect at the next `Reset`.
 unsafe extern "system" fn hook_reset(this: *mut c_void, pp: *mut D3DPRESENT_PARAMETERS) -> HRESULT {
     unsafe {
-        let pp_before = if pp.is_null() { None } else { Some(*pp) };
-        if !pp.is_null() {
-            rewrite_present_params(&mut *pp);
-        }
-
-        let mut display_mode;
-        let display_mode_ptr: *mut D3DDISPLAYMODEEX = if !pp.is_null() && (*pp).Windowed.0 == 0 {
-            let p = &mut *pp;
-            let cfg = CONFIG.get().unwrap();
-            apply_refresh_override(
-                p,
-                RESET_CTX.d3d9.load(Ordering::Acquire),
-                RESET_CTX.adapter.load(Ordering::Acquire),
-                cfg.display.refresh_rate,
-            );
-            display_mode = build_display_mode_ex(p, p.FullScreen_RefreshRateInHz);
-            &raw mut display_mode
-        } else {
-            null_mut()
+        let mut display_mode: Option<D3DDISPLAYMODEEX> = None;
+        let (pp_before, pp_after) = match pp.as_mut() {
+            Some(p) => {
+                let before = *p;
+                rewrite_present_params(p);
+                if p.Windowed.0 == 0 {
+                    let cfg = CONFIG.get().unwrap();
+                    apply_refresh_override(
+                        p,
+                        RESET_CTX.d3d9.load(Ordering::Acquire),
+                        RESET_CTX.adapter.load(Ordering::Acquire),
+                        cfg.display.refresh_rate,
+                    );
+                    display_mode = Some(build_display_mode_ex(p, p.FullScreen_RefreshRateInHz));
+                }
+                (Some(before), Some(*p))
+            }
+            None => (None, None),
         };
-        let pp_after = if pp.is_null() { None } else { Some(*pp) };
+        let display_mode_ptr: *mut D3DDISPLAYMODEEX =
+            display_mode.as_mut().map_or(null_mut(), |m| &raw mut *m);
 
         // Log before the call in case there's a crash inside `ResetEx`.
         let use_reset_ex = REAL_RESET_EX.get().is_some();
