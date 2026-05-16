@@ -7,6 +7,7 @@
 
 mod iat;
 mod modules;
+mod patches;
 mod protect;
 mod thread;
 mod vtable;
