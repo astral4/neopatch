@@ -7,6 +7,7 @@
 
 mod config;
 mod crash;
+mod gdi_caps;
 mod iat;
 mod log;
 mod modules;
@@ -174,6 +175,7 @@ unsafe fn install_hooks() {
         process::apply(&cfg.process);
 
         timer_period::install(host_exe);
+        gdi_caps::install(host_exe);
     }
 }
 
