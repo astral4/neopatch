@@ -5,6 +5,8 @@
 //! and `DllMain` runs before any game code. The exported `DirectInput8Create`
 //! forwards to the real System32 DLL we load by full path; everything else is hooks.
 
+mod thread;
+
 use std::ffi::c_void;
 use std::mem::transmute;
 use std::sync::OnceLock;
@@ -14,6 +16,7 @@ use windows_sys::Win32::System::LibraryLoader::{
 };
 use windows_sys::Win32::System::SystemInformation::GetSystemDirectoryW;
 use windows_sys::Win32::System::SystemServices::DLL_PROCESS_ATTACH;
+use windows_sys::Win32::System::Threading::GetCurrentThreadId;
 use windows_sys::core::{GUID, HRESULT};
 
 // Throughout the codebase, we assume x86.
@@ -139,7 +142,13 @@ pub unsafe extern "system" fn DirectInput8Create(
     unsafe { real(hinst, dw_version, riidltf, ppv_out, punk_outer) }
 }
 
-unsafe fn install_hooks() {}
+unsafe fn install_hooks() {
+    unsafe {
+        // `DllMain` runs on the `LoadLibrary` caller.
+        // For a static-imported, DLL this is the process' main thread.
+        thread::set_main_id(GetCurrentThreadId());
+    }
+}
 
 // This is a stub for SJLJ-built mingw-w64 toolchains whose `libgcc_eh.a`
 // doesn't provide `_Unwind_Resume`. Rust's precompiled standard library
