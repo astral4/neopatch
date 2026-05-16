@@ -8,6 +8,7 @@
 mod config;
 mod crash;
 mod dialog_dismiss;
+mod exit_hooks;
 mod gdi_caps;
 mod iat;
 mod log;
@@ -185,6 +186,7 @@ unsafe fn install_hooks() {
             cfg.display.mode,
         );
         dialog_dismiss::install(host_exe);
+        exit_hooks::install(host_exe);
     }
 }
 
