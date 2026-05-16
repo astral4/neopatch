@@ -14,6 +14,7 @@ mod patches;
 mod process;
 mod protect;
 mod thread;
+mod timer_period;
 mod vtable;
 
 use config::Config;
@@ -22,11 +23,12 @@ use std::ffi::c_void;
 use std::fs::read;
 use std::mem::transmute;
 use std::path::{Path, PathBuf};
+use std::ptr::null;
 use std::sync::OnceLock;
 use vtable::FnSlot;
 use windows_sys::Win32::Foundation::{E_FAIL, HINSTANCE, HMODULE, MAX_PATH};
 use windows_sys::Win32::System::LibraryLoader::{
-    DisableThreadLibraryCalls, GetProcAddress, LoadLibraryW,
+    DisableThreadLibraryCalls, GetModuleHandleW, GetProcAddress, LoadLibraryW,
 };
 use windows_sys::Win32::System::SystemInformation::GetSystemDirectoryW;
 use windows_sys::Win32::System::SystemServices::DLL_PROCESS_ATTACH;
@@ -164,7 +166,14 @@ unsafe fn install_hooks() {
 
         crash::install_handlers();
 
+        // Important: IAT patches should operate on th15.exe's import table, not ours!
+        // Passing our `hinst` would walk the wrong import directory
+        // and silently no-op for symbols we don't import ourselves.
+        let host_exe: HMODULE = GetModuleHandleW(null());
+
         process::apply(&cfg.process);
+
+        timer_period::install(host_exe);
     }
 }
 
