@@ -19,6 +19,7 @@ mod pacer;
 mod patches;
 mod process;
 mod protect;
+mod th15_patches;
 mod th15_state;
 mod thread;
 mod timer_period;
@@ -199,6 +200,8 @@ unsafe fn install_hooks() {
         _ = pacer::PACER.set(Pacer::new(cfg.framerate.game_fps));
 
         d3d9::install(host_exe);
+
+        th15_patches::apply_basic();
     }
 }
 
