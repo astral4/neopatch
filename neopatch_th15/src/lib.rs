@@ -6,6 +6,7 @@
 //! forwards to the real System32 DLL we load by full path; everything else is hooks.
 
 mod config;
+mod crash;
 mod iat;
 mod log;
 mod modules;
@@ -159,6 +160,8 @@ unsafe fn install_hooks() {
         // `DllMain` runs on the `LoadLibrary` caller.
         // For a static-imported, DLL this is the process' main thread.
         thread::set_main_id(GetCurrentThreadId());
+
+        crash::install_handlers();
     }
 }
 
