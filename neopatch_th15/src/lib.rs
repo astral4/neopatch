@@ -7,6 +7,7 @@
 
 mod config;
 mod crash;
+mod dialog_dismiss;
 mod gdi_caps;
 mod iat;
 mod log;
@@ -183,6 +184,7 @@ unsafe fn install_hooks() {
             cfg.display.resolution.dimensions(),
             cfg.display.mode,
         );
+        dialog_dismiss::install(host_exe);
     }
 }
 
