@@ -11,6 +11,7 @@ mod iat;
 mod log;
 mod modules;
 mod patches;
+mod process;
 mod protect;
 mod thread;
 mod vtable;
@@ -162,6 +163,8 @@ unsafe fn install_hooks() {
         thread::set_main_id(GetCurrentThreadId());
 
         crash::install_handlers();
+
+        process::apply(&cfg.process);
     }
 }
 
