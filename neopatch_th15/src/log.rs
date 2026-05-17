@@ -1,15 +1,14 @@
-//! Logging and `tracing_subscriber::Layer` implementation.
+//! Per-session logging.
 //!
-//! Each session writes to `<log_root>/<session_id>/` containing
-//! `manifest.txt`, `events.log`, and any minidumps.
-//! `<log_root>` is `<install_dir>\neopatch_logs\` when writable,
-//! falling back to `%LOCALAPPDATA%\neopatch\logs\`.
-//! The `Layer` prefixes every event with information like timestamps and thread IDs,
-//! and helps enforce consistent formatting.
+//! Each session writes `events.log`, `manifest.txt`, and any crash minidumps
+//! into a new `<log_root>/<session_id>/` directory. `<log_root>` defaults to
+//! `<install_dir>\neopatch_logs\`, falling back to `%LOCALAPPDATA%\neopatch\logs\`
+//! when the install dir isn't writable (e.g. Program Files).
 
 use crate::config::Config;
 use std::cell::{Cell, RefCell};
 use std::env::var;
+use std::ffi::c_void;
 use std::fmt::{Debug, Display, Write as _};
 use std::fs::{File, OpenOptions, create_dir_all, read_dir, remove_dir_all};
 use std::io::{BufWriter, Result as IoResult, Write};
@@ -17,7 +16,8 @@ use std::mem::zeroed;
 use std::num::NonZero;
 use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::ptr::null_mut;
+use std::sync::atomic::{AtomicPtr, AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 use tracing::field::{Field, Visit};
@@ -32,10 +32,15 @@ use windows_sys::Win32::System::SystemInformation::GetLocalTime;
 use windows_sys::Win32::System::Threading::{GetCurrentProcessId, GetCurrentThreadId};
 
 static FILE_WRITER: Mutex<Option<BufWriter<File>>> = Mutex::new(None);
+// We read lock-free from `flush` so the crash path can fsync even when
+// the same thread that crashed is holding `FILE_WRITER`. The `BufWriter` owns
+// the underlying `File` for the process lifetime by construction.
+static FILE_HANDLE: AtomicPtr<c_void> = AtomicPtr::new(null_mut());
 static SESSION_DIR: OnceLock<PathBuf> = OnceLock::new();
 static START: OnceLock<Instant> = OnceLock::new();
 
-/// Idempotent; subsequent calls are no-ops. Returns `false` for `LevelFilter::OFF`.
+/// Sets up the per-session log directory, opens `events.log`, writes `manifest.txt`,
+/// and installs the global tracing layer. No-op if logging is off or already initialized.
 pub(crate) fn init(install_dir: &Path, cfg: &Config, host_exe: Option<&Path>) -> bool {
     let log_cfg = &cfg.log;
     let Some(level) = log_cfg.level.into_level() else {
@@ -72,8 +77,12 @@ pub(crate) fn init(install_dir: &Path, cfg: &Config, host_exe: Option<&Path>) ->
     else {
         return false;
     };
+    // We publish `FILE_HANDLE` inside the same lock as `FILE_WRITER`
+    // so `flush` never sees one without the other.
+    let raw_handle: *mut c_void = file.as_raw_handle().cast();
     if let Ok(mut guard) = FILE_WRITER.lock() {
         *guard = Some(BufWriter::with_capacity(8192, file));
+        FILE_HANDLE.store(raw_handle, Ordering::Release);
     }
 
     drop(SESSION_DIR.set(session_dir.clone()));
@@ -90,35 +99,41 @@ pub(crate) fn init(install_dir: &Path, cfg: &Config, host_exe: Option<&Path>) ->
     true
 }
 
-/// Drains the `BufWriter` and calls `FlushFileBuffers`.
-/// The fsync runs outside the mutex so other threads can keep emitting events
-/// while the disk sync is in flight; the underlying `HANDLE`
-/// lasts for the lifetime of the process by construction.
+/// Forces pending log writes to disk. Safe to call from crash and exit hooks.
 pub(crate) fn flush() {
-    let raw = {
-        let Ok(mut guard) = FILE_WRITER.lock() else {
-            return;
-        };
-        let Some(writer) = guard.as_mut() else {
-            return;
-        };
+    // We use `Mutex::try_lock` instead of `Mutex::lock`. A crash handler can fire on a thread
+    // that's already inside the tracing layer holding `FILE_WRITER`, and `std::sync::Mutex`
+    // is non-reentrant. When `Mutex::try_lock` fails on this thread, we lose the small user-space
+    // buffer's pending bytes. However, the `FlushFileBuffers` call below still forces
+    // whatever has already reached the OS file cache out to disk via the cached `FILE_HANDLE`,
+    // which is set once at init and never invalidated.
+    if let Ok(mut guard) = FILE_WRITER.try_lock()
+        && let Some(writer) = guard.as_mut()
+    {
         drop(writer.flush());
-        writer.get_ref().as_raw_handle()
-    };
-    unsafe {
-        FlushFileBuffers(raw);
+    }
+    let raw = FILE_HANDLE.load(Ordering::Acquire);
+    if !raw.is_null() {
+        unsafe {
+            FlushFileBuffers(raw);
+        }
     }
 }
 
+/// Returns the per-session directory where crash handlers should write minidumps.
+/// Returns `None` before `init` has run.
 pub(crate) fn dump_dir() -> Option<&'static Path> {
     SESSION_DIR.get().map(PathBuf::as_path)
 }
 
+/// Returns the number of seconds since `init`.
+/// Returns `0.0` before `init`.
 pub(crate) fn elapsed_secs() -> f64 {
     START.get().map_or(0.0, |s| s.elapsed().as_secs_f64())
 }
 
-/// Integer-math counterpart to `elapsed_secs`, in milliseconds.
+/// Returns the number of milliseconds since `init`.
+/// Returns `0` before `init`.
 pub(crate) fn elapsed_ms() -> u64 {
     START.get().map_or(0, |s| {
         u64::try_from(s.elapsed().as_millis()).unwrap_or(u64::MAX)
@@ -184,8 +199,8 @@ fn apply_retention(log_root: &Path, keep: NonZero<u32>, current: &str) {
     }
 }
 
-/// Returns true if `name` matches the `YYYYMMDD_HHMMSS_pPID` format of
-/// `make_session_id`; false otherwise.
+/// Returns true if `name` matches the `YYYYMMDD_HHMMSS_pPID` format of make_session_id`;
+/// false otherwise.
 fn is_session_id(name: &str) -> bool {
     let bytes = name.as_bytes();
     // 15 ("YYYYMMDD_HHMMSS") + 2 ("_p") + at least one PID digit.
@@ -286,12 +301,11 @@ where
     }
 
     fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
-        // Per-thread reusable line buffer, plus a per-thread re-entry guard.
-        // The guard handles scenarios where this thread is already inside `on_event`
-        // holding `FILE_WRITER`, faults, and the vectored handler calls `error!`
-        // and then `on_event` again. `std::sync::Mutex` is non-reentrant,
-        // so recursing into `FILE_WRITER.lock()` on the owning thread would deadlock.
-        // We'd rather drop the diagnostic line.
+        // Per-thread line buffer to avoid per-event allocation, plus a re-entry guard.
+        // The guard prevents deadlock from recursion into `FILE_WRITER.lock()`
+        // when this thread is inside `on_event` holding `FILE_WRITER`
+        // while a crash handler fires `error!` on the same thread.
+        // When this happens, the guard drops the inner line instead.
         thread_local! {
             static LINE_BUF: RefCell<String> = RefCell::new(String::with_capacity(512));
             static IN_EVENT: Cell<bool> = const { Cell::new(false) };
@@ -343,9 +357,11 @@ impl Visit for FieldVisitor<'_> {
     }
 }
 
-/// Caps the number of times an info site can fire.
-/// The first `limit` calls return `Some(n)` (0-indexed); subsequent calls return `None`.
-/// This is used at call sites that would otherwise flood the log on a loop or per-frame path.
+/// Bounded counter for log sites.
+///
+/// The first `limit` calls to `LogCap::tick` return `Some(n)` (0-indexed).
+/// Subsequent calls return `None`. This can be used to gate `info!`/`warn!`
+/// on a per-frame or loop path so a single such site doesn't flood the log.
 pub(crate) struct LogCap {
     count: AtomicU32,
     limit: u32,
