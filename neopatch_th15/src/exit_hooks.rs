@@ -2,7 +2,7 @@
 //! Includes handlers for `ExitProcess`, `TerminateProcess`, `MessageBoxA`/`MessageBoxW`,
 //! `RaiseException`, and `CreateThread` (for thread provenance).
 
-use crate::crash::safe_read;
+use crate::crash::{safe_read, safe_read_until};
 use crate::iat_hook;
 use crate::log::flush;
 use std::ffi::c_void;
@@ -171,18 +171,14 @@ fn pcstr_to_string(p: PCSTR) -> String {
     if p.is_null() {
         return String::from("<null>");
     }
-    let mut raw = [0u8; 4096];
-    let n = safe_read(p, &mut raw);
-    let len = raw[..n].iter().position(|&b| b == 0).unwrap_or(n);
-    String::from_utf8_lossy(&raw[..len]).into_owned()
+    let mut buf = [0u8; 4096];
+    String::from_utf8_lossy(safe_read_until(p, &mut buf, 0)).into_owned()
 }
 
 fn pcwstr_to_string(p: PCWSTR) -> String {
     if p.is_null() {
         return String::from("<null>");
     }
-    let mut raw = [0u16; 4096];
-    let n = safe_read(p, &mut raw);
-    let len = raw[..n].iter().position(|&w| w == 0).unwrap_or(n);
-    String::from_utf16_lossy(&raw[..len])
+    let mut buf = [0u16; 4096];
+    String::from_utf16_lossy(safe_read_until(p, &mut buf, 0))
 }

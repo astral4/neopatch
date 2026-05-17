@@ -1,7 +1,7 @@
 //! Window setup and hooking.
 
 use crate::config::{DisplayMode, WindowCfg, WindowFrame};
-use crate::crash::safe_read;
+use crate::crash::{safe_read, safe_read_until};
 use crate::iat_hook;
 use std::ffi::c_void;
 use std::num::NonZero;
@@ -191,9 +191,7 @@ fn build_extended_title(original: *const u8) -> Vec<u16> {
     const CP_SHIFT_JIS: u32 = 932;
     const BUF_LEN: usize = 512;
     let mut buf = [0u8; BUF_LEN];
-    let n = safe_read(original, &mut buf);
-    let len = buf[..n].iter().position(|&b| b == 0).unwrap_or(n);
-    let sjis = &buf[..len];
+    let sjis = safe_read_until(original, &mut buf, 0);
 
     let mut wide = vec![0u16; sjis.len()];
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]

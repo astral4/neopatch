@@ -305,6 +305,18 @@ pub(crate) fn safe_read<T: Copy>(src: *const T, buf: &mut [T]) -> usize {
     ) / size_of::<T>()
 }
 
+/// `safe_read`s into `buf`, then returns the populated prefix up to (but excluding)
+/// the first `terminator` element (or the full read length if no terminator is found).
+pub(crate) fn safe_read_until<T: Copy + PartialEq>(
+    src: *const T,
+    buf: &mut [T],
+    terminator: T,
+) -> &[T] {
+    let n = safe_read(src, buf);
+    let len = buf[..n].iter().position(|t| *t == terminator).unwrap_or(n);
+    &buf[..len]
+}
+
 /// Best-effort copy of up to `N` `u32`s starting at `esp`.
 /// Returns the number of complete dwords successfully read.
 /// Partial trailing dwords (`ReadProcessMemory` stopping mid-`u32` at a page boundary) are zeroed.
