@@ -1,7 +1,7 @@
 //! Constructs for main-thread identity, access, and mutable statics.
 //!
 //! `MAIN_TID` is set once from `DllMain` via `lib.rs::install_hooks`.
-//! `MainToken` is a zero-sized witness that the holding thread is the main render thread.
+//! `MainToken` is a ZST witness that the holding thread is the main render thread.
 //! It is `!Send + !Sync`, so rustc rejects any code that tries to move it
 //! or share it across threads. Accessors on `MainCell<T>` take `&MainToken`,
 //! propagating the "main-thread only" requirement to every call site at the type level.
