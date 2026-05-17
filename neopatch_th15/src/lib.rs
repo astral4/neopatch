@@ -37,7 +37,7 @@ use std::fs::read;
 use std::path::{Path, PathBuf};
 use std::ptr::null;
 use tracing::level_filters::LevelFilter;
-use vtable::FnSlot;
+use vtable::{FnSlot, parse_fn_ptr};
 use windows_sys::Win32::Foundation::{E_FAIL, HINSTANCE, HMODULE, MAX_PATH};
 use windows_sys::Win32::System::LibraryLoader::{
     DisableThreadLibraryCalls, GetModuleHandleW, GetProcAddress, LoadLibraryW,
@@ -126,8 +126,10 @@ fn load_real_dinput8() {
     if dll.is_null() {
         return;
     }
-    if let Some(f) = unsafe { GetProcAddress(dll, c"DirectInput8Create".as_ptr().cast()) } {
-        REAL_DIRECT_INPUT_8_CREATE.store_raw(f as *mut ());
+    if let Some(f) = unsafe { GetProcAddress(dll, c"DirectInput8Create".as_ptr().cast()) }
+        && let Some(real) = parse_fn_ptr::<DirectInput8CreateFn>(f as *mut ())
+    {
+        REAL_DIRECT_INPUT_8_CREATE.store(real);
     }
 }
 

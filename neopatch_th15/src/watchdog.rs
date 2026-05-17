@@ -73,19 +73,14 @@ pub(crate) fn install() {
 
 /// Returns the kernel-object type name (`Event`, `Mutex`, `Thread`, etc.)
 /// for `handle`, or `None` on any failure.
-fn lookup_handle_type(handle: u32) -> Option<String> {
-    // Callers pass raw stack words (`s.stack[1]`) which legitimately may be 0
-    // when the thread isn't in a wait, so there's a 0-as-invalid check here.
-    if handle == 0 {
-        return None;
-    }
+fn lookup_handle_type(handle: NonZero<u32>) -> Option<String> {
     unsafe {
         let mut buf = [0u8; 1024];
         let mut returned: u32 = 0;
         #[allow(clippy::cast_possible_truncation)]
         let buf_len = buf.len() as u32;
         let status = NtQueryObject(
-            with_exposed_provenance_mut::<c_void>(handle as usize),
+            with_exposed_provenance_mut::<c_void>(handle.get() as usize),
             ObjectTypeInformation,
             buf.as_mut_ptr().cast(),
             buf_len,
@@ -264,9 +259,11 @@ fn snapshot_stuck(iter: u64, frame: u64) {
     // and emit only headers for the rest.
     let handle_value = s.stack[1];
     let mut wait_target_tid: Option<NonZero<u32>> = None;
-    if let Some(ty) = lookup_handle_type(handle_value) {
+    if let Some(handle) = NonZero::new(handle_value)
+        && let Some(ty) = lookup_handle_type(handle)
+    {
         let raw_tid =
-            unsafe { GetThreadId(with_exposed_provenance_mut::<c_void>(handle_value as usize)) };
+            unsafe { GetThreadId(with_exposed_provenance_mut::<c_void>(handle.get() as usize)) };
         wait_target_tid = NonZero::new(raw_tid);
         if let Some(tid) = wait_target_tid {
             info!("  wait handle: {handle_value:#010x} type={ty} -> tid={tid}");
@@ -293,7 +290,8 @@ fn snapshot_stuck(iter: u64, frame: u64) {
             |a| annotate(a.get(), &modules),
         );
         let handle = sample.stack[1];
-        let handle_suffix = lookup_handle_type(handle)
+        let handle_suffix = NonZero::new(handle)
+            .and_then(lookup_handle_type)
             .map(|ty| format!(" wait={handle:#010x} type={ty}"))
             .unwrap_or_default();
         info!(

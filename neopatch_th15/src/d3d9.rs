@@ -25,9 +25,9 @@ use crate::patches::{BranchKind, patch_relative_branch};
 use crate::th15_state::{ReplayMode, replay_mode};
 use crate::thread::{MainCell, MainToken};
 use crate::vtable::{capture_slot, install_vtable};
-use crate::{iat_hook, match_named, vtable_slot};
+use crate::{iat_hook, match_named, vtable_slot, vtbl_field};
 use std::ffi::c_void;
-use std::ptr::{null, null_mut};
+use std::ptr::{NonNull, null, null_mut};
 use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::{info, warn};
 use windows::Win32::Foundation::{HANDLE, HWND, RECT};
@@ -239,25 +239,32 @@ unsafe extern "system" fn hook_direct3dcreate9(sdk_version: u32) -> *mut c_void 
         };
         // `into_raw` transfers the ref to the game without `Release`.
         let p_ex: *mut c_void = ex.into_raw();
-        install_d3d9_hooks(p_ex);
+        let Some(p_ex_nn) = NonNull::new(p_ex) else {
+            return null_mut();
+        };
+        install_d3d9_hooks(p_ex_nn);
         info!(kind = "d3d9_init", p_ex = format_args!("{p_ex:p}"));
         p_ex
     }
 }
 
-unsafe fn install_d3d9_hooks(d3d9_ex: *mut c_void) {
+unsafe fn install_d3d9_hooks(d3d9_ex: NonNull<c_void>) {
     unsafe {
-        let vtbl: *mut IDirect3D9Ex_Vtbl = *d3d9_ex.cast::<*mut IDirect3D9Ex_Vtbl>();
+        let vtbl: *mut IDirect3D9Ex_Vtbl = *d3d9_ex.as_ptr().cast();
+        let Some(vtbl) = NonNull::new(vtbl) else {
+            warn!(kind = "d3d9_vtbl_null", p_ex = format_args!("{d3d9_ex:p}"));
+            return;
+        };
 
         // `CreateDeviceEx` and `GetAdapterDisplayModeEx` are read, not patched.
         capture_slot(
             vtbl,
-            |v| &raw const (*v).CreateDeviceEx,
+            vtbl_field!(IDirect3D9Ex_Vtbl, CreateDeviceEx),
             &REAL_CREATE_DEVICE_EX,
         );
         capture_slot(
             vtbl,
-            |v| &raw const (*v).GetAdapterDisplayModeEx,
+            vtbl_field!(IDirect3D9Ex_Vtbl, GetAdapterDisplayModeEx),
             &REAL_GET_ADAPTER_DISPLAY_MODE_EX,
         );
 
@@ -266,13 +273,13 @@ unsafe fn install_d3d9_hooks(d3d9_ex: *mut c_void) {
             // rather than chaining through to the displaced `CreateDevice`.
             scope.redirect(
                 &REDIRECT_CREATE_DEVICE,
-                |v| &raw mut (*v).base__.CreateDevice,
+                vtbl_field!(IDirect3D9Ex_Vtbl, base__.CreateDevice),
                 "IDirect3D9::CreateDevice",
                 hook_create_device,
             );
             scope.intercept(
                 &REAL_CHECK_DEVICE_FORMAT,
-                |v| &raw mut (*v).base__.CheckDeviceFormat,
+                vtbl_field!(IDirect3D9Ex_Vtbl, base__.CheckDeviceFormat),
                 "IDirect3D9::CheckDeviceFormat",
                 hook_check_device_format,
             );
@@ -342,7 +349,9 @@ unsafe extern "system" fn hook_create_device(
             hr = fmt_hr!(hr),
             device = format_args!("{dev:p}"),
         );
-        if hr.is_ok() && !dev.is_null() {
+        if hr.is_ok()
+            && let Some(dev) = NonNull::new(dev)
+        {
             // Apparently D3D9Ex breaks the window style on `CreateDeviceEx`.
             // OILP's `CreateDevice_hook` applies the same `SWP_SHOWWINDOW` fix.
             // Without it, the game's main pump doesn't run properly.
@@ -471,15 +480,15 @@ fn compute_refresh_rate(mode: RefreshRateMode, current_rate: u32) -> u32 {
 /// so frames spend less time enqueued before display, shaving up to two frames of end-to-display latency.
 /// `SetGPUThreadPriority(7)` reduces CPU-scheduler jitter
 /// on a contended D3D9Ex worker thread marshalling `Present`.
-unsafe fn apply_device_ex_tunables(dev: *mut c_void) {
+unsafe fn apply_device_ex_tunables(dev: NonNull<c_void>) {
     unsafe {
-        let latency_hr = call_real_set_max_frame_latency(dev, 1);
+        let latency_hr = call_real_set_max_frame_latency(dev.as_ptr(), 1);
         info!(
             kind = "set_max_frame_latency",
             value = 1,
             hr = %fmt_hr!(latency_hr),
         );
-        let gpu_pri_hr = call_real_set_gpu_thread_priority(dev, 7);
+        let gpu_pri_hr = call_real_set_gpu_thread_priority(dev.as_ptr(), 7);
         info!(
             kind = "set_gpu_thread_priority",
             value = 7,
@@ -488,44 +497,52 @@ unsafe fn apply_device_ex_tunables(dev: *mut c_void) {
     }
 }
 
-unsafe fn install_device_hooks(dev: *mut c_void) {
+unsafe fn install_device_hooks(dev: NonNull<c_void>) {
     unsafe {
-        let vtbl: *mut IDirect3DDevice9Ex_Vtbl = *dev.cast();
+        let vtbl: *mut IDirect3DDevice9Ex_Vtbl = *dev.as_ptr().cast();
+        let Some(vtbl) = NonNull::new(vtbl) else {
+            warn!(kind = "device_vtbl_null", dev = format_args!("{dev:p}"));
+            return;
+        };
 
-        capture_slot(vtbl, |v| &raw const (*v).ResetEx, &REAL_RESET_EX);
         capture_slot(
             vtbl,
-            |v| &raw const (*v).SetMaximumFrameLatency,
+            vtbl_field!(IDirect3DDevice9Ex_Vtbl, ResetEx),
+            &REAL_RESET_EX,
+        );
+        capture_slot(
+            vtbl,
+            vtbl_field!(IDirect3DDevice9Ex_Vtbl, SetMaximumFrameLatency),
             &REAL_SET_MAX_FRAME_LATENCY,
         );
         capture_slot(
             vtbl,
-            |v| &raw const (*v).SetGPUThreadPriority,
+            vtbl_field!(IDirect3DDevice9Ex_Vtbl, SetGPUThreadPriority),
             &REAL_SET_GPU_THREAD_PRIORITY,
         );
 
         let result = install_vtable(vtbl, |scope| {
             scope.intercept(
                 &REAL_RESET,
-                |v| &raw mut (*v).base__.Reset,
+                vtbl_field!(IDirect3DDevice9Ex_Vtbl, base__.Reset),
                 "Reset",
                 hook_reset,
             );
             scope.intercept(
                 &REAL_PRESENT,
-                |v| &raw mut (*v).base__.Present,
+                vtbl_field!(IDirect3DDevice9Ex_Vtbl, base__.Present),
                 "Present",
                 hook_present,
             );
             scope.intercept(
                 &REAL_CREATE_TEXTURE,
-                |v| &raw mut (*v).base__.CreateTexture,
+                vtbl_field!(IDirect3DDevice9Ex_Vtbl, base__.CreateTexture),
                 "CreateTexture",
                 hook_create_texture,
             );
             scope.intercept(
                 &REAL_CREATE_VERTEX_BUFFER,
-                |v| &raw mut (*v).base__.CreateVertexBuffer,
+                vtbl_field!(IDirect3DDevice9Ex_Vtbl, base__.CreateVertexBuffer),
                 "CreateVertexBuffer",
                 hook_create_vertex_buffer,
             );

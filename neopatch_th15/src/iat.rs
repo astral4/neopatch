@@ -6,10 +6,11 @@
 //! so a hook with a mismatched signature is a compile error.
 
 use crate::protect::with_writable;
-use crate::vtable::{FnSlot, hook_to_raw};
+use crate::vtable::{FnSlot, hook_to_raw, parse_fn_ptr};
 use std::ffi::{CStr, c_char};
 use std::mem::offset_of;
-use std::ptr::{read_unaligned, write_unaligned};
+use std::ptr::{NonNull, read_unaligned, write_unaligned};
+use std::sync::atomic::{Ordering, fence};
 use tracing::{info, warn};
 use windows_sys::Win32::Foundation::HMODULE;
 use windows_sys::Win32::System::Diagnostics::Debug::{
@@ -92,14 +93,22 @@ impl<F: Copy + Send + Sync + 'static> IatHook<F> {
             warn!(kind = "iat_hook", name = name_str, status = "MISS");
             return false;
         };
-        // Capture-then-write inside the same writable window so a concurrent caller
-        // can't observe the new pointer before the original is stored
-        // and the trampoline never sees an uncaptured slot.
+        let slot_raw = slot_ptr.as_ptr();
+        // Probe outside the writable window. This is fine because reads don't need
+        // write permission, and an unresolved import (null slot) is detected
+        // without touching protection.
+        let raw_current: *mut () = unsafe { read_unaligned(slot_raw) };
+        let Some(original) = parse_fn_ptr::<F>(raw_current) else {
+            warn!(kind = "iat_hook", name = name_str, status = "MISS_NULL");
+            return false;
+        };
+        self.slot.store(original);
+        // Release fence: order `slot.store` before the IAT write so trampolines reading
+        // the new IAT value also see the captured `original` via `FnSlot::try_get`.
         let written = unsafe {
-            with_writable(slot_ptr.cast::<u8>(), size_of::<*mut ()>(), |_| {
-                let old: *mut () = read_unaligned(slot_ptr);
-                self.slot.store_raw(old);
-                write_unaligned(slot_ptr, hook_raw);
+            with_writable(slot_raw.cast::<u8>(), size_of::<*mut ()>(), |_| {
+                fence(Ordering::Release);
+                write_unaligned(slot_raw, hook_raw);
             })
         };
         if written.is_some() {
@@ -155,7 +164,7 @@ unsafe fn data_directory(module: HMODULE, idx: usize) -> Option<(*const u8, u32)
 /// and returns a pointer to the `FirstThunk` slot for the hit, or `None`.
 /// `module` should always be the game (e.g. th15.exe via `GetModuleHandleW(NULL)`),
 /// never our own DLL.
-unsafe fn find_iat_slot(module: HMODULE, import_name: &CStr) -> Option<*mut *mut ()> {
+unsafe fn find_iat_slot(module: HMODULE, import_name: &CStr) -> Option<NonNull<*mut ()>> {
     unsafe {
         let (imp_dir, _) = data_directory(module, IMAGE_DIRECTORY_ENTRY_IMPORT as usize)?;
         let base_mut = module.cast::<u8>();
@@ -208,7 +217,7 @@ unsafe fn find_iat_slot(module: HMODULE, import_name: &CStr) -> Option<*mut *mut
                         // and `write_unaligned`, so the alignment bump from `*mut u8` is fine.
                         #[allow(clippy::cast_ptr_alignment)]
                         let slot = base_mut.add(slot_offset).cast::<*mut ()>();
-                        return Some(slot);
+                        return NonNull::new(slot);
                     }
                 }
                 i += 1;
