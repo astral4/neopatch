@@ -9,6 +9,7 @@ use crate::d3d9::{format_name, out_ptr, translate_managed_pool};
 use crate::log::LogCap;
 use crate::{fmt_hr, iat_hook};
 use std::ffi::c_void;
+use std::num::NonZero;
 use tracing::info;
 use windows::Win32::Graphics::Direct3D9::{D3DFORMAT, D3DPOOL};
 use windows::core::HRESULT;
@@ -50,8 +51,8 @@ iat_hook! {
         ) -> HRESULT;
 }
 
-static D3DX_CREATE_TEX_LOG: LogCap = LogCap::new(32);
-static D3DX_CREATE_FROM_MEM_LOG: LogCap = LogCap::new(32);
+static D3DX_CREATE_TEX_LOG: LogCap = LogCap::new(NonZero::new(32).unwrap());
+static D3DX_CREATE_FROM_MEM_LOG: LogCap = LogCap::new(NonZero::new(32).unwrap());
 
 pub(crate) unsafe fn install(host: HMODULE) {
     unsafe {

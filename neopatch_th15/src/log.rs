@@ -364,11 +364,11 @@ impl Visit for FieldVisitor<'_> {
 /// on a per-frame or loop path so a single such site doesn't flood the log.
 pub(crate) struct LogCap {
     count: AtomicU32,
-    limit: u32,
+    limit: NonZero<u32>,
 }
 
 impl LogCap {
-    pub(crate) const fn new(limit: u32) -> Self {
+    pub(crate) const fn new(limit: NonZero<u32>) -> Self {
         Self {
             count: AtomicU32::new(0),
             limit,
@@ -378,11 +378,12 @@ impl LogCap {
     pub(crate) fn tick(&self) -> Option<u32> {
         // Early-return via `load` introduces a race window, but the window
         // can leak at most one extra increment past the limit, which is harmless.
-        if self.count.load(Ordering::Relaxed) >= self.limit {
+        let limit = self.limit.get();
+        if self.count.load(Ordering::Relaxed) >= limit {
             return None;
         }
         let n = self.count.fetch_add(1, Ordering::Relaxed);
-        if n < self.limit { Some(n) } else { None }
+        if n < limit { Some(n) } else { None }
     }
 }
 

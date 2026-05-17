@@ -8,6 +8,7 @@ use crate::match_named;
 use crate::untrusted::safe_read_stack;
 use std::fmt::Write as _;
 use std::iter::once;
+use std::num::NonZero;
 use std::os::windows::ffi::OsStrExt;
 use std::path::PathBuf;
 use std::ptr::{null, null_mut};
@@ -54,7 +55,7 @@ static IN_FILTER: AtomicBool = AtomicBool::new(false);
 
 /// Cap log volume from noisy first-chance benign codes
 /// while still preserving the first few entries in case they lead up to a crash.
-static BENIGN_LOG: LogCap = LogCap::new(16);
+static BENIGN_LOG: LogCap = LogCap::new(NonZero::new(16).unwrap());
 
 static DUMP_SEQ: AtomicU32 = AtomicU32::new(0);
 

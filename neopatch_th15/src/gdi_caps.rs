@@ -5,6 +5,7 @@
 
 use crate::iat_hook;
 use crate::log::LogCap;
+use std::num::NonZero;
 use tracing::info;
 use windows::Win32::Graphics::Gdi::{HDC, VREFRESH as SDK_VREFRESH};
 use windows_sys::Win32::Foundation::HMODULE;
@@ -17,7 +18,7 @@ iat_hook! {
         as fn(hdc: HDC, index: i32) -> i32;
 }
 
-static VREFRESH_LOG: LogCap = LogCap::new(1);
+static VREFRESH_LOG: LogCap = LogCap::new(NonZero::new(1).unwrap());
 
 pub(crate) unsafe fn install(host: HMODULE) {
     unsafe {

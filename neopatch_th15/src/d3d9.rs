@@ -27,6 +27,7 @@ use crate::thread::{MainCell, MainToken};
 use crate::vtable::{capture_slot, install_vtable};
 use crate::{iat_hook, match_named, vtable_slot, vtbl_field};
 use std::ffi::c_void;
+use std::num::NonZero;
 use std::ptr::{NonNull, null, null_mut};
 use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::{info, warn};
@@ -191,9 +192,9 @@ iat_hook! {
         as fn(sdk_version: u32) -> *mut c_void;
 }
 
-static TEX_LOG: LogCap = LogCap::new(64);
-static VBUF_LOG: LogCap = LogCap::new(64);
-static CHECK_DEVICE_FORMAT_LOG: LogCap = LogCap::new(64);
+static TEX_LOG: LogCap = LogCap::new(NonZero::new(64).unwrap());
+static VBUF_LOG: LogCap = LogCap::new(NonZero::new(64).unwrap());
+static CHECK_DEVICE_FORMAT_LOG: LogCap = LogCap::new(NonZero::new(64).unwrap());
 
 /// Incremented on every `hook_present`. This is read by `watchdog::watchdog_loop`
 /// to annotate ticks with the current frame number.
