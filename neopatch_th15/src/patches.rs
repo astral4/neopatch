@@ -91,7 +91,7 @@ pub(crate) unsafe fn patch_bytes_verified(addr: usize, src: &[u8], name: &str) {
 #[allow(clippy::cast_possible_truncation)]
 pub(crate) unsafe fn patch_relative_branch(
     target: usize,
-    hook: usize,
+    hook: *mut (),
     kind: BranchKind,
     name: &str,
 ) {
@@ -119,7 +119,7 @@ pub(crate) unsafe fn patch_relative_branch(
         );
         let read_disp = i32::from_le_bytes([actual[1], actual[2], actual[3], actual[4]]);
         let resolved = target_u32.wrapping_add(5).wrapping_add_signed(read_disp);
-        if actual[0] == opcode && resolved as usize == hook {
+        if actual[0] == opcode && resolved == hook_u32 {
             info!(
                 kind = "patch_verify",
                 addr = format_args!("{target:#010x}"),
@@ -127,7 +127,7 @@ pub(crate) unsafe fn patch_relative_branch(
                 expected = %bytes_hex(&bytes[..len]),
                 actual = %bytes_hex(&actual[..len]),
                 resolved_target = format_args!("{resolved:#010x}"),
-                expected_target = format_args!("{hook:#010x}"),
+                expected_target = format_args!("{hook_u32:#010x}"),
                 status = "OK",
             );
         } else {
@@ -138,7 +138,7 @@ pub(crate) unsafe fn patch_relative_branch(
                 expected = %bytes_hex(&bytes[..len]),
                 actual = %bytes_hex(&actual[..len]),
                 resolved_target = format_args!("{resolved:#010x}"),
-                expected_target = format_args!("{hook:#010x}"),
+                expected_target = format_args!("{hook_u32:#010x}"),
                 status = "MISMATCH",
             );
         }

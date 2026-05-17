@@ -222,7 +222,7 @@ pub(crate) unsafe fn install(host: HMODULE) {
         REAL_DIRECT3D_CREATE9.install(host, hook_direct3dcreate9);
         patch_relative_branch(
             TH15_DIRECT3DCREATE9_CALL_ADDR,
-            hook_direct3dcreate9 as *const () as usize,
+            hook_direct3dcreate9 as *mut (),
             BranchKind::CallOverIndirect,
             "Direct3DCreate9 call-site rewrite",
         );

@@ -142,11 +142,9 @@ unsafe extern "thiscall" fn hooked_fcn_0044bed0(this: *mut c_void) -> i32 {
 /// We hook at the function entry (rather than at every call site) just to be sure.
 pub(crate) unsafe fn install_destructor_hook() {
     unsafe {
-        let h_0044bed0 = hooked_fcn_0044bed0 as *const () as usize;
-
         patch_relative_branch(
             FCN_0044BED0,
-            h_0044bed0,
+            hooked_fcn_0044bed0 as *mut (),
             BranchKind::Jmp,
             "fcn.0044bed0 entry-jmp -> hooked_fcn_0044bed0",
         );
