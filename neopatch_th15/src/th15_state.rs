@@ -1,13 +1,16 @@
 //! Direct reads of game state for th15.exe v1.00b.
 
-use std::ptr::{read_volatile, with_exposed_provenance};
+use crate::game_addr::GameAddr;
+use std::ffi::c_void;
+use std::ptr::read_volatile;
 use tracing::info;
 
 /// `CReplayManager**`; null outside the replay menu.
-const REPLAY_MGR_INSTANCE_PTR_ADDR: usize = 0x004e_9bc4;
+const REPLAY_MGR_INSTANCE_PTR: GameAddr<*const CReplayManager> =
+    unsafe { GameAddr::new(0x004e_9bc4) };
 const REPLAY_MODE_VIEWER: i32 = 1;
 
-const INPUT_STATE_ADDR: usize = 0x004e_6d10;
+const INPUT_STATE: GameAddr<u32> = unsafe { GameAddr::new(0x004e_6d10) };
 const INPUT_SHOOT: u32 = 0x1;
 const INPUT_FOCUS: u32 = 0x8;
 const INPUT_SKIP: u32 = 0x200;
@@ -30,26 +33,24 @@ pub(crate) enum ReplayMode {
 }
 
 #[inline]
-pub(crate) unsafe fn replay_mode() -> ReplayMode {
-    unsafe {
-        let mgr = read_volatile(with_exposed_provenance::<*const CReplayManager>(
-            REPLAY_MGR_INSTANCE_PTR_ADDR,
-        ));
-        if mgr.is_null() {
-            return ReplayMode::Normal;
-        }
-        let mode = read_volatile(&raw const (*mgr).mode);
-        if mode != REPLAY_MODE_VIEWER {
-            return ReplayMode::Normal;
-        }
-        let input = read_volatile(with_exposed_provenance::<u32>(INPUT_STATE_ADDR));
-        if input & INPUT_FOCUS != 0 {
-            ReplayMode::Slow
-        } else if input & (INPUT_SHOOT | INPUT_SKIP) != 0 {
-            ReplayMode::Skip
-        } else {
-            ReplayMode::Normal
-        }
+pub(crate) fn replay_mode() -> ReplayMode {
+    let mgr = REPLAY_MGR_INSTANCE_PTR.read();
+    if mgr.is_null() {
+        return ReplayMode::Normal;
+    }
+    // `mgr.mode` is pointer-derived, not a fixed game address: we just read the pointer
+    // from `REPLAY_MGR_INSTANCE_PTR`. So, it stays as a direct volatile read.
+    let mode = unsafe { read_volatile(&raw const (*mgr).mode) };
+    if mode != REPLAY_MODE_VIEWER {
+        return ReplayMode::Normal;
+    }
+    let input = INPUT_STATE.read();
+    if input & INPUT_FOCUS != 0 {
+        ReplayMode::Slow
+    } else if input & (INPUT_SHOOT | INPUT_SKIP) != 0 {
+        ReplayMode::Skip
+    } else {
+        ReplayMode::Normal
     }
 }
 
@@ -58,34 +59,37 @@ pub(crate) unsafe fn replay_mode() -> ReplayMode {
 /// Each slot pointing at a 316-byte anim object whose `+0x128`
 /// is the spin counter polled by `preloadAnim`.
 pub(crate) unsafe fn log_anim_counters() {
-    const CTX_PTR_ADDR: usize = 0x0050_3C18;
+    // Pointer to the anim-preload manager.
+    const ANIM_CTX_PTR: GameAddr<*const c_void> = unsafe { GameAddr::new(0x0050_3C18) };
     const SLOT_TABLE_OFFSET: usize = 0x0187_F4D8;
     const COUNTER_OFFSET: usize = 0x128;
     const SLOT_COUNT: usize = 30;
 
-    // SAFETY: `0x00503c18` is in th15.exe's `.data`, mapped readable
-    // for the process lifetime. All three reads are `u32`-aligned.
-    let ctx = unsafe { read_volatile(with_exposed_provenance::<u32>(CTX_PTR_ADDR)) };
-    if ctx == 0 {
+    let ctx = ANIM_CTX_PTR.read();
+    if ctx.is_null() {
         info!("  anim_ctx ([0x503c18]) = NULL, manager not initialized yet",);
         return;
     }
 
     let mut populated = 0u32;
     for idx in 0..SLOT_COUNT {
-        let slot_addr = (ctx as usize)
-            .wrapping_add(SLOT_TABLE_OFFSET)
-            .wrapping_add(idx * 4);
-        let anim = unsafe { read_volatile(with_exposed_provenance::<u32>(slot_addr)) };
-        if anim == 0 {
+        let slot_ptr = ctx
+            .wrapping_byte_add(SLOT_TABLE_OFFSET)
+            .wrapping_byte_add(idx * 4)
+            .cast::<*const c_void>();
+        let anim = unsafe { read_volatile(slot_ptr) };
+        if anim.is_null() {
             continue;
         }
-        let counter_addr = (anim as usize).wrapping_add(COUNTER_OFFSET);
-        let counter = unsafe { read_volatile(with_exposed_provenance::<u32>(counter_addr)) };
-        info!("  anim[{idx:2}] = {anim:#010x}  [+0x128] = {counter}",);
+        let counter_ptr = anim.wrapping_byte_add(COUNTER_OFFSET).cast::<u32>();
+        let counter = unsafe { read_volatile(counter_ptr) };
+        info!(
+            "  anim[{idx:2}] = {:#010x}  [+0x128] = {counter}",
+            anim as usize,
+        );
         populated += 1;
     }
     if populated == 0 {
-        info!("  anim_ctx = {ctx:#010x}, all 30 slots empty",);
+        info!("  anim_ctx = {:#010x}, all 30 slots empty", ctx as usize);
     }
 }

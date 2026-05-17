@@ -11,6 +11,7 @@ mod d3d9;
 mod d3dx9;
 mod dialog_dismiss;
 mod exit_hooks;
+mod game_addr;
 mod gdi_caps;
 mod iat;
 mod log;

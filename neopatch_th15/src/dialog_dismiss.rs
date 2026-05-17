@@ -6,10 +6,10 @@
 //! using `PostMessage` to send an OK click and set the pump's exit-flag bit.
 
 use crate::config::{CONFIG, DisplayMode};
+use crate::game_addr::GameAddr;
 use crate::iat_hook;
 use crate::patches::{Patch, patch_bytes_verified};
 use std::ffi::c_char;
-use std::ptr::{read_volatile, with_exposed_provenance_mut, write_volatile};
 use tracing::info;
 use windows_sys::Win32::Foundation::{HMODULE, HWND, LPARAM, WPARAM};
 use windows_sys::Win32::UI::Controls::{
@@ -36,7 +36,7 @@ const OK_BUTTON_ID: u32 = 0xD0;
 
 /// The pump exit predicate at `0x4716A2` is `test [0x4e6d1c], 0x80001`.
 /// We set bit 19 ("Enter accept") to terminate the pump after the posted OK click is dispatched.
-const EXIT_FLAG_ADDR: usize = 0x004E_6D1C;
+const EXIT_FLAG: GameAddr<u32> = unsafe { GameAddr::new(0x004E_6D1C) };
 const EXIT_FLAG_BIT: u32 = 0x0008_0000;
 
 /// "force resolution dialog" makes the dialog-creation gate unconditional
@@ -118,10 +118,9 @@ unsafe extern "system" fn hook_create_dialog_param_a(
         let dlg_btn_ret = CheckDlgButton(hwnd, FULLSCREEN_CHECKBOX_ID, fs_state);
         let wparam = ((BN_CLICKED << 16) | OK_BUTTON_ID) as WPARAM;
         let pm_ok = PostMessageA(hwnd, WM_COMMAND, wparam, 0);
-        let exit_flag: *mut u32 = with_exposed_provenance_mut(EXIT_FLAG_ADDR);
-        let prev = read_volatile(exit_flag);
+        let prev = EXIT_FLAG.read();
         let next = prev | EXIT_FLAG_BIT;
-        write_volatile(exit_flag, next);
+        EXIT_FLAG.write(next);
         info!(
             "dialog_dismiss: th15 dialog auto-dismissed; resolution={res} mode={mode} res_radio={res_radio_id:#x} fullscreen={fullscreen} CheckRadioButton={radio_ret} CheckDlgButton(0xCB,{fs_state})={dlg_btn_ret} PostMessage(WM_COMMAND,IDOK)={pm_ok} [0x4e6d1c]:{prev:#010x}->{next:#010x}",
             res = cfg.display.resolution,
