@@ -12,7 +12,7 @@ use tracing::level_filters::LevelFilter;
 const DEFAULT_GAME_FPS: u32 = 60;
 const DEFAULT_REPLAY_SKIP_FPS: u32 = 240;
 const DEFAULT_REPLAY_SLOW_FPS: u32 = 30;
-const DEFAULT_SESSIONS_TO_KEEP: u32 = 10;
+const DEFAULT_SESSIONS_TO_KEEP: NonZero<u32> = NonZero::new(10).unwrap();
 
 pub(crate) static CONFIG: OnceLock<Config> = OnceLock::new();
 
@@ -67,7 +67,7 @@ pub(crate) struct ProcessCfg {
 
 pub(crate) struct LogCfg {
     pub(crate) level: LevelFilter,
-    pub(crate) sessions_to_keep: u32,
+    pub(crate) sessions_to_keep: NonZero<u32>,
     pub(crate) log_dir: Option<PathBuf>,
 }
 
@@ -348,7 +348,7 @@ fn apply_log(cfg: &mut LogCfg, k: &str, v: &str) {
             }
         }
         "sessions_to_keep" => {
-            cfg.sessions_to_keep = parse_u32(v).unwrap_or(DEFAULT_SESSIONS_TO_KEEP);
+            cfg.sessions_to_keep = parse_nonzero_u32(v).unwrap_or(DEFAULT_SESSIONS_TO_KEEP);
         }
         "log_dir" => {
             // `v` is already outer-trimmed and unquoted; preserve any
@@ -753,8 +753,14 @@ mod tests {
     fn config_parse_applies_log_keys() {
         let cfg = Config::parse("[log]\nlevel = trace\nsessions_to_keep = 5\nlog_dir = /tmp/x");
         assert_eq!(cfg.log.level, LevelFilter::TRACE);
-        assert_eq!(cfg.log.sessions_to_keep, 5);
+        assert_eq!(cfg.log.sessions_to_keep, nz(5));
         assert_eq!(cfg.log.log_dir, Some(PathBuf::from("/tmp/x")));
+    }
+
+    #[test]
+    fn config_parse_zero_sessions_to_keep_falls_back_to_default() {
+        let cfg = Config::parse("[log]\nsessions_to_keep = 0");
+        assert_eq!(cfg.log.sessions_to_keep, DEFAULT_SESSIONS_TO_KEEP);
     }
 
     #[test]

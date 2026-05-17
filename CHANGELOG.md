@@ -7,6 +7,7 @@ All notable changes to neopatch will be documented in this file.
 ### Changed
 
 - Session log directories are now named `YYYYMMDD_HHMMSS_pPID`. Two concurrent launches in the same second no longer overwrite each other's logs.
+- `[log] sessions_to_keep = 0` now falls back to the default of `10` instead of being treated as `1`. To disable logging entirely, use `level = off`.
 
 ### Fixed
 

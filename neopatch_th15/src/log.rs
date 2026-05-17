@@ -151,7 +151,7 @@ fn make_session_id() -> String {
         GetLocalTime(&raw mut st);
     }
     // PID disambiguates concurrent same-second launches that would otherwise
-    // share a directory and clobber each other's `events.log`.
+    // share a directory and clobber each other's logs.
     let pid = unsafe { GetCurrentProcessId() };
     format!(
         "{:04}{:02}{:02}_{:02}{:02}{:02}_p{pid}",
@@ -159,7 +159,7 @@ fn make_session_id() -> String {
     )
 }
 
-fn apply_retention(log_root: &Path, keep: u32, current: &str) {
+fn apply_retention(log_root: &Path, keep: NonZero<u32>, current: &str) {
     let Ok(entries) = read_dir(log_root) else {
         return;
     };
@@ -176,7 +176,7 @@ fn apply_retention(log_root: &Path, keep: u32, current: &str) {
     // Session IDs sort lexicographically by timestamp; ties are broken by PID.
     dirs.sort();
     // -1 to reserve a slot for the session we're about to write.
-    let to_keep = (keep as usize).saturating_sub(1);
+    let to_keep = (keep.get() - 1) as usize;
     if dirs.len() > to_keep {
         for old in &dirs[..dirs.len() - to_keep] {
             drop(remove_dir_all(old));
