@@ -29,7 +29,7 @@ use tracing_subscriber::registry::LookupSpan;
 use windows_sys::Win32::Foundation::SYSTEMTIME;
 use windows_sys::Win32::Storage::FileSystem::FlushFileBuffers;
 use windows_sys::Win32::System::SystemInformation::GetLocalTime;
-use windows_sys::Win32::System::Threading::GetCurrentThreadId;
+use windows_sys::Win32::System::Threading::{GetCurrentProcessId, GetCurrentThreadId};
 
 static FILE_WRITER: Mutex<Option<BufWriter<File>>> = Mutex::new(None);
 static SESSION_DIR: OnceLock<PathBuf> = OnceLock::new();
@@ -150,8 +150,11 @@ fn make_session_id() -> String {
     unsafe {
         GetLocalTime(&raw mut st);
     }
+    // PID disambiguates concurrent same-second launches that would otherwise
+    // share a directory and clobber each other's `events.log`.
+    let pid = unsafe { GetCurrentProcessId() };
     format!(
-        "{:04}{:02}{:02}_{:02}{:02}{:02}",
+        "{:04}{:02}{:02}_{:02}{:02}{:02}_p{pid}",
         st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond,
     )
 }
@@ -170,7 +173,7 @@ fn apply_retention(log_root: &Path, keep: u32, current: &str) {
                     .is_some_and(|n| n != current && is_session_id(n))
         })
         .collect();
-    // Session IDs sort lexicographically by timestamp.
+    // Session IDs sort lexicographically by timestamp; ties are broken by PID.
     dirs.sort();
     // -1 to reserve a slot for the session we're about to write.
     let to_keep = (keep as usize).saturating_sub(1);
@@ -181,15 +184,21 @@ fn apply_retention(log_root: &Path, keep: u32, current: &str) {
     }
 }
 
-/// Returns true if `name` matches the `YYYYMMDD_HHMMSS` format of `make_session_id`;
-/// false otherwise.
+/// Returns true if `name` matches the `YYYYMMDD_HHMMSS_pPID` format of
+/// `make_session_id`; false otherwise.
 fn is_session_id(name: &str) -> bool {
-    name.len() == 15
-        && name.as_bytes()[8] == b'_'
-        && name
-            .bytes()
-            .enumerate()
-            .all(|(i, b)| i == 8 || b.is_ascii_digit())
+    let bytes = name.as_bytes();
+    // 15 ("YYYYMMDD_HHMMSS") + 2 ("_p") + at least one PID digit.
+    if bytes.len() < 18 {
+        return false;
+    }
+    if bytes[8] != b'_' || bytes[15] != b'_' || bytes[16] != b'p' {
+        return false;
+    }
+    bytes
+        .iter()
+        .enumerate()
+        .all(|(i, b)| matches!(i, 8 | 15 | 16) || b.is_ascii_digit())
 }
 
 fn write_manifest(
@@ -367,9 +376,10 @@ mod tests {
 
     #[test]
     fn is_session_id_accepts_real_session_format() {
-        assert!(is_session_id("20260516_123045"));
-        assert!(is_session_id("00000000_000000"));
-        assert!(is_session_id("99999999_999999"));
+        assert!(is_session_id("20260516_123045_p1"));
+        assert!(is_session_id("20260516_123045_p12345"));
+        assert!(is_session_id("00000000_000000_p0"));
+        assert!(is_session_id("99999999_999999_p4294967295"));
     }
 
     #[test]
@@ -378,9 +388,14 @@ mod tests {
         assert!(!is_session_id("important_data"));
         assert!(!is_session_id("20260516"));
         assert!(!is_session_id("20260516_12304"));
+        assert!(!is_session_id("20260516_123045"));
         assert!(!is_session_id("20260516_1230450"));
         assert!(!is_session_id("20260516-123045"));
         assert!(!is_session_id("2026051a_123045"));
         assert!(!is_session_id("20260516_12304a"));
+        assert!(!is_session_id("20260516_123045_p"));
+        assert!(!is_session_id("20260516_123045-p1"));
+        assert!(!is_session_id("20260516_123045_x1"));
+        assert!(!is_session_id("20260516_123045_p1a"));
     }
 }
