@@ -4,17 +4,19 @@
 //! the display's refresh rate. The deadline is tracked in QPC ticks and advanced by
 //! exactly one period per frame, so transient hitches don't smear into permanent drift.
 //! *Within a constant-rate window*, the long-run frame rate is exactly `target_fps`
-//! regardless of OS scheduler jitter. Across mode transitions, `set_fps` resets the deadline
-//! so the next `wait()` resyncs. This is intentional but means "exact rate"
-//! is technically per-window, not per-session.
+//! regardless of OS scheduler jitter. Across mode transitions, `apply_policy()`
+//! resets the deadline so the next `wait()` resyncs. This is intentional but means
+//! "exact rate" is technically per-window, not per-session.
 //!
 //! Lead-time is fixed at `period / 2`. The wait fires that much earlier than the stored deadline,
 //! so the next game tick (which reads input) starts that much earlier in wall-clock time.
 //! The deadline itself is unaffected, so the long-run cadence still locks to `target_fps`.
-//! The shift is gated by `lead_active`, which `d3d9::hook_present` clears in replay-skip/slow
-//! (those modes don't read real-time input). The `period / 2` choice is the "geometric" maximum
-//! allowed by the pacer's wake-tick-present-wait loop. Any computer made in the last 20 years
-//! can probably clear the `period / 2` threshold, so lower values are unnecessarily conservative.
+//! Whether the shift applies is encoded in `PacingPolicy`: `LiveInput` enables it,
+//! since that's when input timing matters; `InternalCadence` disables it, since replay-skip/slow
+//! drive the schedule from inside the game and shaving real-time latency is meaningless there.
+//! The `period / 2` choice is the "geometric" maximum allowed by the pacer's
+//! wake-tick-present-wait loop. Any computer made in the last 20 years can probably clear
+//! the `period / 2` threshold, so lower values are unnecessarily conservative.
 //!
 //! For waiting, we use `CreateWaitableTimerExW` with the Windows 10 1803+ `HIGH_RESOLUTION` flag,
 //! closed by a short QPC spin to the exact deadline. We fall back to plain `Sleep(ms-1) + spin`
@@ -52,37 +54,46 @@ static RESYNC_QPC_THRESHOLD: LazyLock<i64> =
 
 pub(crate) static PACER: OnceLock<Pacer> = OnceLock::new();
 
+/// Distinguishes when the game reads real-time input (lead applies)
+/// from when the game drives its own schedule (lead doesn't apply).
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum PacingPolicy {
+    LiveInput { target_fps: u32 },
+    InternalCadence { target_fps: u32 },
+}
+
+impl PacingPolicy {
+    pub(crate) fn target_fps(self) -> u32 {
+        match self {
+            Self::LiveInput { target_fps } | Self::InternalCadence { target_fps } => target_fps,
+        }
+    }
+    fn lead_active(self) -> bool {
+        matches!(self, Self::LiveInput { .. })
+    }
+}
+
 pub(crate) struct Pacer {
-    period_qpc: MainCell<i64>,
-    /// 0 means "resync on next call."
+    policy: MainCell<PacingPolicy>,
+    // 0 means "resync on next call."
     deadline_qpc: MainCell<i64>,
-    /// When true, `wait()` releases `period / 2` earlier than the deadline, which is the maximum
-    /// allowed by the pacer design. The stored deadline is unaffected, so the long-run rate stays exact.
-    /// This should be set to false in replay-skip/slow modes where game logic drives cadence
-    /// and shaving input latency is meaningless.
-    lead_active: MainCell<bool>,
     timer: MainCell<*mut c_void>,
 }
 
 impl Pacer {
-    /// A `target_fps` of 0 disables pacing.
+    /// A `target_fps` of 0 in the policy disables pacing.
     ///
     /// Resets the deadline so the next `wait()` resyncs. Otherwise, a stale deadline
     /// would chase the wrong period for several frames after a rate change.
-    pub(crate) fn set_fps(&self, tok: &MainToken, target_fps: u32) {
-        self.period_qpc.set(tok, period_qpc_for(target_fps));
+    pub(crate) fn apply_policy(&self, tok: &MainToken, policy: PacingPolicy) {
+        self.policy.set(tok, policy);
         self.deadline_qpc.set(tok, 0);
     }
 
-    pub(crate) fn set_lead_active(&self, tok: &MainToken, active: bool) {
-        self.lead_active.set(tok, active);
-    }
-
-    pub(crate) fn new(target_fps: u32) -> Self {
+    pub(crate) fn new(policy: PacingPolicy) -> Self {
         Self {
-            period_qpc: MainCell::new(period_qpc_for(target_fps)),
+            policy: MainCell::new(policy),
             deadline_qpc: MainCell::new(0),
-            lead_active: MainCell::new(true),
             timer: MainCell::new(null_mut()),
         }
     }
@@ -90,7 +101,8 @@ impl Pacer {
     /// Blocks until the next frame's deadline, then advances the deadline.
     /// Call once per `Present`.
     pub(crate) fn wait(&self, tok: &MainToken) {
-        let period = self.period_qpc.get(tok);
+        let policy = self.policy.get(tok);
+        let period = period_qpc_for(policy.target_fps());
         if period <= 0 {
             return;
         }
@@ -105,7 +117,7 @@ impl Pacer {
         }
         // Shift only the wait target, not the stored deadline.
         // Long-run cadence still locks to `target_fps`.
-        let target = if self.lead_active.get(tok) {
+        let target = if policy.lead_active() {
             deadline - period / 2
         } else {
             deadline

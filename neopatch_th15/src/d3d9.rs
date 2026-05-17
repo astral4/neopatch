@@ -20,7 +20,7 @@
 
 use crate::config::{CONFIG, RefreshRateMode};
 use crate::log::LogCap;
-use crate::pacer::PACER;
+use crate::pacer::{PACER, PacingPolicy};
 use crate::patches::{BranchKind, patch_relative_branch};
 use crate::th15_state::{ReplayMode, replay_mode};
 use crate::thread::{MainCell, MainToken};
@@ -199,7 +199,7 @@ static CHECK_DEVICE_FORMAT_LOG: LogCap = LogCap::new(64);
 /// to annotate ticks with the current frame number.
 static PRESENT_COUNT: AtomicU64 = AtomicU64::new(0);
 
-// `Pacer::set_fps` resets the deadline, so call it only on mode change.
+// `Pacer::apply_policy` resets the deadline, so call it only on mode change.
 static MODE: MainCell<ReplayMode> = MainCell::new(ReplayMode::Normal);
 
 /// `IDirect3D9Ex*` and `adapter` from the most recent successful
@@ -681,24 +681,29 @@ unsafe extern "system" fn hook_present(
         let pacer = PACER.get().unwrap();
         let observed_mode = replay_mode();
 
-        // Load-then-conditional-store gates the heavier `set_fps` / `set_lead_active` pair
+        // Load-then-conditional-store gates the heavier `apply_policy` call
         // behind an actual mode change.
         if MODE.get(&tok) != observed_mode {
             MODE.set(&tok, observed_mode);
             let cfg = CONFIG.get().unwrap();
-            let target = match observed_mode {
-                ReplayMode::Skip => cfg.framerate.replay_skip_fps,
-                ReplayMode::Slow => cfg.framerate.replay_slow_fps,
-                ReplayMode::Normal => cfg.framerate.game_fps,
+            let policy = match observed_mode {
+                ReplayMode::Normal => PacingPolicy::LiveInput {
+                    target_fps: cfg.framerate.game_fps,
+                },
+                ReplayMode::Skip => PacingPolicy::InternalCadence {
+                    target_fps: cfg.framerate.replay_skip_fps,
+                },
+                ReplayMode::Slow => PacingPolicy::InternalCadence {
+                    target_fps: cfg.framerate.replay_slow_fps,
+                },
             };
             info!(
                 kind = "replay_mode_change",
                 mode = ?observed_mode,
-                target_fps = target,
+                target_fps = policy.target_fps(),
                 frame = PRESENT_COUNT.load(Ordering::Relaxed),
             );
-            pacer.set_fps(&tok, target);
-            pacer.set_lead_active(&tok, matches!(observed_mode, ReplayMode::Normal));
+            pacer.apply_policy(&tok, policy);
         }
         pacer.wait(&tok);
 

@@ -28,7 +28,7 @@ mod watchdog;
 mod window;
 
 use config::Config;
-use pacer::Pacer;
+use pacer::{Pacer, PacingPolicy};
 use std::env::current_exe;
 use std::ffi::c_void;
 use std::fs::read;
@@ -199,7 +199,9 @@ unsafe fn install_hooks() {
 
         // We do this before `d3d9::install` because that call
         // wires `Present` into `hook_present`, which unwraps `PACER.get()`.
-        _ = pacer::PACER.set(Pacer::new(cfg.framerate.game_fps));
+        _ = pacer::PACER.set(Pacer::new(PacingPolicy::LiveInput {
+            target_fps: cfg.framerate.game_fps,
+        }));
 
         d3d9::install(host_exe);
 
