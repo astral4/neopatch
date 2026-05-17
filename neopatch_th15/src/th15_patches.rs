@@ -56,10 +56,11 @@ const FCN_004865F0: usize = 0x0048_65f0;
 /// reads `[+4]` of that pointer, i.e. `loader_ctx + 0x10`.
 const LOADER_CTX_HANDLE_OFFSET: usize = 0x10;
 
-/// First byte after the 5-byte prologue our entry-jmp overwrites.
-/// The original prologue is `55  8b ec  6a ff` (push ebp; mov ebp, esp; push -1).
-/// The trampoline replays it and resumes here.
-const FCN_0044BED0_AFTER_PROLOGUE: usize = 0x0044_bed5;
+/// Length of the original prologue at `fcn.0044bed0` that the entry-jmp displaces.
+/// The bytes are `55  8b ec  6a ff` (push ebp; mov ebp, esp; push -1);
+/// the trampoline below replays the same instructions.
+const PROLOGUE_LEN: usize = 5;
+const FCN_0044BED0_AFTER_PROLOGUE: usize = FCN_0044BED0 + PROLOGUE_LEN;
 
 pub(crate) unsafe fn apply_basic() {
     unsafe {
