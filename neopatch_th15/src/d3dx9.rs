@@ -55,11 +55,9 @@ static D3DX_CREATE_FROM_MEM_LOG: LogCap = LogCap::new(32);
 
 pub(crate) unsafe fn install(host: HMODULE) {
     unsafe {
-        REAL_D3DX_CREATE_TEX.install(host, hook_d3dx_create_texture as *mut ());
-        REAL_D3DX_CREATE_TEX_FROM_FILE_IN_MEM_EX.install(
-            host,
-            hook_d3dx_create_texture_from_file_in_memory_ex as *mut (),
-        );
+        REAL_D3DX_CREATE_TEX.install(host, hook_d3dx_create_texture);
+        REAL_D3DX_CREATE_TEX_FROM_FILE_IN_MEM_EX
+            .install(host, hook_d3dx_create_texture_from_file_in_memory_ex);
     }
 }
 

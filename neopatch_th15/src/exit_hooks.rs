@@ -48,16 +48,16 @@ iat_hook! {
 
 pub(crate) unsafe fn install(host: HMODULE) {
     unsafe {
-        REAL_EXIT_PROCESS.install(host, hook_exit_process as *mut ());
-        REAL_TERMINATE_PROCESS.install(host, hook_terminate_process as *mut ());
-        REAL_MESSAGE_BOX_A.install(host, hook_message_box_a as *mut ());
-        REAL_MESSAGE_BOX_W.install(host, hook_message_box_w as *mut ());
-        REAL_RAISE_EXCEPTION.install(host, hook_raise_exception as *mut ());
-        REAL_CREATE_THREAD.install(host, hook_create_thread as *mut ());
+        REAL_EXIT_PROCESS.install(host, hook_exit_process);
+        REAL_TERMINATE_PROCESS.install(host, hook_terminate_process);
+        REAL_MESSAGE_BOX_A.install(host, hook_message_box_a);
+        REAL_MESSAGE_BOX_W.install(host, hook_message_box_w);
+        REAL_RAISE_EXCEPTION.install(host, hook_raise_exception);
+        REAL_CREATE_THREAD.install(host, hook_create_thread);
     }
 }
 
-unsafe extern "system" fn hook_exit_process(exit_code: u32) -> ! {
+unsafe extern "system" fn hook_exit_process(exit_code: u32) {
     unsafe {
         info!(
             kind = "exit_process_intercepted",

@@ -32,10 +32,8 @@ use pacer::Pacer;
 use std::env::current_exe;
 use std::ffi::c_void;
 use std::fs::read;
-use std::mem::transmute;
 use std::path::{Path, PathBuf};
 use std::ptr::null;
-use std::sync::OnceLock;
 use tracing::level_filters::LevelFilter;
 use vtable::FnSlot;
 use windows_sys::Win32::Foundation::{E_FAIL, HINSTANCE, HMODULE, MAX_PATH};
@@ -68,7 +66,15 @@ macro_rules! match_named {
     };
 }
 
-static REAL_DIRECT_INPUT_8_CREATE: OnceLock<FnSlot> = OnceLock::new();
+type DirectInput8CreateFn = unsafe extern "system" fn(
+    HINSTANCE,
+    u32,
+    *const GUID,
+    *mut *mut c_void,
+    *mut c_void,
+) -> HRESULT;
+static REAL_DIRECT_INPUT_8_CREATE: FnSlot<DirectInput8CreateFn> =
+    FnSlot::new(stringify!(REAL_DIRECT_INPUT_8_CREATE));
 
 #[unsafe(no_mangle)]
 #[allow(non_snake_case, clippy::missing_safety_doc)]
@@ -118,15 +124,8 @@ fn load_real_dinput8() {
     if dll.is_null() {
         return;
     }
-    if let Some(f) = unsafe { GetProcAddress(dll, c"DirectInput8Create".as_ptr().cast()) }
-        && let Some(nn) = FnSlot::new(f as *mut ())
-    {
-        // `OnceLock::set` returns `Err` only if already set.
-        // This function runs once from `DllMain`, so a second call is a programmer error.
-        assert!(
-            REAL_DIRECT_INPUT_8_CREATE.set(nn).is_ok(),
-            "load_real_dinput8 called twice",
-        );
+    if let Some(f) = unsafe { GetProcAddress(dll, c"DirectInput8Create".as_ptr().cast()) } {
+        REAL_DIRECT_INPUT_8_CREATE.store_raw(f as *mut ());
     }
 }
 
@@ -145,17 +144,9 @@ pub unsafe extern "system" fn DirectInput8Create(
     ppv_out: *mut *mut c_void,
     punk_outer: *mut c_void,
 ) -> HRESULT {
-    type F = unsafe extern "system" fn(
-        HINSTANCE,
-        u32,
-        *const GUID,
-        *mut *mut c_void,
-        *mut c_void,
-    ) -> HRESULT;
-    let Some(cached) = REAL_DIRECT_INPUT_8_CREATE.get() else {
+    let Some(real) = REAL_DIRECT_INPUT_8_CREATE.try_get() else {
         return E_FAIL;
     };
-    let real: F = unsafe { transmute::<*mut (), F>(cached.as_ptr()) };
     unsafe { real(hinst, dw_version, riidltf, ppv_out, punk_outer) }
 }
 

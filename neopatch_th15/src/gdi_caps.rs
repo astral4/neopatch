@@ -1,4 +1,5 @@
 //! Logic for pinning `GetDeviceCaps(_, VREFRESH)` to 60 Hz.
+//!
 //! The game's animation timing is built around 60 Hz, but the actual scanout rate
 //! is independent because our frame pacer drives the cadence of frames and logic ticks.
 
@@ -20,7 +21,7 @@ static VREFRESH_LOG: LogCap = LogCap::new(1);
 
 pub(crate) unsafe fn install(host: HMODULE) {
     unsafe {
-        REAL_GET_DEVICE_CAPS.install(host, hook_get_device_caps as *mut ());
+        REAL_GET_DEVICE_CAPS.install(host, hook_get_device_caps);
     }
 }
 

@@ -24,24 +24,23 @@ use crate::pacer::PACER;
 use crate::patches::{BranchKind, patch_relative_branch};
 use crate::th15_state::{ReplayMode, replay_mode};
 use crate::thread::{MainCell, MainToken};
-use crate::vtable::{SaveOriginal, SlotPatch, capture_slot, patch_vtable_slots};
+use crate::vtable::{capture_slot, install_vtable};
 use crate::{iat_hook, match_named, vtable_slot};
 use std::ffi::c_void;
-use std::mem::offset_of;
 use std::ptr::{null, null_mut};
 use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::{info, warn};
 use windows::Win32::Foundation::{HANDLE, HWND, RECT};
 use windows::Win32::Graphics::Direct3D9::{
-    D3DDEVTYPE, D3DDISPLAYMODEEX, D3DFMT_A1R5G5B5, D3DFMT_A2B10G10R10, D3DFMT_A2R10G10B10,
-    D3DFMT_A4R4G4B4, D3DFMT_A8, D3DFMT_A8B8G8R8, D3DFMT_A8R3G3B2, D3DFMT_A8R8G8B8,
-    D3DFMT_A16B16G16R16, D3DFMT_D15S1, D3DFMT_D16, D3DFMT_D16_LOCKABLE, D3DFMT_D24FS8,
-    D3DFMT_D24S8, D3DFMT_D24X4S4, D3DFMT_D24X8, D3DFMT_D32, D3DFMT_D32F_LOCKABLE, D3DFMT_G16R16,
-    D3DFMT_R3G3B2, D3DFMT_R5G6B5, D3DFMT_R8G8B8, D3DFMT_UNKNOWN, D3DFMT_X1R5G5B5, D3DFMT_X4R4G4B4,
-    D3DFMT_X8B8G8R8, D3DFMT_X8R8G8B8, D3DFORMAT, D3DPOOL, D3DPOOL_DEFAULT, D3DPOOL_MANAGED,
-    D3DPRESENT_INTERVAL_IMMEDIATE, D3DPRESENT_PARAMETERS, D3DPRESENTFLAG_LOCKABLE_BACKBUFFER,
-    D3DRESOURCETYPE, D3DSCANLINEORDERING_PROGRESSIVE, D3DUSAGE_DYNAMIC, Direct3DCreate9Ex,
-    IDirect3D9Ex_Vtbl, IDirect3DDevice9Ex_Vtbl,
+    D3DDEVTYPE, D3DDISPLAYMODEEX, D3DDISPLAYROTATION, D3DFMT_A1R5G5B5, D3DFMT_A2B10G10R10,
+    D3DFMT_A2R10G10B10, D3DFMT_A4R4G4B4, D3DFMT_A8, D3DFMT_A8B8G8R8, D3DFMT_A8R3G3B2,
+    D3DFMT_A8R8G8B8, D3DFMT_A16B16G16R16, D3DFMT_D15S1, D3DFMT_D16, D3DFMT_D16_LOCKABLE,
+    D3DFMT_D24FS8, D3DFMT_D24S8, D3DFMT_D24X4S4, D3DFMT_D24X8, D3DFMT_D32, D3DFMT_D32F_LOCKABLE,
+    D3DFMT_G16R16, D3DFMT_R3G3B2, D3DFMT_R5G6B5, D3DFMT_R8G8B8, D3DFMT_UNKNOWN, D3DFMT_X1R5G5B5,
+    D3DFMT_X4R4G4B4, D3DFMT_X8B8G8R8, D3DFMT_X8R8G8B8, D3DFORMAT, D3DPOOL, D3DPOOL_DEFAULT,
+    D3DPOOL_MANAGED, D3DPRESENT_INTERVAL_IMMEDIATE, D3DPRESENT_PARAMETERS,
+    D3DPRESENTFLAG_LOCKABLE_BACKBUFFER, D3DRESOURCETYPE, D3DSCANLINEORDERING_PROGRESSIVE,
+    D3DUSAGE_DYNAMIC, Direct3DCreate9Ex, IDirect3D9Ex_Vtbl, IDirect3DDevice9Ex_Vtbl,
 };
 use windows::Win32::Graphics::Gdi::RGNDATA;
 use windows::core::{HRESULT, Interface};
@@ -159,7 +158,7 @@ vtable_slot! {
             this: *mut c_void,
             adapter: u32,
             mode: *mut D3DDISPLAYMODEEX,
-            rotation: *mut u32,
+            rotation: *mut D3DDISPLAYROTATION,
         ) -> HRESULT;
 }
 vtable_slot! {
@@ -169,6 +168,22 @@ vtable_slot! {
 vtable_slot! {
     REAL_SET_GPU_THREAD_PRIORITY / call_real_set_gpu_thread_priority :
         as fn(this: *mut c_void, priority: i32) -> HRESULT;
+}
+
+// Declares the `CreateDevice` signature for the redirector below.
+// This is in bare `vtable_slot!` form because `hook_create_device` routes through
+// `REAL_CREATE_DEVICE_EX` and doesn't chain through to the displaced `CreateDevice`.
+vtable_slot! {
+    REDIRECT_CREATE_DEVICE :
+        as fn(
+            this: *mut c_void,
+            adapter: u32,
+            device_type: D3DDEVTYPE,
+            focus_window: HWND,
+            behavior_flags: u32,
+            pp: *mut D3DPRESENT_PARAMETERS,
+            returned_device: *mut *mut c_void,
+        ) -> HRESULT;
 }
 
 iat_hook! {
@@ -204,7 +219,7 @@ pub(crate) fn present_count() -> u64 {
 
 pub(crate) unsafe fn install(host: HMODULE) {
     unsafe {
-        REAL_DIRECT3D_CREATE9.install(host, hook_direct3dcreate9 as *mut ());
+        REAL_DIRECT3D_CREATE9.install(host, hook_direct3dcreate9);
         patch_relative_branch(
             TH15_DIRECT3DCREATE9_CALL_ADDR,
             hook_direct3dcreate9 as *const () as usize,
@@ -232,38 +247,37 @@ unsafe extern "system" fn hook_direct3dcreate9(sdk_version: u32) -> *mut c_void 
 
 unsafe fn install_d3d9_hooks(d3d9_ex: *mut c_void) {
     unsafe {
-        let vtbl: *mut u8 = *(d3d9_ex as *const *mut u8);
+        let vtbl: *mut IDirect3D9Ex_Vtbl = *d3d9_ex.cast::<*mut IDirect3D9Ex_Vtbl>();
 
         // `CreateDeviceEx` and `GetAdapterDisplayModeEx` are read, not patched.
         capture_slot(
             vtbl,
-            offset_of!(IDirect3D9Ex_Vtbl, CreateDeviceEx),
+            |v| &raw const (*v).CreateDeviceEx,
             &REAL_CREATE_DEVICE_EX,
         );
         capture_slot(
             vtbl,
-            offset_of!(IDirect3D9Ex_Vtbl, GetAdapterDisplayModeEx),
+            |v| &raw const (*v).GetAdapterDisplayModeEx,
             &REAL_GET_ADAPTER_DISPLAY_MODE_EX,
         );
 
-        let patches = [
-            SlotPatch {
-                offset: offset_of!(IDirect3D9Ex_Vtbl, base__.CreateDevice),
-                name: "IDirect3D9::CreateDevice",
-                hook: hook_create_device as *mut (),
-                // We never call back to `CreateDevice`. The hook routes to `CreateDeviceEx`
-                // via a separately-read slot, `REAL_CREATE_DEVICE_EX`.
-                original: SaveOriginal::Discard,
-            },
-            SlotPatch {
-                offset: offset_of!(IDirect3D9Ex_Vtbl, base__.CheckDeviceFormat),
-                name: "IDirect3D9::CheckDeviceFormat",
-                hook: hook_check_device_format as *mut (),
-                original: SaveOriginal::Into(&REAL_CHECK_DEVICE_FORMAT),
-            },
-        ];
-        let (applied, total) = patch_vtable_slots(vtbl, &patches);
-        info!(kind = "d3d9_hooks_installed", applied, total);
+        let result = install_vtable(vtbl, |scope| {
+            // `hook_create_device` routes to `CreateDeviceEx` via `REAL_CREATE_DEVICE_EX`
+            // rather than chaining through to the displaced `CreateDevice`.
+            scope.redirect(
+                &REDIRECT_CREATE_DEVICE,
+                |v| &raw mut (*v).base__.CreateDevice,
+                "IDirect3D9::CreateDevice",
+                hook_create_device,
+            );
+            scope.intercept(
+                &REAL_CHECK_DEVICE_FORMAT,
+                |v| &raw mut (*v).base__.CheckDeviceFormat,
+                "IDirect3D9::CheckDeviceFormat",
+                hook_check_device_format,
+            );
+        });
+        info!(kind = "d3d9_hooks_installed", protect_ok = result.is_some());
     }
 }
 
@@ -476,53 +490,50 @@ unsafe fn apply_device_ex_tunables(dev: *mut c_void) {
 
 unsafe fn install_device_hooks(dev: *mut c_void) {
     unsafe {
-        let vtbl: *mut u8 = *(dev as *const *mut u8);
+        let vtbl: *mut IDirect3DDevice9Ex_Vtbl = *dev.cast();
 
+        capture_slot(vtbl, |v| &raw const (*v).ResetEx, &REAL_RESET_EX);
         capture_slot(
             vtbl,
-            offset_of!(IDirect3DDevice9Ex_Vtbl, ResetEx),
-            &REAL_RESET_EX,
-        );
-        capture_slot(
-            vtbl,
-            offset_of!(IDirect3DDevice9Ex_Vtbl, SetMaximumFrameLatency),
+            |v| &raw const (*v).SetMaximumFrameLatency,
             &REAL_SET_MAX_FRAME_LATENCY,
         );
         capture_slot(
             vtbl,
-            offset_of!(IDirect3DDevice9Ex_Vtbl, SetGPUThreadPriority),
+            |v| &raw const (*v).SetGPUThreadPriority,
             &REAL_SET_GPU_THREAD_PRIORITY,
         );
 
-        let patches = [
-            SlotPatch {
-                offset: offset_of!(IDirect3DDevice9Ex_Vtbl, base__.Reset),
-                name: "Reset",
-                hook: hook_reset as *mut (),
-                original: SaveOriginal::Into(&REAL_RESET),
-            },
-            SlotPatch {
-                offset: offset_of!(IDirect3DDevice9Ex_Vtbl, base__.Present),
-                name: "Present",
-                hook: hook_present as *mut (),
-                original: SaveOriginal::Into(&REAL_PRESENT),
-            },
-            SlotPatch {
-                offset: offset_of!(IDirect3DDevice9Ex_Vtbl, base__.CreateTexture),
-                name: "CreateTexture",
-                hook: hook_create_texture as *mut (),
-                original: SaveOriginal::Into(&REAL_CREATE_TEXTURE),
-            },
-            SlotPatch {
-                offset: offset_of!(IDirect3DDevice9Ex_Vtbl, base__.CreateVertexBuffer),
-                name: "CreateVertexBuffer",
-                hook: hook_create_vertex_buffer as *mut (),
-                original: SaveOriginal::Into(&REAL_CREATE_VERTEX_BUFFER),
-            },
-        ];
-
-        let (applied, total) = patch_vtable_slots(vtbl, &patches);
-        info!(kind = "d3d9_device_hooks_installed", applied, total);
+        let result = install_vtable(vtbl, |scope| {
+            scope.intercept(
+                &REAL_RESET,
+                |v| &raw mut (*v).base__.Reset,
+                "Reset",
+                hook_reset,
+            );
+            scope.intercept(
+                &REAL_PRESENT,
+                |v| &raw mut (*v).base__.Present,
+                "Present",
+                hook_present,
+            );
+            scope.intercept(
+                &REAL_CREATE_TEXTURE,
+                |v| &raw mut (*v).base__.CreateTexture,
+                "CreateTexture",
+                hook_create_texture,
+            );
+            scope.intercept(
+                &REAL_CREATE_VERTEX_BUFFER,
+                |v| &raw mut (*v).base__.CreateVertexBuffer,
+                "CreateVertexBuffer",
+                hook_create_vertex_buffer,
+            );
+        });
+        info!(
+            kind = "d3d9_device_hooks_installed",
+            protect_ok = result.is_some()
+        );
     }
 }
 
@@ -734,7 +745,7 @@ unsafe extern "system" fn hook_reset(this: *mut c_void, pp: *mut D3DPRESENT_PARA
             display_mode.as_mut().map_or(null_mut(), |m| &raw mut *m);
 
         // Log before the call in case there's a crash inside `ResetEx`.
-        let use_reset_ex = REAL_RESET_EX.get().is_some();
+        let use_reset_ex = REAL_RESET_EX.try_get().is_some();
         info!(
             kind = "reset_call",
             this = format_args!("{this:p}"),

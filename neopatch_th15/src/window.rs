@@ -82,7 +82,7 @@ pub(crate) unsafe fn install(
             restyle: ResolvedWindowCfg::new(restyle, framebuffer, display_mode),
         };
         _ = STATE.set(state);
-        REAL_CREATEWINDOWEXA.install(host, hook_create_window_ex_a as *mut ());
+        REAL_CREATEWINDOWEXA.install(host, hook_create_window_ex_a);
     }
 }
 

@@ -1,4 +1,5 @@
 //! Logic for auto-dismissing th15's startup dialog.
+//!
 //! We let the dialog's message pump continue running because the loader thread deadlocks otherwise.
 //! This is done by IAT-hooking `CreateDialogParamA`,
 //! overriding the dialog's selections from our config, and then
@@ -70,7 +71,7 @@ iat_hook! {
 
 pub(crate) unsafe fn install(host: HMODULE) {
     unsafe {
-        REAL_CREATE_DIALOG_PARAM_A.install(host, hook_create_dialog_param_a as *mut ());
+        REAL_CREATE_DIALOG_PARAM_A.install(host, hook_create_dialog_param_a);
         for patch in DIALOG_PATCHES {
             patch_bytes_verified(patch.addr, patch.bytes, patch.name);
         }

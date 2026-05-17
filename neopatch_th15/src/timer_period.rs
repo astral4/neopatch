@@ -29,7 +29,7 @@ pub(crate) unsafe fn install(host: HMODULE) {
     unsafe {
         // We never call `timeEndPeriod`, so the resolution holds.
         timeBeginPeriod(1);
-        REAL_TIME_BEGIN_PERIOD.install(host, stub_time_begin_period as *mut ());
-        REAL_TIME_END_PERIOD.install(host, stub_time_end_period as *mut ());
+        REAL_TIME_BEGIN_PERIOD.install(host, stub_time_begin_period);
+        REAL_TIME_END_PERIOD.install(host, stub_time_end_period);
     }
 }

@@ -10,49 +10,43 @@
 //!
 //! We don't use `FlushInstructionCache` because vtable slots are read as data.
 
-use crate::modules::{ModuleRange, annotate_resolved, module_info, walk_modules};
+use crate::modules::{Module, ModuleRange, annotate_resolved, module_info, walk_modules};
 use crate::protect::with_writable;
-use std::mem::transmute;
-use std::ptr::{null_mut, read_unaligned, write_unaligned};
+use std::mem::transmute_copy;
+use std::ptr::{read_unaligned, write_unaligned};
 use std::sync::OnceLock;
 use tracing::{info, warn};
 use windows_sys::Win32::Foundation::HMODULE;
 
-/// Declares a function-pointer slot for a captured vtable original plus a typed trampoline
-/// that calls through it. Use with `SlotPatch { original: SaveOriginal::Into(&$slot) }`
-/// for the patcher to populate it, or with `capture_slot` for slots that are read but never patched.
+/// Declares a typed `static FnSlot<F>` for a vtable slot,
+/// optionally with a typed trampoline calling through it.
 ///
-/// Set-once-with-non-null storage: the slot is a `OnceLock<FnSlot>`,
-/// so calling the trampoline before capture panics with the slot
-/// name, and a second capture panics rather than silently overwriting.
-///
-/// This is similar to `iat_hook!` except the installer here is `patch_vtable_slots`,
-/// not the IAT walker.
+/// - `$slot / $trampoline : as fn(...) -> ret;` emits the slot plus a trampoline.
+///   Use for intercepts and capture-only slots.
+/// - `$slot : as fn(...) -> ret;` emits the slot alone.
+///   Use to anchor `F` at a redirector's call site.
 #[macro_export]
 macro_rules! vtable_slot {
+    (
+        $slot:ident :
+            as fn($($arg:ident : $argty:ty),* $(,)?) -> $ret:ty;
+    ) => {
+        static $slot: $crate::vtable::FnSlot<
+            unsafe extern "system" fn($($argty),*) -> $ret,
+        > = $crate::vtable::FnSlot::new(stringify!($slot));
+    };
     (
         $slot:ident / $trampoline:ident :
             as fn($($arg:ident : $argty:ty),* $(,)?) -> $ret:ty;
     ) => {
-        static $slot: ::std::sync::OnceLock<$crate::vtable::FnSlot> =
-            ::std::sync::OnceLock::new();
+        $crate::vtable_slot! {
+            $slot : as fn($($arg : $argty),*) -> $ret;
+        }
 
         #[inline]
         #[allow(dead_code, clippy::too_many_arguments)]
         unsafe fn $trampoline($($arg : $argty),*) -> $ret {
-            type __Sig = unsafe extern "system" fn($($argty),*) -> $ret;
-            unsafe {
-                let ptr = $slot
-                    .get()
-                    .expect(concat!(
-                        "vtable slot `",
-                        stringify!($slot),
-                        "` not captured",
-                    ))
-                    .as_ptr();
-                let f: __Sig = ::std::mem::transmute(ptr);
-                f($($arg),*)
-            }
+            unsafe { $slot.get()($($arg),*) }
         }
     };
 }
@@ -63,56 +57,57 @@ macro_rules! vtable_slot {
 // with the real `System32\dinput8.dll`.
 static OUR_DLL_RANGE: OnceLock<ModuleRange> = OnceLock::new();
 
-/// A function-pointer cell suitable for storage as `static OnceLock<FnSlot>`.
-#[derive(Clone, Copy)]
-pub(crate) struct FnSlot(unsafe extern "system" fn());
+/// A typed function-pointer slot. `F` is the function pointer type.
+pub(crate) struct FnSlot<F: Copy + Send + Sync + 'static> {
+    slot: OnceLock<F>,
+    /// The slot's identifier used for panic messages.
+    name: &'static str,
+}
 
-impl FnSlot {
-    pub(crate) fn new(p: *mut ()) -> Option<Self> {
-        if p.is_null() {
-            return None;
+impl<F: Copy + Send + Sync + 'static> FnSlot<F> {
+    pub(crate) const fn new(name: &'static str) -> Self {
+        Self {
+            slot: OnceLock::new(),
+            name,
         }
-        Some(Self(unsafe {
-            transmute::<*mut (), unsafe extern "system" fn()>(p)
-        }))
-    }
-    pub(crate) fn as_ptr(self) -> *mut () {
-        self.0 as *mut ()
     }
 
-    /// Captures `raw` into `dst`, enforcing the set-once-with-non-null invariant.
-    /// Panics if `raw` is null or `dst` was already set, attributing the failure to `label`.
-    pub(crate) fn store_into(dst: &OnceLock<FnSlot>, raw: *mut (), label: &str) {
-        let nn = FnSlot::new(raw).unwrap_or_else(|| panic!("{label} is null"));
-        assert!(dst.set(nn).is_ok(), "{label} captured twice");
+    /// Reads the pointer. Panics if the pointer is uncaptured.
+    pub(crate) fn get(&self) -> F {
+        *self
+            .slot
+            .get()
+            .unwrap_or_else(|| panic!("slot `{}` not captured", self.name))
+    }
+
+    pub(crate) fn try_get(&self) -> Option<F> {
+        self.slot.get().copied()
+    }
+
+    /// Stores a raw function pointer into the slot, reinterpreted as `F`.
+    /// Panics on null or double-capture.
+    pub(crate) fn store_raw(&self, raw: *mut ()) {
+        const { assert!(size_of::<F>() == size_of::<*mut ()>()) };
+        assert!(!raw.is_null(), "slot `{}`: null", self.name);
+        // SAFETY: `F` is asserted pointer-sized. This is the boundary
+        // where the raw IAT/vtable pointer becomes the typed `F`.
+        // Soundness depends on `F` being a function-pointer type,
+        // which is the only intended use of `FnSlot`.
+        let f: F = unsafe { transmute_copy(&raw) };
+        assert!(
+            self.slot.set(f).is_ok(),
+            "slot `{}`: already captured",
+            self.name,
+        );
     }
 }
 
-// Important: `offset` should come from `offset_of!(VtblStruct, field)`
-// so a `windows` crate interface change becomes a compile error
-// instead of silent slot-mismatch corruption.
-pub(crate) struct SlotPatch {
-    pub offset: usize,
-    pub name: &'static str,
-    pub hook: *mut (),
-    pub original: SaveOriginal,
-}
-
-// Intercepting hooks chain through to the original after pre/post work,
-// so the original pointer needs to be stashed. Redirecting hooks translate to
-// a different method entirely (e.g. `IDirect3D9::CreateDevice` routes through
-// `CreateDeviceEx` via a separately-read slot) and have nothing to chain to.
-pub(crate) enum SaveOriginal {
-    Into(&'static OnceLock<FnSlot>),
-    Discard,
-}
-
-#[derive(Clone, Copy)]
-enum SlotOutcome {
-    Applied,
-    /// Already our hook; leaving it alone avoids a self-loop trampoline.
-    AlreadyOurs,
-    ProtectFailed,
+/// Converts a typed hook into the raw `*mut ()` the patcher writes.
+/// Callers must provide `F` as a function pointer, not a function item (ZST).
+pub(crate) fn hook_to_raw<F: Copy + 'static>(hook: F) -> *mut () {
+    const { assert!(size_of::<F>() == size_of::<*mut ()>()) };
+    // SAFETY: `F` is asserted pointer-sized; only function-pointer types are intended here.
+    unsafe { transmute_copy(&hook) }
 }
 
 pub(crate) fn set_our_dll_handle(hinst: HMODULE) {
@@ -125,38 +120,184 @@ fn our_dll_range() -> Option<ModuleRange> {
     OUR_DLL_RANGE.get().copied()
 }
 
-/// Reads a vtable slot we trampoline through but don't patch (e.g. `CreateDeviceEx`,
-/// `ResetEx`, etc.) and publishes the function pointer into `dst`.
-/// Returns the captured pointer so the caller can log it if needed.
+/// Reads a vtable slot we trampoline through but don't patch
+/// (e.g. `CreateDeviceEx`, `ResetEx`) and publishes the function pointer into `dst`.
 /// Panics if the slot is null or `dst` was already set.
-pub(crate) unsafe fn capture_slot(vtbl: *mut u8, offset: usize, dst: &OnceLock<FnSlot>) -> *mut () {
-    let ptr: *mut () = unsafe { read_unaligned(vtbl.add(offset).cast()) };
-    FnSlot::store_into(dst, ptr, "vtable slot");
-    ptr
+///
+/// # Safety
+/// `vtbl` must point to a valid `V`, and the slot reached via `project(vtbl)`
+/// must be readable.
+pub(crate) unsafe fn capture_slot<F, P, V>(vtbl: *mut V, project: P, dst: &FnSlot<F>)
+where
+    F: Copy + Send + Sync + 'static,
+    P: FnOnce(*mut V) -> *const F,
+{
+    let slot_ptr: *const F = project(vtbl);
+    let raw: *mut () = unsafe { read_unaligned(slot_ptr.cast::<*mut ()>()) };
+    dst.store_raw(raw);
 }
 
-/// Returns `(applied, total)`. Slots already pointing into our DLL
-/// are skipped (idempotency); everything else chains through.
-///
-/// The "canonical implementation" module (against which chain-through
-/// is decided) is derived from the vtable pointer itself: whichever
-/// loaded module contains `vtbl` is by definition the module that
-/// implements this interface, so we don't need to know its filename.
-/// This handles d3d9.dll, a renamed wrapper, or a heap-allocated
-/// vtable (the last case lands on `None` and every slot is annotated
-/// as chained-through).
-pub(crate) unsafe fn patch_vtable_slots(vtbl: *mut u8, patches: &[SlotPatch]) -> (usize, usize) {
-    if vtbl.is_null() || patches.is_empty() {
-        return (0, patches.len());
-    }
-    let min_off = patches.iter().map(|p| p.offset).min().unwrap_or(0);
-    let max_off = patches.iter().map(|p| p.offset).max().unwrap_or(0);
-    let span = max_off - min_off + size_of::<*mut ()>();
-    let region_start: *mut u8 = unsafe { vtbl.add(min_off) };
+pub(crate) struct VtblScope<'a, V> {
+    vtbl: *mut V,
+    modules: &'a [Module],
+    our_range: Option<ModuleRange>,
+    expected_range: Option<ModuleRange>,
+}
 
+impl<V> VtblScope<'_, V> {
+    /// Capture the displaced original into `original`
+    /// and write `hook` at the slot reached by `project(vtbl)`.
+    pub(crate) fn intercept<F>(
+        &self,
+        original: &FnSlot<F>,
+        project: impl FnOnce(*mut V) -> *mut F,
+        name: &str,
+        hook: F,
+    ) where
+        F: Copy + Send + Sync + 'static,
+    {
+        let slot_ptr = project(self.vtbl);
+        self.write_slot(slot_ptr, name, hook, Some(original));
+    }
+
+    /// Like `intercept`, except the displaced original isn't captured.
+    /// `_slot` is only a type anchor, declared via the bare `vtable_slot!` form.
+    //
+    // TODO: with more redirectors, consider replacing `&FnSlot<F>` here
+    // with a dedicated `Sig<F>(PhantomData<F>)` ZST whose only API is type-tagging.
+    pub(crate) fn redirect<F>(
+        &self,
+        _slot: &FnSlot<F>,
+        project: impl FnOnce(*mut V) -> *mut F,
+        name: &str,
+        hook: F,
+    ) where
+        F: Copy + Send + Sync + 'static,
+    {
+        let slot_ptr = project(self.vtbl);
+        self.write_slot::<F>(slot_ptr, name, hook, None);
+    }
+
+    fn write_slot<F>(&self, slot_ptr: *mut F, name: &str, hook: F, original: Option<&FnSlot<F>>)
+    where
+        F: Copy + Send + Sync + 'static,
+    {
+        let slot_raw: *mut *mut () = slot_ptr.cast();
+        // SAFETY: writable window open for the scope; slot derived from `project(vtbl)`.
+        let current: *mut () = unsafe { read_unaligned(slot_raw) };
+        #[allow(clippy::cast_possible_truncation)]
+        let current_addr = current as u32;
+        // SAFETY: `slot_ptr` and `self.vtbl` come from the same allocation by construction.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let offset = unsafe { slot_ptr.cast::<u8>().offset_from(self.vtbl.cast::<u8>()) } as usize;
+
+        let is_redirector = original.is_none();
+
+        if let Some(ours) = self.our_range
+            && ours.contains(current_addr)
+        {
+            self.log_outcome(
+                name,
+                offset,
+                current,
+                current,
+                Outcome::AlreadyOurs,
+                is_redirector,
+            );
+            return;
+        }
+
+        if let Some(slot) = original {
+            slot.store_raw(current);
+        }
+        let hook_raw = hook_to_raw(hook);
+        // SAFETY: see above.
+        unsafe { write_unaligned(slot_raw, hook_raw) };
+
+        // SAFETY: see above.
+        let verify: *mut () = unsafe { read_unaligned(slot_raw) };
+        let outcome = if verify == hook_raw {
+            Outcome::Applied
+        } else {
+            Outcome::Mismatch
+        };
+        self.log_outcome(name, offset, current, hook_raw, outcome, is_redirector);
+    }
+
+    fn log_outcome(
+        &self,
+        name: &str,
+        offset: usize,
+        original: *mut (),
+        new: *mut (),
+        outcome: Outcome,
+        is_redirector: bool,
+    ) {
+        let (tag, failed) = match outcome {
+            Outcome::AlreadyOurs => ("[idempotent, already our hook]", false),
+            Outcome::Applied => ("[verified]", false),
+            Outcome::Mismatch => ("[MISMATCH]", true),
+        };
+        // Chain-through annotation when the original didn't come from
+        // the vtable's home module, surfacing the shim layer we're stacked on.
+        #[allow(clippy::cast_possible_truncation)]
+        let original_u32 = original as u32;
+        let chain_through = if matches!(outcome, Outcome::Applied)
+            && self
+                .expected_range
+                .is_none_or(|r| !r.contains(original_u32))
+        {
+            annotate_resolved(original_u32, self.modules).map(|s| format!(" chained-through={s}"))
+        } else {
+            None
+        };
+        let chain_tag = chain_through.as_deref().unwrap_or("");
+        let redirect_tag = if is_redirector {
+            " [redirector, original discarded]"
+        } else {
+            ""
+        };
+        if failed {
+            warn!(
+                "vtable patch: {name} (off {offset:#x}) old=0x{:08x} new=0x{:08x} {tag}{chain_tag}{redirect_tag}",
+                original as usize, new as usize,
+            );
+        } else {
+            info!(
+                "vtable patch: {name} (off {offset:#x}) old=0x{:08x} new=0x{:08x} {tag}{chain_tag}{redirect_tag}",
+                original as usize, new as usize,
+            );
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Outcome {
+    Applied,
+    AlreadyOurs,
+    Mismatch,
+}
+
+/// Opens a writable window over `size_of::<V>()` bytes starting at `vtbl`,
+/// builds a `VtblScope<V>`, and runs `scope`.
+/// Returns `None` on `VirtualProtect` failure or null `vtbl`.
+///
+/// The chained-through annotation uses the loaded-module range that contains `vtbl`
+/// as the "canonical implementation" module; slots whose displaced original
+/// points outside that range are annotated.
+///
+/// # Safety
+/// `vtbl` must point to a valid `V` whose backing memory can be made writable
+/// through `VirtualProtect`.
+pub(crate) unsafe fn install_vtable<V, R>(
+    vtbl: *mut V,
+    scope: impl FnOnce(&VtblScope<'_, V>) -> R,
+) -> Option<R> {
+    if vtbl.is_null() {
+        return None;
+    }
     let modules = walk_modules();
     let our_range = our_dll_range();
-    // i686-only (see lib.rs compile_error): pointer == u32, bit-identity.
     #[allow(clippy::cast_possible_truncation)]
     let vtbl_addr = vtbl as u32;
     let expected_range = modules
@@ -164,89 +305,25 @@ pub(crate) unsafe fn patch_vtable_slots(vtbl: *mut u8, patches: &[SlotPatch]) ->
         .find(|m| m.range.contains(vtbl_addr))
         .map(|m| m.range);
 
-    let mut outcomes: Vec<SlotOutcome> = vec![SlotOutcome::ProtectFailed; patches.len()];
-    let mut captured_originals: Vec<*mut ()> = vec![null_mut(); patches.len()];
-
-    let applied_opt = unsafe {
-        with_writable(region_start, span, |_| {
-            let mut applied = 0usize;
-            for (i, p) in patches.iter().enumerate() {
-                let slot: *mut *mut () = vtbl.add(p.offset).cast();
-                let current: *mut () = read_unaligned(slot);
-                captured_originals[i] = current;
-                // i686-only (see lib.rs compile_error): pointer == u32, bit-identity.
-                #[allow(clippy::cast_possible_truncation)]
-                let current_addr = current as u32;
-
-                // Already our hook: don't save our own trampoline as `original`.
-                if let Some(ours) = our_range
-                    && ours.contains(current_addr)
-                {
-                    outcomes[i] = SlotOutcome::AlreadyOurs;
-                    continue;
-                }
-
-                if let SaveOriginal::Into(slot_lock) = &p.original {
-                    FnSlot::store_into(slot_lock, current, &format!("slot `{}`", p.name));
-                }
-                write_unaligned(slot, p.hook);
-                outcomes[i] = SlotOutcome::Applied;
-                applied += 1;
-            }
-            applied
+    let size = size_of::<V>();
+    let region_start: *mut u8 = vtbl.cast();
+    let result = unsafe {
+        with_writable(region_start, size, |_| {
+            let s = VtblScope {
+                vtbl,
+                modules: &modules,
+                our_range,
+                expected_range,
+            };
+            scope(&s)
         })
     };
-    let Some(applied) = applied_opt else {
+    if result.is_none() {
         warn!(
             kind = "vtable_protect_failed",
             addr = format_args!("{region_start:p}"),
-            span,
+            span = size,
         );
-        return (0, patches.len());
-    };
-
-    for (i, p) in patches.iter().enumerate() {
-        let slot: *const *mut () = unsafe { vtbl.add(p.offset).cast() };
-        let now: *mut () = unsafe { read_unaligned(slot) };
-        let original = captured_originals[i];
-        // Routine outcomes ([verified], [idempotent, ...]) stay INFO;
-        // failure outcomes ([MISMATCH], [protect-failed]) surface at WARN.
-        // Tag and severity derive from the same match so adding a variant
-        // forces both to be considered.
-        let (tag, failed) = match outcomes[i] {
-            SlotOutcome::AlreadyOurs => ("[idempotent, already our hook]", false),
-            SlotOutcome::ProtectFailed => ("[protect-failed]", true),
-            SlotOutcome::Applied if now == p.hook => ("[verified]", false),
-            SlotOutcome::Applied => ("[MISMATCH]", true),
-        };
-        // Chain-through annotation when the original didn't come from d3d9,
-        // surfacing the shim layer we're stacked on.
-        #[allow(clippy::cast_possible_truncation)]
-        let original_u32 = original as u32;
-        let chain_through = match outcomes[i] {
-            SlotOutcome::Applied if expected_range.is_none_or(|r| !r.contains(original_u32)) => {
-                annotate_resolved(original_u32, &modules).map(|s| format!(" chained-through={s}"))
-            }
-            _ => None,
-        };
-        let chain_tag = chain_through.as_deref().unwrap_or("");
-        let redirect_tag = if matches!(p.original, SaveOriginal::Discard) {
-            " [redirector, original discarded]"
-        } else {
-            ""
-        };
-        if failed {
-            warn!(
-                "vtable patch: {} (off {:#x}) old=0x{:08x} new=0x{:08x} {tag}{chain_tag}{redirect_tag}",
-                p.name, p.offset, original as usize, p.hook as usize,
-            );
-        } else {
-            info!(
-                "vtable patch: {} (off {:#x}) old=0x{:08x} new=0x{:08x} {tag}{chain_tag}{redirect_tag}",
-                p.name, p.offset, original as usize, p.hook as usize,
-            );
-        }
     }
-
-    (applied, patches.len())
+    result
 }
