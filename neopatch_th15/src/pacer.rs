@@ -23,9 +23,8 @@
 //! (with the timer resolution pinned to 1 ms by `timer_period`) on older OS versions.
 
 use crate::thread::{MainCell, MainToken};
-use std::ffi::c_void;
-use std::ptr::{null, null_mut};
-use std::sync::{LazyLock, OnceLock};
+use std::ptr::null;
+use std::sync::OnceLock;
 use std::thread::yield_now;
 use tracing::info;
 use windows_sys::Win32::Foundation::HANDLE;
@@ -46,11 +45,6 @@ const SAFETY_MARGIN_100NS: i64 = 2_000;
 /// so the meaning of "absorb hitches up to 50 ms" stays consistent across `game_fps` values.
 /// There isn't anything special about 50 ms in particular.
 const RESYNC_THRESHOLD_MS: i64 = 50;
-
-/// `RESYNC_THRESHOLD_MS` in QPC ticks. Computed once at first `wait()` rather than every frame.
-/// Both inputs stay constant after first read, so their product stays constant too.
-static RESYNC_QPC_THRESHOLD: LazyLock<i64> =
-    LazyLock::new(|| qpc_freq() * RESYNC_THRESHOLD_MS / 1000);
 
 pub(crate) static PACER: OnceLock<Pacer> = OnceLock::new();
 
@@ -74,50 +68,61 @@ impl PacingPolicy {
 }
 
 pub(crate) struct Pacer {
-    policy: MainCell<PacingPolicy>,
-    // 0 means "resync on next call."
+    qpc_freq: i64,
+    resync_threshold_qpc: i64,
+    /// Created eagerly in `new`; null means `CreateWaitableTimerExW` failed both attempts
+    /// and `sleep_until` falls through to Sleep+spin.
+    timer: MainCell<HANDLE>,
+    /// Cached `qpc_freq / target_fps`. `0` disables pacing.
+    period_qpc: MainCell<i64>,
+    lead_active: MainCell<bool>,
+    /// `0` means "resync on next call."
     deadline_qpc: MainCell<i64>,
-    timer: MainCell<*mut c_void>,
 }
 
 impl Pacer {
+    pub(crate) fn new(policy: PacingPolicy) -> Self {
+        let qpc_freq = read_qpc_freq();
+        Self {
+            qpc_freq,
+            resync_threshold_qpc: qpc_freq * RESYNC_THRESHOLD_MS / 1000,
+            timer: MainCell::new(create_waitable_timer()),
+            period_qpc: MainCell::new(period_qpc_from(policy.target_fps(), qpc_freq)),
+            lead_active: MainCell::new(policy.lead_active()),
+            deadline_qpc: MainCell::new(0),
+        }
+    }
+
     /// A `target_fps` of 0 in the policy disables pacing.
     ///
     /// Resets the deadline so the next `wait()` resyncs. Otherwise, a stale deadline
     /// would chase the wrong period for several frames after a rate change.
     pub(crate) fn apply_policy(&self, tok: &MainToken, policy: PacingPolicy) {
-        self.policy.set(tok, policy);
+        self.period_qpc
+            .set(tok, period_qpc_from(policy.target_fps(), self.qpc_freq));
+        self.lead_active.set(tok, policy.lead_active());
         self.deadline_qpc.set(tok, 0);
-    }
-
-    pub(crate) fn new(policy: PacingPolicy) -> Self {
-        Self {
-            policy: MainCell::new(policy),
-            deadline_qpc: MainCell::new(0),
-            timer: MainCell::new(null_mut()),
-        }
     }
 
     /// Blocks until the next frame's deadline, then advances the deadline.
     /// Call once per `Present`.
     pub(crate) fn wait(&self, tok: &MainToken) {
-        let policy = self.policy.get(tok);
-        let period = period_qpc_for(policy.target_fps());
+        let period = self.period_qpc.get(tok);
         if period <= 0 {
             return;
         }
         let now = qpc();
         let mut deadline = self.deadline_qpc.get(tok);
-        if deadline == 0 || now > deadline + *RESYNC_QPC_THRESHOLD {
-            // This code is reached on first call or when beyond the resync threshold.
-            // Below the threshold, the fall-through path below absorbs the gap via catchup-spring.
+        if deadline == 0 || now > deadline + self.resync_threshold_qpc {
+            // First call or beyond the resync threshold. Below the threshold,
+            // the fall-through path absorbs the gap via catchup-sprint.
             deadline = now + period;
             self.deadline_qpc.set(tok, deadline);
             return;
         }
         // Shift only the wait target, not the stored deadline.
         // Long-run cadence still locks to `target_fps`.
-        let target = if policy.lead_active() {
+        let target = if self.lead_active.get(tok) {
             deadline - period / 2
         } else {
             deadline
@@ -129,11 +134,10 @@ impl Pacer {
     }
 
     fn sleep_until(&self, tok: &MainToken, deadline: i64, now: i64) {
-        let freq = qpc_freq();
         let remaining_qpc = deadline - now;
-        let h = self.timer_handle(tok);
+        let h = self.timer.get(tok);
         if h.is_null() {
-            let ms = qpc_to_ms(remaining_qpc, freq);
+            let ms = qpc_to_ms(remaining_qpc, self.qpc_freq);
             if ms > 1 {
                 unsafe { Sleep(ms - 1) };
             }
@@ -143,7 +147,7 @@ impl Pacer {
         // By `SetWaitableTimer` convention, a negative `due_time`
         // indicates a relative interval in 100ns units.
         // We shave a safety margin and spin to the exact deadline.
-        let hundred_ns = qpc_to_100ns(remaining_qpc, freq);
+        let hundred_ns = qpc_to_100ns(remaining_qpc, self.qpc_freq);
         if hundred_ns > SAFETY_MARGIN_100NS {
             let due: i64 = -(hundred_ns - SAFETY_MARGIN_100NS);
             unsafe {
@@ -154,43 +158,40 @@ impl Pacer {
         }
         spin_until(deadline);
     }
+}
 
-    fn timer_handle(&self, tok: &MainToken) -> HANDLE {
-        let cached = self.timer.get(tok);
-        if !cached.is_null() {
-            return cached;
-        }
-        let mut h = unsafe {
-            CreateWaitableTimerExW(
-                null(),
-                null(),
-                CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
-                TIMER_ALL_ACCESS,
-            )
-        };
-        let mut path = "high-resolution";
-        if h.is_null() {
-            h = unsafe { CreateWaitableTimerExW(null(), null(), 0, TIMER_ALL_ACCESS) };
-            path = if h.is_null() {
-                "Sleep+spin fallback"
-            } else {
-                "non-high-resolution"
-            };
-        }
-        info!(kind = "waitable_timer", path);
-        // A null `h` is stored back so the retry on the next wait still has a chance to succeed.
-        self.timer.set(tok, h);
-        h
+/// Tries `CREATE_WAITABLE_TIMER_HIGH_RESOLUTION` first; falls back to a plain waitable timer;
+/// returns null if both fail (caller falls back to Sleep+spin). Logs which path was taken.
+fn create_waitable_timer() -> HANDLE {
+    let h = unsafe {
+        CreateWaitableTimerExW(
+            null(),
+            null(),
+            CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+            TIMER_ALL_ACCESS,
+        )
+    };
+    if !h.is_null() {
+        info!(kind = "waitable_timer", path = "high-resolution");
+        return h;
     }
+    let h = unsafe { CreateWaitableTimerExW(null(), null(), 0, TIMER_ALL_ACCESS) };
+    let path = if h.is_null() {
+        "Sleep+spin fallback"
+    } else {
+        "non-high-resolution"
+    };
+    info!(kind = "waitable_timer", path);
+    h
 }
 
 // 0 is the sentinel value for disengaging the pacer.
 // We handle it specially and avoid division by 0.
-fn period_qpc_for(target_fps: u32) -> i64 {
+fn period_qpc_from(target_fps: u32, qpc_freq: i64) -> i64 {
     if target_fps == 0 {
         0
     } else {
-        qpc_freq() / i64::from(target_fps)
+        qpc_freq / i64::from(target_fps)
     }
 }
 
@@ -202,17 +203,14 @@ fn qpc() -> i64 {
     t
 }
 
-// Cached after first call because `QueryPerformanceFrequency` is documented as
-// fixed at boot, so a single query is enough.
-fn qpc_freq() -> i64 {
-    static FREQ: LazyLock<i64> = LazyLock::new(|| {
-        let mut f: i64 = 0;
-        unsafe {
-            QueryPerformanceFrequency(&raw mut f);
-        }
-        f
-    });
-    *FREQ
+// `QueryPerformanceFrequency` is documented as fixed at boot, so a single read
+// at `Pacer::new` is enough; the value is then stored as a field.
+fn read_qpc_freq() -> i64 {
+    let mut f: i64 = 0;
+    unsafe {
+        QueryPerformanceFrequency(&raw mut f);
+    }
+    f
 }
 
 fn qpc_to_ms(ticks: i64, freq: i64) -> u32 {
@@ -226,7 +224,10 @@ fn qpc_to_100ns(ticks: i64, freq: i64) -> i64 {
     if ticks <= 0 {
         return 0;
     }
-    i64::try_from(i128::from(ticks) * 10_000_000 / i128::from(freq)).unwrap_or(i64::MAX)
+    match ticks.checked_mul(10_000_000) {
+        Some(scaled) => scaled / freq,
+        None => i64::MAX,
+    }
 }
 
 fn spin_until(deadline: i64) {
