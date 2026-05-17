@@ -21,7 +21,7 @@
 use crate::config::{CONFIG, RefreshRateMode};
 use crate::log::LogCap;
 use crate::pacer::{PACER, PacingPolicy};
-use crate::patches::{BranchKind, patch_relative_branch};
+use crate::patches::patch_call_over_indirect;
 use crate::th15_state::{ReplayMode, replay_mode};
 use crate::thread::{MainCell, MainToken};
 use crate::vtable::{capture_slot, install_vtable};
@@ -220,10 +220,12 @@ pub(crate) fn present_count() -> u64 {
 pub(crate) unsafe fn install(host: HMODULE) {
     unsafe {
         REAL_DIRECT3D_CREATE9.install(host, hook_direct3dcreate9);
-        patch_relative_branch(
+        patch_call_over_indirect(
             TH15_DIRECT3DCREATE9_CALL_ADDR,
+            // Original 6-byte indirect call: `FF 15 [iat]`, where the IAT entry is
+            // `0x004be2b0` (the `Direct3DCreate9` slot in th15.exe v1.00b).
+            &[0xff, 0x15, 0xb0, 0xe2, 0x4b, 0x00],
             hook_direct3dcreate9 as *mut (),
-            BranchKind::CallOverIndirect,
             "Direct3DCreate9 call-site rewrite",
         );
     }

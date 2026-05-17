@@ -1,28 +1,134 @@
 //! In-process byte patching primitives.
 //!
-//! `patch_bytes_verified` is the write+read-back-verify entry for static byte patches.
-//! `patch_relative_branch` does the same for `e8/e9 disp32` site rewrites,
-//! additionally surfacing the resolved branch target.
+//! Before writing, every patch primitive checks that the bytes currently at
+//! the target address match the expected pattern. In the case of a mismatch,
+//! the patch is not applied and the mismatch is logged.
 
 use crate::protect::with_writable;
 use std::fmt::Write as _;
 use std::ptr::{copy_nonoverlapping, with_exposed_provenance, with_exposed_provenance_mut};
 use tracing::{info, warn};
 
+/// Static byte patch.
 pub(crate) struct Patch {
-    pub(crate) addr: usize,
-    pub(crate) bytes: &'static [u8],
-    pub(crate) name: &'static str,
+    addr: usize,
+    expected: &'static [u8],
+    replacement: &'static [u8],
+    name: &'static str,
 }
 
-#[derive(Clone, Copy)]
-pub(crate) enum BranchKind {
-    /// A 5-byte `e9 disp32`.
-    Jmp,
-    /// A 6-byte `e8 disp32 90` used to overwrite a 6-byte
-    /// `FF 15 disp32` indirect-call site in place.
-    /// The trailing NOP keeps the byte count matched.
-    CallOverIndirect,
+impl Patch {
+    pub(crate) const fn new<const N: usize>(
+        addr: usize,
+        expected: &'static [u8; N],
+        replacement: &'static [u8; N],
+        name: &'static str,
+    ) -> Self {
+        Self {
+            addr,
+            expected,
+            replacement,
+            name,
+        }
+    }
+
+    /// # Safety
+    /// `self.addr` must be a writable code address.
+    pub(crate) unsafe fn apply(&self) {
+        unsafe {
+            if !pre_check(self.addr, self.expected, self.name) {
+                return;
+            }
+            patch_bytes(self.addr, self.replacement);
+            verify_patch(self.addr, self.replacement, self.name);
+        }
+    }
+}
+
+/// Writes a 5-byte relative `e9 disp32` jmp at `target` to `hook`.
+/// `expected` is the 5 bytes the site must currently hold for the write to proceed.
+///
+/// # Safety
+/// `target` must be a writable code address.
+pub(crate) unsafe fn patch_jmp(target: usize, expected: &[u8; 5], hook: *mut (), name: &str) {
+    unsafe { write_relative_branch(target, expected, hook, 0xe9, name) };
+}
+
+/// Writes a 6-byte `e8 disp32 90` (direct call + NOP) at `target` to `hook`,
+/// overwriting a 6-byte `FF 15 disp32` indirect-call site in place.
+/// `expected` is the 6 bytes the site must currently hold for the write to proceed.
+///
+/// # Safety
+/// `target` must be a writable code address.
+pub(crate) unsafe fn patch_call_over_indirect(
+    target: usize,
+    expected: &[u8; 6],
+    hook: *mut (),
+    name: &str,
+) {
+    unsafe { write_relative_branch(target, expected, hook, 0xe8, name) };
+}
+
+unsafe fn write_relative_branch(
+    target: usize,
+    expected: &[u8],
+    hook: *mut (),
+    opcode: u8,
+    name: &str,
+) {
+    let len = expected.len();
+    #[allow(clippy::cast_possible_truncation)]
+    let (target_u32, hook_u32) = (target as u32, hook as u32);
+
+    // The displacement is always relative to `target + 5`, the byte after
+    // the 5-byte `e8/e9 disp32`. A trailing NOP at offset 5 (for the 6-byte form)
+    // is padding, not part of the next instruction's address.
+    let disp = hook_u32.wrapping_sub(target_u32.wrapping_add(5));
+    let mut bytes = [0u8; 6];
+    bytes[0] = opcode;
+    bytes[1..5].copy_from_slice(&disp.to_le_bytes());
+    if len == 6 {
+        bytes[5] = 0x90;
+    }
+
+    unsafe {
+        if !pre_check(target, expected, name) {
+            return;
+        }
+        patch_bytes(target, &bytes[..len]);
+
+        let mut actual = [0u8; 6];
+        copy_nonoverlapping(
+            with_exposed_provenance::<u8>(target),
+            actual.as_mut_ptr(),
+            len,
+        );
+        let read_disp = i32::from_le_bytes([actual[1], actual[2], actual[3], actual[4]]);
+        let resolved = target_u32.wrapping_add(5).wrapping_add_signed(read_disp);
+        if actual[0] == opcode && resolved == hook_u32 {
+            info!(
+                kind = "patch_verify",
+                addr = format_args!("{target:#010x}"),
+                name,
+                expected = %bytes_hex(&bytes[..len]),
+                actual = %bytes_hex(&actual[..len]),
+                resolved_target = format_args!("{resolved:#010x}"),
+                expected_target = format_args!("{hook_u32:#010x}"),
+                status = "OK",
+            );
+        } else {
+            warn!(
+                kind = "patch_verify",
+                addr = format_args!("{target:#010x}"),
+                name,
+                expected = %bytes_hex(&bytes[..len]),
+                actual = %bytes_hex(&actual[..len]),
+                resolved_target = format_args!("{resolved:#010x}"),
+                expected_target = format_args!("{hook_u32:#010x}"),
+                status = "MISMATCH",
+            );
+        }
+    }
 }
 
 fn bytes_hex(bs: &[u8]) -> String {
@@ -75,72 +181,28 @@ unsafe fn verify_patch(addr: usize, expected: &[u8], name: &str) {
     }
 }
 
-/// Writes `src` at `addr` and immediately emits a `patch_verify` event
-/// comparing the read-back to `src`. The write+verify pair is one call
-/// so callers can't accidentally write without verifying.
-pub(crate) unsafe fn patch_bytes_verified(addr: usize, src: &[u8], name: &str) {
+/// Reads `expected.len()` bytes at `addr` and returns `true` if they match `expected`.
+/// In the case of a mismatch, this returns `false` and the mismatch is logged;
+/// callers must refuse the write.
+unsafe fn pre_check(addr: usize, expected: &[u8], name: &str) -> bool {
+    let mut actual = vec![0u8; expected.len()];
     unsafe {
-        patch_bytes(addr, src);
-        verify_patch(addr, src, name);
-    }
-}
-
-/// Writes a relative branch at `target` pointing to `hook`, reads it back,
-/// decodes the displacement, and emits a `patch_verify` event
-/// with both the raw bytes and the resolved branch destination.
-#[allow(clippy::cast_possible_truncation)]
-pub(crate) unsafe fn patch_relative_branch(
-    target: usize,
-    hook: *mut (),
-    kind: BranchKind,
-    name: &str,
-) {
-    unsafe {
-        let target_u32 = target as u32;
-        let hook_u32 = hook as u32;
-        let disp = hook_u32.wrapping_sub(target_u32.wrapping_add(5));
-        let (opcode, len) = match kind {
-            BranchKind::Jmp => (0xe9_u8, 5),
-            BranchKind::CallOverIndirect => (0xe8_u8, 6),
-        };
-        let mut bytes = [0u8; 6];
-        bytes[0] = opcode;
-        bytes[1..5].copy_from_slice(&disp.to_le_bytes());
-        if matches!(kind, BranchKind::CallOverIndirect) {
-            bytes[5] = 0x90;
-        }
-        patch_bytes(target, &bytes[..len]);
-
-        let mut actual = [0u8; 6];
         copy_nonoverlapping(
-            with_exposed_provenance::<u8>(target),
+            with_exposed_provenance::<u8>(addr),
             actual.as_mut_ptr(),
-            len,
+            actual.len(),
         );
-        let read_disp = i32::from_le_bytes([actual[1], actual[2], actual[3], actual[4]]);
-        let resolved = target_u32.wrapping_add(5).wrapping_add_signed(read_disp);
-        if actual[0] == opcode && resolved == hook_u32 {
-            info!(
-                kind = "patch_verify",
-                addr = format_args!("{target:#010x}"),
-                name,
-                expected = %bytes_hex(&bytes[..len]),
-                actual = %bytes_hex(&actual[..len]),
-                resolved_target = format_args!("{resolved:#010x}"),
-                expected_target = format_args!("{hook_u32:#010x}"),
-                status = "OK",
-            );
-        } else {
-            warn!(
-                kind = "patch_verify",
-                addr = format_args!("{target:#010x}"),
-                name,
-                expected = %bytes_hex(&bytes[..len]),
-                actual = %bytes_hex(&actual[..len]),
-                resolved_target = format_args!("{resolved:#010x}"),
-                expected_target = format_args!("{hook_u32:#010x}"),
-                status = "MISMATCH",
-            );
-        }
     }
+    if actual == expected {
+        return true;
+    }
+    warn!(
+        kind = "patch_skipped",
+        addr = format_args!("{addr:#010x}"),
+        name,
+        expected = %bytes_hex(expected),
+        actual = %bytes_hex(&actual),
+        status = "PRE_MISMATCH",
+    );
+    false
 }

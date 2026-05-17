@@ -1,6 +1,6 @@
 //! Static byte patches and hooks for th15.exe v1.00b.
 
-use crate::patches::{BranchKind, Patch, patch_bytes_verified, patch_relative_branch};
+use crate::patches::{Patch, patch_jmp};
 use std::arch::naked_asm;
 use std::ffi::c_void;
 use std::mem::transmute;
@@ -21,26 +21,15 @@ use windows_sys::Win32::System::Threading::WaitForSingleObject;
 ///
 /// See `dialog_dismiss.rs` for dialog-flow byte patches.
 pub(crate) const PATCHES: &[Patch] = &[
-    Patch {
-        addr: 0x0047_27de,
-        bytes: &[0xeb, 0x4a],
-        name: "UpdateFast skip",
-    },
-    Patch {
-        addr: 0x0047_1a86,
-        bytes: &[0xeb],
-        name: "fast input latency #1",
-    },
-    Patch {
-        addr: 0x0047_1a9b,
-        bytes: &[0xeb],
-        name: "fast input latency #2",
-    },
-    Patch {
-        addr: 0x0045_ced2,
-        bytes: &[0xeb, 0x1d],
-        name: "replay speed control skip",
-    },
+    Patch::new(0x0047_27de, &[0x72, 0x08], &[0xeb, 0x4a], "UpdateFast skip"),
+    Patch::new(0x0047_1a86, &[0x74], &[0xeb], "fast input latency #1"),
+    Patch::new(0x0047_1a9b, &[0x75], &[0xeb], "fast input latency #2"),
+    Patch::new(
+        0x0045_ced2,
+        &[0x75, 0x04],
+        &[0xeb, 0x1d],
+        "replay speed control skip",
+    ),
 ];
 
 const FCN_0044BED0: usize = 0x0044_bed0;
@@ -65,7 +54,7 @@ const FCN_0044BED0_AFTER_PROLOGUE: usize = FCN_0044BED0 + PROLOGUE_LEN;
 pub(crate) unsafe fn apply_basic() {
     unsafe {
         for patch in PATCHES {
-            patch_bytes_verified(patch.addr, patch.bytes, patch.name);
+            patch.apply();
         }
     }
 }
@@ -142,10 +131,12 @@ unsafe extern "thiscall" fn hooked_fcn_0044bed0(this: *mut c_void) -> i32 {
 /// We hook at the function entry (rather than at every call site) just to be sure.
 pub(crate) unsafe fn install_destructor_hook() {
     unsafe {
-        patch_relative_branch(
+        patch_jmp(
             FCN_0044BED0,
+            // Original 5-byte prologue (`push ebp; mov ebp, esp; push -1`)
+            // that the entry-jmp displaces.
+            &[0x55, 0x8b, 0xec, 0x6a, 0xff],
             hooked_fcn_0044bed0 as *mut (),
-            BranchKind::Jmp,
             "fcn.0044bed0 entry-jmp -> hooked_fcn_0044bed0",
         );
     }

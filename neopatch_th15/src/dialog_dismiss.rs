@@ -8,7 +8,7 @@
 use crate::config::{CONFIG, DisplayMode};
 use crate::game_addr::GameAddr;
 use crate::iat_hook;
-use crate::patches::{Patch, patch_bytes_verified};
+use crate::patches::Patch;
 use std::ffi::c_char;
 use tracing::info;
 use windows_sys::Win32::Foundation::{HMODULE, HWND, LPARAM, WPARAM};
@@ -46,16 +46,8 @@ const EXIT_FLAG_BIT: u32 = 0x0008_0000;
 /// The template lacks `WS_VISIBLE`, so `SW_HIDE` is a no-op on an already-hidden window.
 /// The OK handler still runs and writes `[0x4e79c3]` invisibly.
 const DIALOG_PATCHES: &[Patch] = &[
-    Patch {
-        addr: 0x0047_15f2,
-        bytes: &[0xeb],
-        name: "force resolution dialog",
-    },
-    Patch {
-        addr: 0x0047_1620,
-        bytes: &[0x00],
-        name: "force dialog hidden",
-    },
+    Patch::new(0x0047_15f2, &[0x75], &[0xeb], "force resolution dialog"),
+    Patch::new(0x0047_1620, &[0x05], &[0x00], "force dialog hidden"),
 ];
 
 iat_hook! {
@@ -73,7 +65,7 @@ pub(crate) unsafe fn install(host: HMODULE) {
     unsafe {
         REAL_CREATE_DIALOG_PARAM_A.install(host, hook_create_dialog_param_a);
         for patch in DIALOG_PATCHES {
-            patch_bytes_verified(patch.addr, patch.bytes, patch.name);
+            patch.apply();
         }
     }
 }
@@ -118,6 +110,10 @@ unsafe extern "system" fn hook_create_dialog_param_a(
         let dlg_btn_ret = CheckDlgButton(hwnd, FULLSCREEN_CHECKBOX_ID, fs_state);
         let wparam = ((BN_CLICKED << 16) | OK_BUTTON_ID) as WPARAM;
         let pm_ok = PostMessageA(hwnd, WM_COMMAND, wparam, 0);
+        // Post first, then set the exit bit. th15's pump at `0x471633` dispatches
+        // queued messages before re-testing `[0x4e6d1c]` at `0x471698`, so the OK
+        // handler's resolution write at `[0x4e79c3]` runs on the same iteration our
+        // bit terminates the loop.
         let prev = EXIT_FLAG.read();
         let next = prev | EXIT_FLAG_BIT;
         EXIT_FLAG.write(next);
