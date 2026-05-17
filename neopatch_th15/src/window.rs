@@ -173,12 +173,12 @@ unsafe extern "system" fn hook_create_window_ex_a(
     }
 }
 
-// `CreateWindowExA`'s `lpClassName` is either a registered class atom
-// (low 16 bits hold the value, high bits are zero) or a pointer to a null-terminated string.
+// `CreateWindowExA`'s `lpClassName` is either a Win32 `ATOM` (16-bit integer
+// in the pointer slot, < 0x10000) or a pointer to a null-terminated string.
+// `ATOM` values land in the process's null-guard region of address space,
+// so `safe_read` returns 0 bytes for them and the length check below
+// rejects without a special case.
 fn class_name_matches(p: Untrusted<u8>, expected: &[u8]) -> bool {
-    if p.addr() < 0x10000 {
-        return false;
-    }
     let want_len = expected.len() + 1;
     let mut buf = [0u8; 32];
     if want_len > buf.len() {

@@ -6,9 +6,6 @@
 //! pointers in `Untrusted` at the entry so the rest of the code can't accidentally
 //! deref one. `safe_read_stack` is the analogous entry for register-value-like
 //! pointers (e.g. ESP/EBP recovered from another thread's `CONTEXT`).
-//!
-//! The escape hatch is `Untrusted::addr`, which returns `usize`.
-//! Dereferencable pointers should be explicitly reconstituted via `with_exposed_provenance`.
 
 use std::ffi::c_void;
 use std::ptr::with_exposed_provenance;
@@ -30,12 +27,6 @@ impl<T> Untrusted<T> {
     #[allow(clippy::wrong_self_convention)]
     pub(crate) fn is_null(self) -> bool {
         self.0.is_null()
-    }
-
-    /// View for logging or integer comparison. Reconstructing a
-    /// dereferencable pointer requires `with_exposed_provenance` at the call site.
-    pub(crate) fn addr(self) -> usize {
-        self.0 as usize
     }
 }
 
