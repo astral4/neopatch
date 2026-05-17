@@ -5,12 +5,12 @@
 
 use crate::log::{LogCap, dump_dir, elapsed_ms, flush};
 use crate::match_named;
-use std::ffi::c_void;
+use crate::untrusted::safe_read_stack;
 use std::fmt::Write as _;
 use std::iter::once;
 use std::os::windows::ffi::OsStrExt;
 use std::path::PathBuf;
-use std::ptr::{null, null_mut, with_exposed_provenance};
+use std::ptr::{null, null_mut};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use tracing::{error, info};
 use windows_sys::Win32::Foundation::{
@@ -25,7 +25,6 @@ use windows_sys::Win32::Foundation::{
     STATUS_INVALID_CRUNTIME_PARAMETER, STATUS_STACK_BUFFER_OVERRUN,
 };
 use windows_sys::Win32::Storage::FileSystem::{CREATE_ALWAYS, CreateFileW, FILE_ATTRIBUTE_NORMAL};
-use windows_sys::Win32::System::Diagnostics::Debug::ReadProcessMemory;
 use windows_sys::Win32::System::Diagnostics::Debug::{
     AddVectoredExceptionHandler, EXCEPTION_CONTINUE_SEARCH, EXCEPTION_POINTERS,
     MINIDUMP_EXCEPTION_INFORMATION, MINIDUMP_TYPE, MiniDumpNormal, MiniDumpWithDataSegs,
@@ -153,16 +152,16 @@ fn exception_name(code: NTSTATUS) -> &'static str {
 
 /// Returns `true` if the exception was logged; `false` for benign codes.
 unsafe fn log_exception(info: *const EXCEPTION_POINTERS, source: &str) -> bool {
-    if info.is_null() {
+    let Some(info) = (unsafe { info.as_ref() }) else {
         return false;
-    }
-    let exc = unsafe { (*info).ExceptionRecord };
-    let ctx = unsafe { (*info).ContextRecord };
-    if exc.is_null() || ctx.is_null() {
+    };
+    let Some(exc) = (unsafe { info.ExceptionRecord.as_ref() }) else {
         return false;
-    }
-    let exc = unsafe { &*exc };
-    let ctx = unsafe { &*ctx };
+    };
+    let Some(ctx) = (unsafe { info.ContextRecord.as_ref() }) else {
+        return false;
+    };
+
     let code = exc.ExceptionCode;
     if matches!(
         code,
@@ -290,57 +289,4 @@ pub(crate) fn install_handlers() {
         AddVectoredExceptionHandler(1, Some(vectored_handler));
         SetUnhandledExceptionFilter(Some(unhandled_filter));
     }
-}
-
-/// Best-effort copy of up to `buf.len()` elements from `src` into `buf`.
-/// Returns the number of complete `T`s successfully read;
-/// bytes past that point retain whatever the caller initialized them to.
-/// Use this for caller-controlled pointers where a direct deref would crash on a bad input.
-/// See `safe_read_stack` for more details.
-pub(crate) fn safe_read<T: Copy>(src: *const T, buf: &mut [T]) -> usize {
-    rpm(
-        src.cast::<c_void>(),
-        buf.as_mut_ptr().cast::<c_void>(),
-        size_of_val(buf),
-    ) / size_of::<T>()
-}
-
-/// `safe_read`s into `buf`, then returns the populated prefix up to (but excluding)
-/// the first `terminator` element (or the full read length if no terminator is found).
-pub(crate) fn safe_read_until<T: Copy + PartialEq>(
-    src: *const T,
-    buf: &mut [T],
-    terminator: T,
-) -> &[T] {
-    let n = safe_read(src, buf);
-    let len = buf[..n].iter().position(|t| *t == terminator).unwrap_or(n);
-    &buf[..len]
-}
-
-/// Best-effort copy of up to `N` `u32`s starting at `esp`.
-/// Returns the number of complete dwords successfully read.
-/// Partial trailing dwords (`ReadProcessMemory` stopping mid-`u32` at a page boundary) are zeroed.
-/// Slots past the return value retain whatever the caller initialized them to.
-pub(crate) fn safe_read_stack<const N: usize>(esp: u32, out: &mut [u32; N]) -> usize {
-    let src: *const u32 = with_exposed_provenance(esp as usize);
-    let bytes = rpm(
-        src.cast::<c_void>(),
-        out.as_mut_ptr().cast::<c_void>(),
-        size_of_val(out),
-    );
-    let words = bytes / size_of::<u32>();
-    if !bytes.is_multiple_of(size_of::<u32>()) && words < N {
-        out[words] = 0;
-    }
-    words
-}
-
-/// Returns bytes read; 0 on null source or `ReadProcessMemory` failure.
-fn rpm(src: *const c_void, dst: *mut c_void, len: usize) -> usize {
-    if src.is_null() {
-        return 0;
-    }
-    let mut bytes_read: usize = 0;
-    let _ = unsafe { ReadProcessMemory(GetCurrentProcess(), src, dst, len, &raw mut bytes_read) };
-    bytes_read
 }

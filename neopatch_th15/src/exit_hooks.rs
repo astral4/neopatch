@@ -2,9 +2,9 @@
 //! Includes handlers for `ExitProcess`, `TerminateProcess`, `MessageBoxA`/`MessageBoxW`,
 //! `RaiseException`, and `CreateThread` (for thread provenance).
 
-use crate::crash::{safe_read, safe_read_until};
 use crate::iat_hook;
 use crate::log::flush;
+use crate::untrusted::Untrusted;
 use std::ffi::c_void;
 use std::process::abort;
 use std::slice::from_mut as slice_from_mut;
@@ -90,8 +90,10 @@ unsafe extern "system" fn hook_message_box_a(
     flags: u32,
 ) -> i32 {
     unsafe {
-        let text_str = pcstr_to_string(text);
-        let caption_str = pcstr_to_string(caption);
+        // SAFETY: `text` and `caption` are caller-controlled FFI pointers.
+        // Reads are performed through `Untrusted` instead of dereferencing.
+        let text_str = pcstr_to_string(Untrusted::from_raw(text));
+        let caption_str = pcstr_to_string(Untrusted::from_raw(caption));
         info!(
             kind = "message_box_a_intercepted",
             flags = format_args!("{flags:#x}"),
@@ -109,8 +111,9 @@ unsafe extern "system" fn hook_message_box_w(
     flags: u32,
 ) -> i32 {
     unsafe {
-        let text_str = pcwstr_to_string(text);
-        let caption_str = pcwstr_to_string(caption);
+        // SAFETY: caller-controlled FFI pointers; see `hook_message_box_a`.
+        let text_str = pcwstr_to_string(Untrusted::from_raw(text));
+        let caption_str = pcwstr_to_string(Untrusted::from_raw(caption));
         info!(
             kind = "message_box_w_intercepted",
             flags = format_args!("{flags:#x}"),
@@ -149,12 +152,11 @@ unsafe extern "system" fn hook_create_thread(
     unsafe {
         let h = real_create_thread(sec, stack, start, param, flags, tid_out);
         let start_va = start.map_or(0, |f| f as usize);
-        // `tid_out` is caller-controlled; we route through `safe_read` rather than
-        // a direct deref so an invalid (but non-null) pointer logs `tid=0`
-        // instead of AV'ing inside the hook.
+        // SAFETY: caller-controlled FFI pointers; see `hook_message_box_a`.
+        let tid_out = Untrusted::from_raw(tid_out.cast_const());
         let mut tid: u32 = 0;
         if !tid_out.is_null() {
-            safe_read(tid_out, slice_from_mut(&mut tid));
+            tid_out.safe_read(slice_from_mut(&mut tid));
         }
         info!(
             kind = "thread_spawned",
@@ -167,18 +169,18 @@ unsafe extern "system" fn hook_create_thread(
     }
 }
 
-fn pcstr_to_string(p: PCSTR) -> String {
+fn pcstr_to_string(p: Untrusted<u8>) -> String {
     if p.is_null() {
         return String::from("<null>");
     }
     let mut buf = [0u8; 4096];
-    String::from_utf8_lossy(safe_read_until(p, &mut buf, 0)).into_owned()
+    String::from_utf8_lossy(p.safe_read_until(&mut buf, 0)).into_owned()
 }
 
-fn pcwstr_to_string(p: PCWSTR) -> String {
+fn pcwstr_to_string(p: Untrusted<u16>) -> String {
     if p.is_null() {
         return String::from("<null>");
     }
     let mut buf = [0u16; 4096];
-    String::from_utf16_lossy(safe_read_until(p, &mut buf, 0))
+    String::from_utf16_lossy(p.safe_read_until(&mut buf, 0))
 }

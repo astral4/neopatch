@@ -1,0 +1,101 @@
+//! Typed wrappers for raw pointers we can't dereference without runtime guarding.
+//!
+//! `Untrusted<T>` wraps `*const T` and exposes only `safe_read*` methods, which
+//! route through `ReadProcessMemory` and return short reads on a guard-page fault
+//! rather than AV'ing the host. Hook bodies should wrap caller-controlled FFI
+//! pointers in `Untrusted` at the entry so the rest of the code can't accidentally
+//! deref one. `safe_read_stack` is the analogous entry for register-value-like
+//! pointers (e.g. ESP/EBP recovered from another thread's `CONTEXT`).
+//!
+//! The escape hatch is `Untrusted::addr`, which returns `usize`.
+//! Dereferencable pointers should be explicitly reconstituted via `with_exposed_provenance`.
+
+use std::ffi::c_void;
+use std::ptr::with_exposed_provenance;
+use windows_sys::Win32::System::Diagnostics::Debug::ReadProcessMemory;
+use windows_sys::Win32::System::Threading::GetCurrentProcess;
+
+/// A pointer whose validity isn't established by code we control.
+#[derive(Clone, Copy)]
+pub(crate) struct Untrusted<T>(*const T);
+
+impl<T> Untrusted<T> {
+    /// # Safety
+    /// `raw` must not be dereferenced directly.
+    /// Wrapping it asserts that the rest of the code will only access it via `safe_read*`.
+    pub(crate) const unsafe fn from_raw(raw: *const T) -> Self {
+        Self(raw)
+    }
+
+    #[allow(clippy::wrong_self_convention)]
+    pub(crate) fn is_null(self) -> bool {
+        self.0.is_null()
+    }
+
+    /// View for logging or integer comparison. Reconstructing a
+    /// dereferencable pointer requires `with_exposed_provenance` at the call site.
+    pub(crate) fn addr(self) -> usize {
+        self.0 as usize
+    }
+}
+
+impl<T: Copy> Untrusted<T> {
+    /// Best-effort copy of up to `buf.len()` elements. See `safe_read` for semantics
+    /// (partial-`T` trailing reads are zeroed; `T` must accept the all-zero bit pattern).
+    pub(crate) fn safe_read(self, buf: &mut [T]) -> usize {
+        safe_read(self.0, buf)
+    }
+
+    /// `safe_read`s into `buf`, then returns the populated prefix up to (but excluding)
+    /// the first `terminator` element (or the full read length if no terminator is found).
+    pub(crate) fn safe_read_until(self, buf: &mut [T], terminator: T) -> &[T]
+    where
+        T: PartialEq,
+    {
+        let n = self.safe_read(buf);
+        let len = buf[..n].iter().position(|t| *t == terminator).unwrap_or(n);
+        &buf[..len]
+    }
+}
+
+/// Best-effort copy of up to `buf.len()` elements from `src` into `buf`. Returns the number
+/// of complete `T`s read. A partial-`T` trailing read (RPM stopping mid-`T` at a page
+/// boundary) zeroes `buf[n]`, so `T` must accept the all-zero bit pattern.
+/// Private to this module: callers go through `Untrusted` (for typed pointers) or
+/// `safe_read_stack` (for register-value-shaped pointers).
+fn safe_read<T: Copy>(src: *const T, buf: &mut [T]) -> usize {
+    let bytes = rpm(
+        src.cast::<c_void>(),
+        buf.as_mut_ptr().cast::<c_void>(),
+        size_of_val(buf),
+    );
+    let n = bytes / size_of::<T>();
+    if !bytes.is_multiple_of(size_of::<T>()) && n < buf.len() {
+        // SAFETY: `n < buf.len()` so `buf[n]` is in-bounds; we zero exactly one
+        // `T`'s worth of bytes, overwriting any partial bytes RPM wrote.
+        unsafe {
+            buf.as_mut_ptr()
+                .add(n)
+                .cast::<u8>()
+                .write_bytes(0, size_of::<T>());
+        }
+    }
+    n
+}
+
+/// Best-effort copy of up to `N` `u32`s starting at `esp`. The raw-register-value
+/// entry point that parallels `Untrusted::from_raw` for pointer-shaped inputs.
+pub(crate) fn safe_read_stack<const N: usize>(esp: u32, out: &mut [u32; N]) -> usize {
+    let src: *const u32 = with_exposed_provenance(esp as usize);
+    safe_read(src, out)
+}
+
+/// Returns bytes read; 0 on null source or `ReadProcessMemory` failure.
+fn rpm(src: *const c_void, dst: *mut c_void, len: usize) -> usize {
+    if src.is_null() {
+        return 0;
+    }
+    let mut bytes_read: usize = 0;
+    let _ = unsafe { ReadProcessMemory(GetCurrentProcess(), src, dst, len, &raw mut bytes_read) };
+    bytes_read
+}

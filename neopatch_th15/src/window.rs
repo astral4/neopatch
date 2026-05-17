@@ -1,8 +1,8 @@
 //! Window setup and hooking.
 
 use crate::config::{DisplayMode, WindowCfg, WindowFrame};
-use crate::crash::{safe_read, safe_read_until};
 use crate::iat_hook;
+use crate::untrusted::Untrusted;
 use std::ffi::c_void;
 use std::num::NonZero;
 use std::ptr::null_mut;
@@ -101,13 +101,19 @@ unsafe extern "system" fn hook_create_window_ex_a(
     lp_param: *mut c_void,
 ) -> HWND {
     unsafe {
+        // SAFETY: caller-controlled FFI pointers; tag as `Untrusted` for our inspection.
+        // The raw `lp_class_name` / `lp_window_name` are forwarded verbatim to
+        // `real_create_window_ex_a` below.
+        let class_name = Untrusted::from_raw(lp_class_name);
+        let window_name = Untrusted::from_raw(lp_window_name);
+
         // IME and sound-thread helpers also use this import, but we only want
         // the game's render window. th15 registers it under class "BASE" at `fcn.00472f50`.
         // We match by class name so we catch both the fullscreen (`WS_POPUP`)
         // and windowed (no `WS_POPUP`) branches.
         let is_main = !APPLIED.load(Ordering::Acquire)
             && h_wnd_parent.is_null()
-            && class_name_matches(lp_class_name, b"BASE");
+            && class_name_matches(class_name, b"BASE");
 
         let (use_w, use_h) = if is_main && (dw_style & WS_POPUP) == 0 {
             let (bw, bh) = STATE.get().unwrap().framebuffer;
@@ -161,7 +167,7 @@ unsafe extern "system" fn hook_create_window_ex_a(
                 .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
         {
-            apply(hwnd, &STATE.get().unwrap().restyle, lp_window_name);
+            apply(hwnd, &STATE.get().unwrap().restyle, window_name);
         }
         hwnd
     }
@@ -169,8 +175,8 @@ unsafe extern "system" fn hook_create_window_ex_a(
 
 // `CreateWindowExA`'s `lpClassName` is either a registered class atom
 // (low 16 bits hold the value, high bits are zero) or a pointer to a null-terminated string.
-fn class_name_matches(p: *const u8, expected: &[u8]) -> bool {
-    if (p as usize) < 0x10000 {
+fn class_name_matches(p: Untrusted<u8>, expected: &[u8]) -> bool {
+    if p.addr() < 0x10000 {
         return false;
     }
     let want_len = expected.len() + 1;
@@ -178,7 +184,7 @@ fn class_name_matches(p: *const u8, expected: &[u8]) -> bool {
     if want_len > buf.len() {
         return false;
     }
-    let n = safe_read(p, &mut buf[..want_len]);
+    let n = p.safe_read(&mut buf[..want_len]);
     n == want_len && &buf[..expected.len()] == expected && buf[expected.len()] == 0
 }
 
@@ -187,11 +193,11 @@ fn class_name_matches(p: *const u8, expected: &[u8]) -> bool {
 ///
 /// This is independent of locale because we use the literal Shift-JIS code page,
 /// not the system ANSI code page.
-fn build_extended_title(original: *const u8) -> Vec<u16> {
+fn build_extended_title(original: Untrusted<u8>) -> Vec<u16> {
     const CP_SHIFT_JIS: u32 = 932;
     const BUF_LEN: usize = 512;
     let mut buf = [0u8; BUF_LEN];
-    let sjis = safe_read_until(original, &mut buf, 0);
+    let sjis = original.safe_read_until(&mut buf, 0);
 
     let mut wide = vec![0u16; sjis.len()];
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
@@ -214,7 +220,7 @@ fn build_extended_title(original: *const u8) -> Vec<u16> {
     wide
 }
 
-unsafe fn apply(hwnd: HWND, cfg: &ResolvedWindowCfg, lp_window_name: *const u8) {
+unsafe fn apply(hwnd: HWND, cfg: &ResolvedWindowCfg, lp_window_name: Untrusted<u8>) {
     unsafe {
         // We do this before `SetWindowPos` so the `SWP_FRAMECHANGED`-driven
         // first paint of the title chrome gets the new UTF-16 title.

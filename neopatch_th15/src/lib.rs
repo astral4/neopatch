@@ -24,6 +24,7 @@ mod th15_patches;
 mod th15_state;
 mod thread;
 mod timer_period;
+mod untrusted;
 mod vtable;
 mod watchdog;
 mod window;

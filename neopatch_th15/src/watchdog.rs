@@ -4,12 +4,12 @@
 //! captures `CONTEXT` and the top of the stack via `safe_read_stack`,
 //! walks EBP frames, and emits an annotated log line per thread.
 
-use crate::crash::safe_read_stack;
 use crate::d3d9::present_count;
 use crate::log::flush;
 use crate::modules::{Module, annotate, annotate_resolved, walk_modules};
 use crate::th15_state::log_anim_counters;
 use crate::thread::main_id;
+use crate::untrusted::safe_read_stack;
 use std::ffi::c_void;
 use std::mem::zeroed;
 use std::num::NonZero;
