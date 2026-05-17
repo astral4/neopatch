@@ -109,7 +109,7 @@ pub(crate) enum RefreshRateMode {
 // Important: discriminants are load-bearing!
 // They're the game's resolution encoding at `[0x4e79c3]` (mod 3),
 // index the asset table at `0x4cb644`, and serve as the offset from `RES_RADIO_FIRST_ID` (`0xCD`)
-// for the dialog radio control IDs. Don't reorder or re-number without deliberate care.
+// for the dialog radio control IDs.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Resolution {
@@ -117,6 +117,12 @@ pub(crate) enum Resolution {
     R960x720 = 1,
     R1280x960 = 2,
 }
+
+const _: () = {
+    assert!(Resolution::R640x480 as u8 == 0);
+    assert!(Resolution::R960x720 as u8 == 1);
+    assert!(Resolution::R1280x960 as u8 == 2);
+};
 
 /// Window chrome. Maps directly to a combination of Win32 styles;
 /// each variant is a different "look."
