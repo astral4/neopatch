@@ -7,7 +7,7 @@
 //! The `Layer` prefixes every event with information like timestamps and thread IDs,
 //! and helps enforce consistent formatting.
 
-use crate::config::{Config, LogCfg};
+use crate::config::Config;
 use std::cell::{Cell, RefCell};
 use std::env::var;
 use std::fmt::{Debug, Display, Write as _};
@@ -36,13 +36,9 @@ static SESSION_DIR: OnceLock<PathBuf> = OnceLock::new();
 static START: OnceLock<Instant> = OnceLock::new();
 
 /// Idempotent; subsequent calls are no-ops. Returns `false` for `LevelFilter::OFF`.
-pub(crate) fn init(
-    install_dir: &Path,
-    cfg: &LogCfg,
-    host_exe: Option<&Path>,
-    top_cfg: &Config,
-) -> bool {
-    let Some(level) = cfg.level.into_level() else {
+pub(crate) fn init(install_dir: &Path, cfg: &Config, host_exe: Option<&Path>) -> bool {
+    let log_cfg = &cfg.log;
+    let Some(level) = log_cfg.level.into_level() else {
         return false;
     };
     if SESSION_DIR.get().is_some() {
@@ -51,7 +47,7 @@ pub(crate) fn init(
 
     _ = START.set(Instant::now());
 
-    let log_root = pick_log_root(install_dir, cfg.log_dir.as_deref());
+    let log_root = pick_log_root(install_dir, log_cfg.log_dir.as_deref());
     let Some(log_root) = log_root else {
         return false;
     };
@@ -63,9 +59,9 @@ pub(crate) fn init(
     }
 
     // Retention runs first so we don't sweep our own new directory.
-    apply_retention(&log_root, cfg.sessions_to_keep, &session_id);
+    apply_retention(&log_root, log_cfg.sessions_to_keep, &session_id);
 
-    drop(write_manifest(&session_dir, host_exe, top_cfg, &log_root));
+    drop(write_manifest(&session_dir, host_exe, cfg, &log_root));
 
     let events_path = session_dir.join("events.log");
     let Ok(file) = OpenOptions::new()
