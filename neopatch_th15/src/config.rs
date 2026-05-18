@@ -1,6 +1,6 @@
-//! UTF-8 INI parser for the configuration file.
+//! Configuration schema and UTF-8 INI parser.
 //!
-//! Parsed once at DllMain. Silent on error:
+//! The configuration file is parsed once at DllMain. Silent on error:
 //! unknown sections/keys/malformed values fall back to documented defaults.
 
 use std::fmt::{Display, Formatter, Result as FmtResult};

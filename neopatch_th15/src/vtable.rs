@@ -1,4 +1,4 @@
-//! In-place patches to `d3d9.dll`'s `.rdata` vtables.
+//! In-place patches to `.rdata` vtables.
 //!
 //! Cloning vtables into heap memory doesn't work because d3d9 dispatches through
 //! private virtual slots beyond the typed-struct footprint in the `windows` crate.
@@ -81,6 +81,7 @@ impl<F> Sig<F> {
 }
 
 /// A typed function-pointer slot. `F` is the function pointer type.
+// TODO: Tighten to `F: FnPtr` if the `fn_ptr_trait` feature stabilizes.
 pub(crate) struct FnSlot<F: Copy + Send + Sync + 'static> {
     slot: OnceLock<F>,
     /// The slot's identifier used for panic and diagnostic messages.
@@ -140,7 +141,7 @@ pub(crate) fn parse_fn_ptr<F: Copy>(raw: *mut ()) -> Option<F> {
 /// not a function item (ZST) or pointer-sized non-fn-ptr type
 /// (`*mut T`, `usize`, `NonNull<T>`).
 pub(crate) fn hook_to_raw<F: Copy + 'static>(hook: F) -> *mut () {
-    // TODO: Tighten to `F: FnPtr` if the `fn_ptr_trait` feature stabilizes
+    // TODO: Tighten to `F: FnPtr` if the `fn_ptr_trait` feature stabilizes.
     const { assert!(size_of::<F>() == size_of::<*mut ()>()) };
     // SAFETY: `F` is asserted pointer-sized; only function-pointer types are intended here.
     unsafe { transmute_copy(&hook) }
