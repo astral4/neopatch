@@ -384,6 +384,7 @@ enum Outcome {
 /// # Safety
 /// `vtbl` must point to a valid `V` whose backing memory can be made writable
 /// through `VirtualProtect`.
+#[must_use = "the Option carries the scope's result; `None` signals VirtualProtect failure"]
 pub(crate) unsafe fn install_vtable<V, R>(
     vtbl: NonNull<V>,
     scope: impl FnOnce(&VtblScope<'_, V>) -> R,

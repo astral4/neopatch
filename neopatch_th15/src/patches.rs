@@ -145,7 +145,7 @@ fn bytes_hex(bs: &[u8]) -> String {
 unsafe fn patch_bytes(addr: usize, src: &[u8]) {
     unsafe {
         let dst: *mut u8 = with_exposed_provenance_mut(addr);
-        with_writable(dst, src.len(), |p| {
+        let _ = with_writable(dst, src.len(), |p| {
             copy_nonoverlapping(src.as_ptr(), p, src.len());
         });
     }
