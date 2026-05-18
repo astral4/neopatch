@@ -315,14 +315,13 @@ where
                 return;
             }
             in_event.set(true);
-            LINE_BUF.with(|cell| {
-                let mut line = cell.borrow_mut();
+            LINE_BUF.with_borrow_mut(|line| {
                 line.clear();
                 let ts = elapsed_secs();
                 let tid = unsafe { GetCurrentThreadId() };
                 let level = event.metadata().level();
                 _ = write!(line, "[t={ts:.3}s tid={tid}] level={level}");
-                let mut visitor = FieldVisitor { out: &mut line };
+                let mut visitor = FieldVisitor { out: line };
                 event.record(&mut visitor);
                 line.push('\n');
                 if let Ok(mut guard) = FILE_WRITER.lock()
