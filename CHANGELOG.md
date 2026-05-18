@@ -4,6 +4,8 @@ All notable changes to neopatch will be documented in this file.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-05-17
+
 ### Added
 
 - Patch verification: every patch now compares the bytes at its target address to the expected pattern before writing. In the case of a mismatch, the patch is not applied and the mismatch is logged.
