@@ -20,36 +20,37 @@ use std::sync::atomic::{Ordering, fence};
 use tracing::{info, warn};
 use windows_sys::Win32::Foundation::HMODULE;
 
-/// Declares a typed `static FnSlot<F>` for a vtable slot,
-/// optionally with a typed trampoline calling through it.
-///
-/// - `$slot / $trampoline : as fn(...) -> ret;` emits the slot plus a trampoline.
-///   Use for intercepts and capture-only slots.
-/// - `$slot : as fn(...) -> ret;` emits the slot alone.
-///   Use to anchor `F` at a redirector's call site.
+/// Declares a typed `static FnSlot<F>` for a vtable slot, plus a typed trampoline
+/// calling through it. Use for intercepts and capture-only slots.
 #[macro_export]
 macro_rules! vtable_slot {
     (
-        $slot:ident :
+        $slot:ident / $trampoline:ident :
             as fn($($arg:ident : $argty:ty),* $(,)?) -> $ret:ty;
     ) => {
         static $slot: $crate::vtable::FnSlot<
             unsafe extern "system" fn($($argty),*) -> $ret,
         > = $crate::vtable::FnSlot::new(stringify!($slot));
-    };
-    (
-        $slot:ident / $trampoline:ident :
-            as fn($($arg:ident : $argty:ty),* $(,)?) -> $ret:ty;
-    ) => {
-        $crate::vtable_slot! {
-            $slot : as fn($($arg : $argty),*) -> $ret;
-        }
 
         #[inline]
         #[allow(dead_code, clippy::too_many_arguments)]
         unsafe fn $trampoline($($arg : $argty),*) -> $ret {
             unsafe { $slot.get()($($arg),*) }
         }
+    };
+}
+
+/// Declares a typed `static Sig<F>` ZST for type inference of `F`
+/// at a redirector's call site.
+#[macro_export]
+macro_rules! vtable_sig {
+    (
+        $slot:ident :
+            as fn($($arg:ident : $argty:ty),* $(,)?) -> $ret:ty;
+    ) => {
+        static $slot: $crate::vtable::Sig<
+            unsafe extern "system" fn($($argty),*) -> $ret,
+        > = $crate::vtable::Sig::new();
     };
 }
 
@@ -69,6 +70,15 @@ macro_rules! vtbl_field {
 // via `GetModuleHandleW("dinput8.dll")`, which would collide
 // with the real `System32\dinput8.dll`.
 static OUR_DLL_RANGE: OnceLock<ModuleRange> = OnceLock::new();
+
+/// Marker for a function-pointer type `F`. Use through `vtable_sig!`.
+pub(crate) struct Sig<F>(PhantomData<F>);
+
+impl<F> Sig<F> {
+    pub(crate) const fn new() -> Self {
+        Self(PhantomData)
+    }
+}
 
 /// A typed function-pointer slot. `F` is the function pointer type.
 pub(crate) struct FnSlot<F: Copy + Send + Sync + 'static> {
@@ -229,17 +239,9 @@ impl<V> VtblScope<'_, V> {
     }
 
     /// Like `intercept`, except the displaced original isn't captured.
-    /// `_slot` is only a type anchor, declared via the bare `vtable_slot!` form.
-    //
-    // TODO: with more redirectors, consider replacing `&FnSlot<F>` here
-    // with a dedicated `Sig<F>(PhantomData<F>)` ZST whose only API is type-tagging.
-    pub(crate) fn redirect<F>(
-        &self,
-        _slot: &FnSlot<F>,
-        proj: SlotProjection<V, F>,
-        name: &str,
-        hook: F,
-    ) where
+    /// `_sig` is  declared via `vtable_sig!` and used as type inference for `F`.
+    pub(crate) fn redirect<F>(&self, _sig: &Sig<F>, proj: SlotProjection<V, F>, name: &str, hook: F)
+    where
         F: Copy + Send + Sync + 'static,
     {
         self.write_slot::<F>(proj, name, hook, None);

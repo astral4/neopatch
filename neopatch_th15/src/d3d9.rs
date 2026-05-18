@@ -25,7 +25,7 @@ use crate::patches::patch_call_over_indirect;
 use crate::th15_state::{ReplayMode, replay_mode};
 use crate::thread::{MainCell, MainToken};
 use crate::vtable::{capture_slot, install_vtable};
-use crate::{iat_hook, match_named, vtable_slot, vtbl_field};
+use crate::{iat_hook, match_named, vtable_sig, vtable_slot, vtbl_field};
 use std::ffi::c_void;
 use std::num::NonZero;
 use std::ptr::{NonNull, null, null_mut};
@@ -171,10 +171,7 @@ vtable_slot! {
         as fn(this: *mut c_void, priority: i32) -> HRESULT;
 }
 
-// Declares the `CreateDevice` signature for the redirector below.
-// This is in bare `vtable_slot!` form because `hook_create_device` routes through
-// `REAL_CREATE_DEVICE_EX` and doesn't chain through to the displaced `CreateDevice`.
-vtable_slot! {
+vtable_sig! {
     REDIRECT_CREATE_DEVICE :
         as fn(
             this: *mut c_void,
