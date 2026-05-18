@@ -39,8 +39,8 @@ const FCN_0044BED0: usize = 0x0044_bed0;
 /// it only uses globals.
 const FCN_004865F0: usize = 0x0048_65f0;
 
-/// Byte offset within the loader-context (`fcn.0044bed0`'s `this`) of the loader thread's `HANDLE`.
-/// `fcn.0044be50` stores the `_beginthreadex` return value here.
+/// Byte offset within the loader-context (`fcn.0044bed0`'s `this`) of the loader thread's
+/// `HANDLE`. `fcn.0044be50` stores the `_beginthreadex` return value here.
 /// `fcn.00403f30`, called from the destructor with `loader_ctx + 0xc`,
 /// reads `[+4]` of that pointer, i.e. `loader_ctx + 0x10`.
 const LOADER_CTX_HANDLE_OFFSET: usize = 0x10;
@@ -123,11 +123,11 @@ unsafe extern "thiscall" fn hooked_fcn_0044bed0(this: *mut c_void) -> i32 {
 }
 
 /// Function-entry hook on `fcn.0044bed0` (the loader-context destructor)
-/// that resolves a deadlock between the destructor's thread-join and a worker spinning in `preloadAnim`.
-/// The worker spins on `[anim+0x128]`, which is cleared only by the anim driver `fcn.004865f0`,
-/// reachable only from `main`'s per-frame state-tick. Once the destructor takes `main`,
-/// the state-tick stops, the flag never clears, the worker never exits,
-/// and the destructor's `WaitForSingleObject` waits forever.
+/// that resolves a deadlock between the destructor's thread-join and a worker
+/// spinning in `preloadAnim`. The worker spins on `[anim+0x128]`, which is cleared
+/// only by the anim driver `fcn.004865f0`, reachable only from `main`'s per-frame state-tick.
+/// Once the destructor takes `main`, the state-tick stops, the flag never clears,
+/// the worker never exits, and the destructor's `WaitForSingleObject` waits forever.
 /// We hook at the function entry (rather than at every call site) just to be sure.
 pub(crate) unsafe fn install_destructor_hook() {
     unsafe {

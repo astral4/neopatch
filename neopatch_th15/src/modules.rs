@@ -8,6 +8,7 @@ use windows_sys::Win32::System::ProcessStatus::{
 use windows_sys::Win32::System::Threading::GetCurrentProcess;
 
 /// Half-open range `[base, end)` of a loaded module.
+///
 /// `Copy` is implemented so it can be stored in a `OnceLock`
 /// and be passed by value to the patcher.
 #[derive(Clone, Copy)]
@@ -98,7 +99,8 @@ pub(crate) fn annotate(addr: u32, modules: &[Module]) -> String {
     annotate_resolved(addr, modules).unwrap_or_else(|| format!("{addr:#010x}"))
 }
 
-/// Like `annotate`, but returns `None` for unresolved addresses so callers can skip them entirely.
+/// Like `annotate`, but returns `None` for unresolved addresses
+/// so callers can skip them entirely.
 pub(crate) fn annotate_resolved(addr: u32, modules: &[Module]) -> Option<String> {
     if addr == 0 {
         return None;

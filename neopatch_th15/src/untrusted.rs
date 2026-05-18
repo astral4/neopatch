@@ -1,11 +1,11 @@
-//! Typed wrappers for raw pointers we can't dereference without runtime guarding.
+//! Typed wrappers for raw pointers whose validity isn't established by code we control.
 //!
-//! `Untrusted<T>` wraps `*const T` and exposes only `safe_read*` methods, which
-//! route through `ReadProcessMemory` and return short reads on a guard-page fault
-//! rather than AV'ing the host. Hook bodies should wrap caller-controlled FFI
-//! pointers in `Untrusted` at the entry so the rest of the code can't accidentally
-//! deref one. `safe_read_stack` is the analogous entry for register-value-like
-//! pointers (e.g. ESP/EBP recovered from another thread's `CONTEXT`).
+//! `Untrusted<T>` wraps `*const T` and exposes only `safe_read*` methods,
+//! which route through `ReadProcessMemory` and return short reads on a guard-page fault
+//! rather than AV'ing the host. Hook bodies should wrap caller-controlled FFI pointers
+//! in `Untrusted` at the entry so the rest of the code can't accidentally deref one.
+//! `safe_read_stack` is the analogous entry for register-value-like pointers
+//! (e.g. ESP/EBP recovered from another thread's `CONTEXT`).
 
 use std::ffi::c_void;
 use std::ptr::with_exposed_provenance;
@@ -27,10 +27,9 @@ mod sealed {
 pub(crate) struct Untrusted<T>(*const T);
 
 impl<T> Untrusted<T> {
-    /// # Safety
-    /// `raw` must not be dereferenced directly.
-    /// Wrapping it asserts that the rest of the code will only access it via `safe_read*`.
-    pub(crate) const unsafe fn from_raw(raw: *const T) -> Self {
+    // This is sound to construct from any raw pointer
+    // because `Untrusted` has no `Deref` impl or raw accessor.
+    pub(crate) const fn from_raw(raw: *const T) -> Self {
         Self(raw)
     }
 
@@ -71,8 +70,8 @@ fn safe_read<T: sealed::Zeroable>(src: *const T, buf: &mut [T]) -> usize {
     );
     let n = bytes / size_of::<T>();
     if !bytes.is_multiple_of(size_of::<T>()) && n < buf.len() {
-        // SAFETY: `n < buf.len()` so `buf[n]` is in-bounds; we zero exactly one
-        // `T`'s worth of bytes, overwriting any partial bytes RPM wrote.
+        // SAFETY: `n < buf.len()` so `buf[n]` is in-bounds; we zero exactly one `T`'s
+        // worth of bytes, overwriting any partial bytes RPM wrote.
         unsafe {
             buf.as_mut_ptr()
                 .add(n)

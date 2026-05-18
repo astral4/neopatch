@@ -1,6 +1,4 @@
 //! Logging and passthrough hooks for game exit logic.
-//! Includes handlers for `ExitProcess`, `TerminateProcess`, `MessageBoxA`/`MessageBoxW`,
-//! `RaiseException`, and `CreateThread` (for thread provenance).
 
 use crate::iat_hook;
 use crate::log::flush;
@@ -90,8 +88,6 @@ unsafe extern "system" fn hook_message_box_a(
     flags: u32,
 ) -> i32 {
     unsafe {
-        // SAFETY: `text` and `caption` are caller-controlled FFI pointers.
-        // Reads are performed through `Untrusted` instead of dereferencing.
         let text_str = pcstr_to_string(Untrusted::from_raw(text));
         let caption_str = pcstr_to_string(Untrusted::from_raw(caption));
         info!(
@@ -111,7 +107,6 @@ unsafe extern "system" fn hook_message_box_w(
     flags: u32,
 ) -> i32 {
     unsafe {
-        // SAFETY: caller-controlled FFI pointers; see `hook_message_box_a`.
         let text_str = pcwstr_to_string(Untrusted::from_raw(text));
         let caption_str = pcwstr_to_string(Untrusted::from_raw(caption));
         info!(
@@ -152,7 +147,6 @@ unsafe extern "system" fn hook_create_thread(
     unsafe {
         let h = real_create_thread(sec, stack, start, param, flags, tid_out);
         let start_va = start.map_or(0, |f| f as usize);
-        // SAFETY: caller-controlled FFI pointers; see `hook_message_box_a`.
         let tid_out = Untrusted::from_raw(tid_out.cast_const());
         let mut tid: u32 = 0;
         if !tid_out.is_null() {

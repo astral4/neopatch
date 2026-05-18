@@ -1,9 +1,9 @@
 //! Typed handles for fixed game-memory addresses.
 //!
-//! `GameAddr<T>` pairs a constant address with an asserted layout.
-//! Each address is declared with `GameAddr::new(0x...)` where the address-to-layout pairing
-//! is verified against the disasm. Subsequent reads and writes through the typed handle
-//! are safe because of the asserted layout.
+//! `GameAddr<T>` pairs a constant address with an asserted layout. Each address
+//! is declared with `GameAddr::new(0x...)` where the address-to-layout pairing
+//! is verified against the disasm. Subsequent reads and writes through
+//! the typed handle are safe because of the asserted layout.
 //!
 //! Pointer-derived addresses (e.g. `(*mgr).field` after dereferencing
 //! a game pointer we just read) aren't instances of `GameAddr`s

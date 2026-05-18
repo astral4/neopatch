@@ -101,9 +101,6 @@ unsafe extern "system" fn hook_create_window_ex_a(
     lp_param: *mut c_void,
 ) -> HWND {
     unsafe {
-        // SAFETY: caller-controlled FFI pointers; tag as `Untrusted` for our inspection.
-        // The raw `lp_class_name` / `lp_window_name` are forwarded verbatim to
-        // `real_create_window_ex_a` below.
         let class_name = Untrusted::from_raw(lp_class_name);
         let window_name = Untrusted::from_raw(lp_window_name);
 
@@ -220,7 +217,7 @@ fn build_extended_title(original: Untrusted<u8>) -> Vec<u16> {
     wide
 }
 
-unsafe fn apply(hwnd: HWND, cfg: &ResolvedWindowCfg, lp_window_name: Untrusted<u8>) {
+fn apply(hwnd: HWND, cfg: &ResolvedWindowCfg, lp_window_name: Untrusted<u8>) {
     unsafe {
         // We do this before `SetWindowPos` so the `SWP_FRAMECHANGED`-driven
         // first paint of the title chrome gets the new UTF-16 title.

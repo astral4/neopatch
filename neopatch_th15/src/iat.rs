@@ -32,8 +32,8 @@ use windows_sys::Win32::System::WindowsProgramming::IMAGE_THUNK_DATA32;
 ///
 /// The example above expands to a
 /// `static REAL_GET_DEVICE_CAPS: IatHook<unsafe extern "system" fn(HDC, i32) -> i32>`
-/// plus a typed `real_get_device_caps` trampoline. The signature lives once,
-/// in the macro invocation. Hook bodies installed against this slot are typechecked against `F`.
+/// plus a typed `real_get_device_caps` trampoline. The signature lives once, in the
+/// macro invocation. Hook bodies installed against this slot are typechecked against `F`.
 #[macro_export]
 macro_rules! iat_hook {
     (
@@ -184,7 +184,7 @@ unsafe fn find_iat_slot(module: HMODULE, import_name: &CStr) -> Option<NonNull<*
 
             // `OriginalFirstThunk` holds names and `FirstThunk` holds live pointers.
             // Some loaders strip `OriginalFirstThunk`, so we fall back to `FirstThunk`.
-            // The `Anonymous` union aliases OFT.
+            // The `Anonymous` union aliases `OriginalFirstThunk`.
             let oft: u32 = read_unaligned(
                 imp_dir
                     .add(desc_offset + offset_of!(IMAGE_IMPORT_DESCRIPTOR, Anonymous))

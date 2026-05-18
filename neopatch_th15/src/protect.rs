@@ -13,6 +13,11 @@ use windows_sys::Win32::System::Memory::{PAGE_PROTECTION_FLAGS, PAGE_READWRITE, 
 /// Returns `Some(f(addr))` on success, or `None` if the initial protection change fails
 /// (in which case `f` is not called). If restoring the original protection fails,
 /// that failure is silently ignored and `Some(_)` is still returned.
+///
+/// # Safety
+/// `addr` and `len` must describe a committed memory region whose protection
+/// `VirtualProtect` can change to `PAGE_READWRITE` and back. The function only opens
+/// the window; whatever `f` writes through `addr` is the caller's responsibility.
 #[must_use]
 pub(crate) unsafe fn with_writable<R>(
     addr: *mut u8,

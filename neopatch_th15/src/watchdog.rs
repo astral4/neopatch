@@ -103,8 +103,10 @@ fn lookup_handle_type(handle: NonZero<u32>) -> Option<String> {
 /// Run `f` with `h` suspended. The body runs between `SuspendThread` and `ResumeThread`.
 /// We don't use a RAII guard because we have `panic = "abort"`.
 ///
-/// Anything allocation within `f` can deadlock if `h` happens to be inside the allocator.
-/// Keep allocation strictly outside the closure.
+/// # Safety
+/// `h` must be a valid thread handle with `THREAD_SUSPEND_RESUME` access.
+/// `f` must not allocate or otherwise take a lock the suspended thread may hold;
+/// if `h` is inside that critical section, the closure deadlocks against it.
 unsafe fn with_suspended<R>(h: HANDLE, f: impl FnOnce() -> R) -> R {
     unsafe {
         SuspendThread(h);
@@ -141,8 +143,10 @@ fn lookup_thread_start(thread_handle: HANDLE) -> Option<NonZero<u32>> {
 /// Opens `tid`, suspends it, snapshots its `CONTEXT` and the top of its stack,
 /// then resumes. Returns `None` for `tid = 0`, a thread that cannot be opened,
 /// or a thread whose context cannot be read.
-unsafe fn sample_thread(tid: u32) -> Option<ThreadSample> {
+fn sample_thread(tid: u32) -> Option<ThreadSample> {
     let tid = NonZero::new(tid)?;
+    // SAFETY: `with_suspended` requires `h` valid (non-null after `OpenThread`)
+    // and a non-allocating closure; ours only reads thread context into stack locals.
     unsafe {
         let access = THREAD_GET_CONTEXT | THREAD_SUSPEND_RESUME | THREAD_QUERY_INFORMATION;
         let h: HANDLE = OpenThread(access, 0, tid.get());
@@ -242,7 +246,7 @@ fn watchdog_loop() {
 fn snapshot_stuck(iter: u64, frame: u64) {
     let modules = walk_modules();
     let main_tid = main_id();
-    let Some(s) = (unsafe { sample_thread(main_tid) }) else {
+    let Some(s) = sample_thread(main_tid) else {
         info!("watchdog #{iter} frame={frame}: (main thread sample unavailable)");
         return;
     };

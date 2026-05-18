@@ -1,9 +1,9 @@
 //! neopatch_th15: latency optimizations, frame pacing, and other fixes for Touhou 15.
 //!
-//! Shipped as `dinput8.dll` next to `th15.exe`.
-//! Windows's DLL search order makes us load as part of th15's static-import resolution,
-//! and `DllMain` runs before any game code. The exported `DirectInput8Create`
-//! forwards to the real System32 DLL we load by full path; everything else is hooks.
+//! Shipped as `dinput8.dll` next to `th15.exe`. Windows's DLL search order
+//! makes us load as part of th15's static-import resolution, and `DllMain` runs
+//! before any game code. The exported `DirectInput8Create` forwards to
+//! the real System32 DLL we load by full path; everything else is hooks.
 
 mod config;
 mod crash;
@@ -137,8 +137,9 @@ fn load_real_dinput8() {
 ///
 /// # Safety
 ///
-/// Called by th15's import resolver (or another caller of `dinput8.dll`'s `DirectInput8Create` export).
-/// Pointer arguments must obey the dinput8 export's published contract.
+/// Called by th15's import resolver (or another caller of `dinput8.dll`'s
+/// `DirectInput8Create` export). Pointer arguments must obey the dinput8 export's
+/// published contract.
 #[unsafe(no_mangle)]
 #[allow(non_snake_case)]
 pub unsafe extern "system" fn DirectInput8Create(

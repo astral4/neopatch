@@ -1,9 +1,9 @@
 //! Logic for auto-dismissing th15's startup dialog.
 //!
-//! We let the dialog's message pump continue running because the loader thread deadlocks otherwise.
-//! This is done by IAT-hooking `CreateDialogParamA`,
-//! overriding the dialog's selections from our config, and then
-//! using `PostMessage` to send an OK click and set the pump's exit-flag bit.
+//! We let the dialog's message pump continue running because the loader thread
+//! deadlocks otherwise. This is done by IAT-hooking `CreateDialogParamA`,
+//! overriding the dialog's selections from our config, and then using
+//! `PostMessage` to send an OK click and set the pump's exit-flag bit.
 
 use crate::config::{CONFIG, DisplayMode};
 use crate::game_addr::GameAddr;
@@ -34,14 +34,14 @@ const RES_RADIO_LAST_ID: i32 = 0xCF;
 
 const OK_BUTTON_ID: u32 = 0xD0;
 
-/// The pump exit predicate at `0x4716A2` is `test [0x4e6d1c], 0x80001`.
-/// We set bit 19 ("Enter accept") to terminate the pump after the posted OK click is dispatched.
+/// The pump exit predicate at `0x4716A2` is `test [0x4e6d1c], 0x80001`. We set bit 19
+/// ("Enter accept") to terminate the pump after the posted OK click is dispatched.
 const EXIT_FLAG: GameAddr<u32> = unsafe { GameAddr::new(0x004E_6D1C) };
 const EXIT_FLAG_BIT: u32 = 0x0008_0000;
 
 /// "force resolution dialog" makes the dialog-creation gate unconditional
-/// so our IAT hook fires on every launch; otherwise, th15.cfg's "don't show again" bit
-/// suppresses the dialog after the first run.
+/// so our IAT hook fires on every launch. Otherwise, th15.cfg's
+/// "don't show again" bit suppresses the dialog after the first run.
 /// "force dialog hidden" keeps the explicit `ShowWindow` from rendering the dialog.
 /// The template lacks `WS_VISIBLE`, so `SW_HIDE` is a no-op on an already-hidden window.
 /// The OK handler still runs and writes `[0x4e79c3]` invisibly.
@@ -113,9 +113,9 @@ unsafe extern "system" fn hook_create_dialog_param_a(
         let wparam = ((BN_CLICKED << 16) | OK_BUTTON_ID) as WPARAM;
         let pm_ok = PostMessageA(hwnd, WM_COMMAND, wparam, 0);
         // Post first, then set the exit bit. th15's pump at `0x471633` dispatches
-        // queued messages before re-testing `[0x4e6d1c]` at `0x471698`, so the OK
-        // handler's resolution write at `[0x4e79c3]` runs on the same iteration our
-        // bit terminates the loop.
+        // queued messages before re-testing `[0x4e6d1c]` at `0x471698`,
+        // so the OK handler's resolution write at `[0x4e79c3]` runs on
+        // the same iteration our bit terminates the loop.
         let prev = EXIT_FLAG.read();
         let next = prev | EXIT_FLAG_BIT;
         EXIT_FLAG.write(next);

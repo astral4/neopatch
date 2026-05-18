@@ -1,7 +1,7 @@
 //! Crash-time capture. Includes a vectored exception handler, unhandled filter, and minidump.
 //!
-//! Vectored runs before the SEH chain and can't be overwritten by
-//! a later `SetUnhandledExceptionFilter`. The unhandled filter is the fallback path.
+//! Vectored runs before the SEH chain and can't be overwritten by a later
+//! `SetUnhandledExceptionFilter`. The unhandled filter is the fallback path.
 
 use crate::log::{LogCap, dump_dir, elapsed_ms, flush};
 use crate::match_named;
@@ -40,11 +40,10 @@ use windows_sys::Win32::System::Threading::{
     GetCurrentProcess, GetCurrentProcessId, GetCurrentThreadId,
 };
 
-/// Cap dumps per session: each is 5–20 MB and a re-entrant crash
-/// could otherwise fill the disk.
+/// Cap dumps per session in case of a re-entrant crash.
 const DUMP_LIMIT: u32 = 8;
 
-// VC++ runtime conventions
+// VC++ runtime conventions.
 const MS_VC_THREAD_NAME: NTSTATUS = 0x406D_1388_u32.cast_signed();
 const MS_VC_CXX_EH: NTSTATUS = 0xE06D_7363_u32.cast_signed();
 
@@ -214,8 +213,8 @@ unsafe fn log_exception(info: *const EXCEPTION_POINTERS, source: &str) -> bool {
         ctx.Eip, ctx.EFlags,
     );
     // For an indirect-call fault (`call ecx`), `[esp]` is the return address,
-    // which pinpoints the call site to the byte.
-    // The stack peek is last so register data is already flushed if this read itself faults.
+    // which pinpoints the call site to the byte. The stack peek is last
+    // so register data is already flushed if this read itself faults.
     let esp = ctx.Esp;
     let mut stack = [0u32; 8];
     safe_read_stack(esp, &mut stack);

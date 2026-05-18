@@ -58,6 +58,10 @@ pub(crate) fn replay_mode() -> ReplayMode {
 /// The manager is at `*[0x503c18]` and its 30-slot table is at offset `0x187f4d8`.
 /// Each slot pointing at a 316-byte anim object whose `+0x128`
 /// is the spin counter polled by `preloadAnim`.
+///
+/// # Safety
+/// May only run when each slot in the anim table is either null or points to a
+/// live anim object; a non-null but stale slot AVs at the `[+0x128]` read.
 pub(crate) unsafe fn log_anim_counters() {
     // Pointer to the anim-preload manager.
     const ANIM_CTX_PTR: GameAddr<*const c_void> = unsafe { GameAddr::new(0x0050_3C18) };

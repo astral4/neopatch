@@ -1,7 +1,7 @@
 //! In-place patches to `d3d9.dll`'s `.rdata` vtables.
 //!
-//! Cloning vtables into heap memory doesn't work because d3d9 dispatches
-//! through private virtual slots beyond the typed-struct footprint in the `windows` crate.
+//! Cloning vtables into heap memory doesn't work because d3d9 dispatches through
+//! private virtual slots beyond the typed-struct footprint in the `windows` crate.
 //! Reads past the clone will hit uninitialized memory.
 //!
 //! Slots whose current value points into our own DLL are left alone (idempotent re-entry).
