@@ -12,6 +12,16 @@ use std::ptr::with_exposed_provenance;
 use windows_sys::Win32::System::Diagnostics::Debug::ReadProcessMemory;
 use windows_sys::Win32::System::Threading::GetCurrentProcess;
 
+// Sealed marker: the all-zero bit pattern is a valid value of `T`.
+// Required by `safe_read`'s partial-`T` zero-fill at page boundaries.
+mod sealed {
+    pub(crate) trait Zeroable: Copy {}
+    impl Zeroable for u8 {}
+    impl Zeroable for u16 {}
+    impl Zeroable for u32 {}
+    impl<T: Zeroable, const N: usize> Zeroable for [T; N] {}
+}
+
 /// A pointer whose validity isn't established by code we control.
 #[derive(Clone, Copy)]
 pub(crate) struct Untrusted<T>(*const T);
@@ -30,9 +40,9 @@ impl<T> Untrusted<T> {
     }
 }
 
-impl<T: Copy> Untrusted<T> {
-    /// Best-effort copy of up to `buf.len()` elements. See `safe_read` for semantics
-    /// (partial-`T` trailing reads are zeroed; `T` must accept the all-zero bit pattern).
+impl<T: sealed::Zeroable> Untrusted<T> {
+    /// Best-effort copy of up to `buf.len()` elements. See `safe_read` for more details.
+    /// Partial-`T` trailing reads are zeroed.
     pub(crate) fn safe_read(self, buf: &mut [T]) -> usize {
         safe_read(self.0, buf)
     }
@@ -49,12 +59,11 @@ impl<T: Copy> Untrusted<T> {
     }
 }
 
-/// Best-effort copy of up to `buf.len()` elements from `src` into `buf`. Returns the number
-/// of complete `T`s read. A partial-`T` trailing read (RPM stopping mid-`T` at a page
-/// boundary) zeroes `buf[n]`, so `T` must accept the all-zero bit pattern.
-/// Private to this module: callers go through `Untrusted` (for typed pointers) or
-/// `safe_read_stack` (for register-value-shaped pointers).
-fn safe_read<T: Copy>(src: *const T, buf: &mut [T]) -> usize {
+/// Best-effort copy of up to `buf.len()` elements from `src` into `buf`.
+/// Returns the number of complete `T`s read. A partial-`T` trailing read
+/// (RPM stopping mid-`T` at a page boundary) zeroes `buf[n]`, so the all-zero bit pattern
+/// must be valid for `T`. The returned `n` excludes the partial slot.
+fn safe_read<T: sealed::Zeroable>(src: *const T, buf: &mut [T]) -> usize {
     let bytes = rpm(
         src.cast::<c_void>(),
         buf.as_mut_ptr().cast::<c_void>(),
