@@ -7,7 +7,6 @@
 use crate::d3d9::present_count;
 use crate::log::flush;
 use crate::modules::{Module, annotate, annotate_resolved, walk_modules};
-use crate::th15_state::log_anim_counters;
 use crate::thread::main_id;
 use crate::untrusted::safe_read_stack;
 use std::ffi::c_void;
@@ -278,7 +277,6 @@ fn snapshot_stuck(iter: u64, frame: u64) {
     for (i, frame) in main_frames.iter().enumerate() {
         info!("  frame {i}: {frame}");
     }
-    unsafe { log_anim_counters() };
     // Resolved-only stack-window context, which covers
     // FPO frames the EBP walk can't traverse and non-return-address values.
     for (i, &w) in s.stack.iter().enumerate() {
