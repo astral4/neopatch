@@ -1,4 +1,4 @@
-//! neopatch_th15: latency optimizations, frame pacing, and other fixes for Touhou 15.
+//! neopatch_th15: latency reductions, optimizations, and other fixes for Touhou 15.
 //!
 //! Shipped as `dinput8.dll` next to `th15.exe`. Windows's DLL search order
 //! makes us load as part of th15's static-import resolution, and `DllMain` runs
