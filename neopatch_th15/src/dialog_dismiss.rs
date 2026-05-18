@@ -83,8 +83,10 @@ unsafe extern "system" fn hook_create_dialog_param_a(
         let template_id = template as usize;
         let proc_va = proc.map_or(0usize, |f| f as usize);
         info!(
-            "dialog_dismiss: CreateDialogParamA template={template_id:#x} proc={proc_va:#x} -> hwnd={:?}",
-            hwnd,
+            kind = "create_dialog_param_a",
+            template = format_args!("{template_id:#x}"),
+            proc = format_args!("{proc_va:#x}"),
+            hwnd = format_args!("{hwnd:?}"),
         );
 
         if hwnd.is_null() {
@@ -118,9 +120,17 @@ unsafe extern "system" fn hook_create_dialog_param_a(
         let next = prev | EXIT_FLAG_BIT;
         EXIT_FLAG.write(next);
         info!(
-            "dialog_dismiss: th15 dialog auto-dismissed; resolution={res} mode={mode} res_radio={res_radio_id:#x} fullscreen={fullscreen} CheckRadioButton={radio_ret} CheckDlgButton(0xCB,{fs_state})={dlg_btn_ret} PostMessage(WM_COMMAND,IDOK)={pm_ok} [0x4e6d1c]:{prev:#010x}->{next:#010x}",
-            res = cfg.display.resolution,
-            mode = cfg.display.mode,
+            kind = "dialog_auto_dismissed",
+            resolution = %cfg.display.resolution,
+            mode = %cfg.display.mode,
+            res_radio = format_args!("{res_radio_id:#x}"),
+            fullscreen,
+            fs_state,
+            check_radio_button = radio_ret,
+            check_dlg_button = dlg_btn_ret,
+            post_message_ok = pm_ok,
+            exit_flag_prev = format_args!("{prev:#010x}"),
+            exit_flag_next = format_args!("{next:#010x}"),
         );
         hwnd
     }

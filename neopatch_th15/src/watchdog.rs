@@ -230,7 +230,7 @@ fn watchdog_loop() {
         let stuck = prev_frame == Some(frame);
         prev_frame = Some(frame);
         if !stuck {
-            info!("watchdog #{iter} frame={frame}");
+            info!(kind = "watchdog_tick", iter, frame);
             continue;
         }
         snapshot_stuck(iter, frame);

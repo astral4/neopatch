@@ -591,24 +591,25 @@ unsafe extern "system" fn hook_check_device_format(
             check_format,
         );
         if let Some(n) = CHECK_DEVICE_FORMAT_LOG.tick() {
+            let forwarded_format = if substituted {
+                format_name(forwarded_adapter_fmt)
+            } else {
+                ""
+            };
             info!(
-                "CheckDeviceFormat #{n}: adapter={adapter} dev_type={dt} adapter_fmt={af}({afn}){sub} usage={u:#x} rtype={rt} check_fmt={cf}({cfn}) hr={hr}",
-                dt = device_type.0,
-                af = format_name(adapter_format),
-                afn = adapter_format.0,
-                sub = if substituted {
-                    format!(
-                        " -> forwarded as {}({})",
-                        format_name(forwarded_adapter_fmt),
-                        forwarded_adapter_fmt.0
-                    )
-                } else {
-                    String::new()
-                },
-                u = usage,
-                rt = rtype.0,
-                cf = format_name(check_format),
-                cfn = check_format.0,
+                kind = "check_device_format",
+                n = n + 1,
+                adapter,
+                device_type = device_type.0,
+                adapter_format = format_name(adapter_format),
+                adapter_format_n = adapter_format.0,
+                substituted,
+                forwarded_format,
+                forwarded_format_n = forwarded_adapter_fmt.0,
+                usage = format_args!("{usage:#x}"),
+                rtype = rtype.0,
+                check_format = format_name(check_format),
+                check_format_n = check_format.0,
                 hr = fmt_hr!(hr),
             );
         }

@@ -284,7 +284,12 @@ impl<V> VtblScope<'_, V> {
             // A null current slot has no original to capture, so we refuse the install
             // rather than write our hook over a null slot we can't trampoline through.
             let Some(f) = parse_fn_ptr::<F>(current) else {
-                warn!("vtable patch: {name} (off {offset:#x}) NULL_SLOT [refusing intercept]",);
+                warn!(
+                    kind = "vtable_patch",
+                    name,
+                    offset = format_args!("{offset:#x}"),
+                    status = "NULL_SLOT_REFUSED",
+                );
                 return;
             };
             slot.store(f);
@@ -315,10 +320,10 @@ impl<V> VtblScope<'_, V> {
         outcome: Outcome,
         is_redirector: bool,
     ) {
-        let (tag, failed) = match outcome {
-            Outcome::AlreadyOurs => ("[idempotent, already our hook]", false),
-            Outcome::Applied => ("[verified]", false),
-            Outcome::Mismatch => ("[MISMATCH]", true),
+        let (status, failed) = match outcome {
+            Outcome::AlreadyOurs => ("IDEMPOTENT", false),
+            Outcome::Applied => ("OK", false),
+            Outcome::Mismatch => ("MISMATCH", true),
         };
         // Chain-through annotation when the original didn't come from
         // the vtable's home module, surfacing the shim layer we're stacked on.
@@ -329,26 +334,32 @@ impl<V> VtblScope<'_, V> {
                 .expected_range
                 .is_none_or(|r| !r.contains(original_u32))
         {
-            annotate_resolved(original_u32, self.modules).map(|s| format!(" chained-through={s}"))
+            annotate_resolved(original_u32, self.modules)
         } else {
             None
         };
-        let chain_tag = chain_through.as_deref().unwrap_or("");
-        let redirect_tag = if is_redirector {
-            " [redirector, original discarded]"
-        } else {
-            ""
-        };
+        let chain = chain_through.as_deref().unwrap_or("");
+        #[allow(clippy::cast_possible_truncation)]
+        let new_u32 = new as u32;
+
+        macro_rules! emit {
+            ($level:ident) => {
+                $level!(
+                    kind = "vtable_patch",
+                    name,
+                    offset = format_args!("{offset:#x}"),
+                    old = format_args!("{original_u32:#010x}"),
+                    new = format_args!("{new_u32:#010x}"),
+                    status,
+                    chain_through = chain,
+                    redirector = is_redirector,
+                );
+            };
+        }
         if failed {
-            warn!(
-                "vtable patch: {name} (off {offset:#x}) old=0x{:08x} new=0x{:08x} {tag}{chain_tag}{redirect_tag}",
-                original as usize, new as usize,
-            );
+            emit!(warn);
         } else {
-            info!(
-                "vtable patch: {name} (off {offset:#x}) old=0x{:08x} new=0x{:08x} {tag}{chain_tag}{redirect_tag}",
-                original as usize, new as usize,
-            );
+            emit!(info);
         }
     }
 }
