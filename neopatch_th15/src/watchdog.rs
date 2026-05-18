@@ -13,7 +13,7 @@ use crate::untrusted::safe_read_stack;
 use std::ffi::c_void;
 use std::mem::zeroed;
 use std::num::NonZero;
-use std::ptr::{read_unaligned, with_exposed_provenance_mut};
+use std::ptr::{null_mut, read_unaligned, with_exposed_provenance_mut};
 use std::slice::from_raw_parts;
 use std::thread::{Builder, sleep};
 use std::time::Duration;
@@ -76,7 +76,6 @@ pub(crate) fn install() {
 fn lookup_handle_type(handle: NonZero<u32>) -> Option<String> {
     unsafe {
         let mut buf = [0u8; 1024];
-        let mut returned: u32 = 0;
         #[allow(clippy::cast_possible_truncation)]
         let buf_len = buf.len() as u32;
         let status = NtQueryObject(
@@ -84,7 +83,7 @@ fn lookup_handle_type(handle: NonZero<u32>) -> Option<String> {
             ObjectTypeInformation,
             buf.as_mut_ptr().cast(),
             buf_len,
-            &raw mut returned,
+            null_mut(),
         );
         if status < 0 {
             return None;
