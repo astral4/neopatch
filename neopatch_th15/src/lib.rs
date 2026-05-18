@@ -29,15 +29,15 @@ mod vtable;
 mod watchdog;
 mod window;
 
-use config::Config;
-use pacer::{Pacer, PacingPolicy};
+use crate::config::Config;
+use crate::pacer::{Pacer, PacingPolicy};
+use crate::vtable::{FnSlot, parse_fn_ptr};
 use std::env::current_exe;
 use std::ffi::c_void;
 use std::fs::read;
 use std::path::{Path, PathBuf};
 use std::ptr::null;
 use tracing::level_filters::LevelFilter;
-use vtable::{FnSlot, parse_fn_ptr};
 use windows_sys::Win32::Foundation::{E_FAIL, HINSTANCE, HMODULE, MAX_PATH};
 use windows_sys::Win32::System::LibraryLoader::{
     DisableThreadLibraryCalls, GetModuleHandleW, GetProcAddress, LoadLibraryW,

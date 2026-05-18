@@ -122,8 +122,8 @@ impl<F: Copy + Send + Sync + 'static> FnSlot<F> {
 }
 
 /// Reinterprets a raw pointer as a function pointer of type `F`.
-/// Returns `None` for null. Soundness when the result is later actually invoked
-/// depends on `raw` pointing to a function of signature `F`.
+/// Returns `None` for null. Sound when invoked iff `raw` points to
+/// a function with `F`'s signature.
 pub(crate) fn parse_fn_ptr<F: Copy>(raw: *mut ()) -> Option<F> {
     const { assert!(size_of::<F>() == size_of::<*mut ()>()) };
     if raw.is_null() {
@@ -135,8 +135,12 @@ pub(crate) fn parse_fn_ptr<F: Copy>(raw: *mut ()) -> Option<F> {
 }
 
 /// Converts a typed hook into the raw `*mut ()` written by the patcher.
-/// Callers must provide `F` as a function pointer, not a function item (ZST).
+///
+/// `F` must be a function pointer (e.g. `unsafe extern "system" fn(...)`),
+/// not a function item (ZST) or pointer-sized non-fn-ptr type
+/// (`*mut T`, `usize`, `NonNull<T>`).
 pub(crate) fn hook_to_raw<F: Copy + 'static>(hook: F) -> *mut () {
+    // TODO: Tighten to `F: FnPtr` if the `fn_ptr_trait` feature stabilizes
     const { assert!(size_of::<F>() == size_of::<*mut ()>()) };
     // SAFETY: `F` is asserted pointer-sized; only function-pointer types are intended here.
     unsafe { transmute_copy(&hook) }

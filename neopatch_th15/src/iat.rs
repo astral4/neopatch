@@ -81,8 +81,9 @@ impl<F: Copy + Send + Sync + 'static> IatHook<F> {
             .unwrap_or_else(|| panic!("IAT hook {:?} not installed", self.name))
     }
 
-    /// Walks `host`'s IAT, displaces the slot, captures the original.
-    /// Returns `true` on hit. Logs OK/MISS so callers don't have to.
+    /// Walks `host`'s IAT, displaces the slot, and captures the original.
+    /// Returns `true` on hit and `false` on failure. Failures are logged.
+    /// The trampoline panics on first call if the slot was never captured.
     ///
     /// # Safety
     /// `host` must be a loaded module handle.
