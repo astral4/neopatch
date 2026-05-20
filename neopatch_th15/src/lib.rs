@@ -5,6 +5,9 @@
 //! before any game code. The exported `DirectInput8Create` forwards to
 //! the real System32 DLL we load by full path; everything else is hooks.
 
+#[cfg(all(not(panic = "abort"), not(test), not(doc)))]
+compile_error!("neopatch_th15 requires `panic = \"abort\"`");
+
 mod config;
 mod dialog_dismiss;
 mod patches;
@@ -32,14 +35,6 @@ use windows_sys::Win32::System::SystemInformation::GetSystemDirectoryW;
 use windows_sys::Win32::System::SystemServices::DLL_PROCESS_ATTACH;
 use windows_sys::Win32::System::Threading::GetCurrentThreadId;
 use windows_sys::core::{GUID, HRESULT};
-
-// We assume x86 and abort-on-panic throughout the codebase.
-// This is load-bearing for correctness.
-#[cfg(all(not(target_arch = "x86"), not(test), not(doc)))]
-compile_error!("neopatch is x86-only");
-
-#[cfg(all(not(panic = "abort"), not(test), not(doc)))]
-compile_error!("neopatch requires `panic = \"abort\"`");
 
 /// `0x0047158C` in the game is `FF 15 disp32` (6-byte indirect call to `Direct3DCreate9`).
 /// We rewrite it to `E8 disp32 90` (5-byte direct call to our hook plus a trailing NOP).

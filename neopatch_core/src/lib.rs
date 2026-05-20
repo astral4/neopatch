@@ -5,6 +5,9 @@
 //! Game-specific crates depend on this crate and wire game-specific behavior
 //! through the registered callbacks documented on each module.
 
+#[cfg(all(not(target_arch = "x86"), not(test), not(doc)))]
+compile_error!("neopatch is x86-only");
+
 pub mod config;
 pub mod crash;
 pub mod d3d9;
