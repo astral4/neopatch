@@ -199,19 +199,14 @@ unsafe fn log_exception(info: *const EXCEPTION_POINTERS, source: &str) -> bool {
         };
         let _ = write!(msg, " access={access_name} bad_addr={bad_addr:#010x}");
     }
+    let _ = write!(
+        msg,
+        "\nregisters: eax={:#010x} ebx={:#010x} ecx={:#010x} edx={:#010x}\
+         \nregisters: esi={:#010x} edi={:#010x} ebp={:#010x} esp={:#010x}\
+         \nregisters: eip={:#010x} eflags={:#010x}",
+        ctx.Eax, ctx.Ebx, ctx.Ecx, ctx.Edx, ctx.Esi, ctx.Edi, ctx.Ebp, ctx.Esp, ctx.Eip, ctx.EFlags,
+    );
     error!("{msg}");
-    error!(
-        "registers: eax={:#010x} ebx={:#010x} ecx={:#010x} edx={:#010x}",
-        ctx.Eax, ctx.Ebx, ctx.Ecx, ctx.Edx,
-    );
-    error!(
-        "registers: esi={:#010x} edi={:#010x} ebp={:#010x} esp={:#010x}",
-        ctx.Esi, ctx.Edi, ctx.Ebp, ctx.Esp,
-    );
-    error!(
-        "registers: eip={:#010x} eflags={:#010x}",
-        ctx.Eip, ctx.EFlags,
-    );
     // For an indirect-call fault (`call ecx`), `[esp]` is the return address,
     // which pinpoints the call site to the byte. The stack peek is last
     // so register data is already flushed if this read itself faults.
@@ -219,10 +214,9 @@ unsafe fn log_exception(info: *const EXCEPTION_POINTERS, source: &str) -> bool {
     let mut stack = [0u32; 8];
     safe_read_stack(esp, &mut stack);
     info!(
-        "[esp] = {:#010x} (return addr of crashed indirect call)",
+        "[esp] = {:#010x} (return addr of crashed indirect call)\nstack [esp..esp+32]: {stack:#010x?}",
         stack[0],
     );
-    info!("stack [esp..esp+32]: {stack:#010x?}",);
     true
 }
 

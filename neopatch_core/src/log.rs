@@ -199,15 +199,16 @@ fn apply_retention(log_root: &Path, keep: NonZero<u32>, current: &str) {
         .filter_map(Result::ok)
         .map(|e| e.path())
         .filter(|p| {
-            p.is_dir()
-                && p.file_name()
-                    .and_then(|n| n.to_str())
-                    .is_some_and(|n| n != current && is_session_id(n))
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n != current && is_session_id(n))
+                && p.is_dir()
         })
         .collect();
     // Session IDs sort lexicographically by timestamp; ties are broken by PID.
     dirs.sort();
     // -1 to reserve a slot for the session we're about to write.
+    // #[allow(clippy::cast_possible_truncation)]
     let to_keep = (keep.get() - 1) as usize;
     if dirs.len() > to_keep {
         for old in &dirs[..dirs.len() - to_keep] {

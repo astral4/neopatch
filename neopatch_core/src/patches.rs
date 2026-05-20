@@ -9,6 +9,9 @@ use std::fmt::Write as _;
 use std::ptr::{copy_nonoverlapping, with_exposed_provenance, with_exposed_provenance_mut};
 use tracing::{info, warn};
 
+/// Stack-buffer ceiling for patch reads.
+const MAX_PATCH_LEN: usize = 16;
+
 /// Static byte patch.
 pub struct Patch {
     addr: usize,
@@ -98,24 +101,24 @@ unsafe fn write_relative_branch(
         }
         patch_bytes(target, &bytes[..len]);
 
-        let mut actual = [0u8; 6];
-        copy_nonoverlapping(
-            with_exposed_provenance::<u8>(target),
-            actual.as_mut_ptr(),
-            len,
-        );
+        let buf = read_at(target, len);
+        let actual = &buf[..len];
         let read_disp = i32::from_le_bytes([actual[1], actual[2], actual[3], actual[4]]);
         let resolved = target_u32.wrapping_add(5).wrapping_add_signed(read_disp);
-        if actual[0] == opcode && resolved == hook_u32 {
+        // Resolve the branch target as well as checking byte equality, so a downstream
+        // displacement rewrite that keeps the opcode is still caught.
+        let ok = actual[0] == opcode && resolved == hook_u32;
+        let status = if ok { "OK" } else { "MISMATCH" };
+        if ok {
             info!(
                 kind = "patch_verify",
                 addr = format_args!("{target:#010x}"),
                 name,
                 expected = %bytes_hex(&bytes[..len]),
-                actual = %bytes_hex(&actual[..len]),
+                actual = %bytes_hex(actual),
                 resolved_target = format_args!("{resolved:#010x}"),
                 expected_target = format_args!("{hook_u32:#010x}"),
-                status = "OK",
+                status,
             );
         } else {
             warn!(
@@ -123,10 +126,10 @@ unsafe fn write_relative_branch(
                 addr = format_args!("{target:#010x}"),
                 name,
                 expected = %bytes_hex(&bytes[..len]),
-                actual = %bytes_hex(&actual[..len]),
+                actual = %bytes_hex(actual),
                 resolved_target = format_args!("{resolved:#010x}"),
                 expected_target = format_args!("{hook_u32:#010x}"),
-                status = "MISMATCH",
+                status,
             );
         }
     }
@@ -151,10 +154,6 @@ unsafe fn patch_bytes(addr: usize, src: &[u8]) {
         });
     }
 }
-
-/// Stack-buffer ceiling for patch reads. The longest patch in the project is
-/// the 6-byte `FF 15 disp32` rewrite, so 16 should be enough.
-const MAX_PATCH_LEN: usize = 16;
 
 unsafe fn read_at(addr: usize, len: usize) -> [u8; MAX_PATCH_LEN] {
     assert!(

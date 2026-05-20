@@ -74,9 +74,8 @@ pub struct Pacer {
     /// Created eagerly in `new`; null means `CreateWaitableTimerExW` failed both attempts
     /// and `sleep_until` falls through to Sleep+spin.
     timer: MainCell<HANDLE>,
-    /// Cached `qpc_freq / target_fps`. `0` disables pacing.
-    period_qpc: MainCell<i64>,
-    lead_active: MainCell<bool>,
+    /// Source of truth for the pacer's rate and lead-time policy. `target_fps == 0` disables.
+    policy: MainCell<PacingPolicy>,
     /// `0` means "resync on next call."
     deadline_qpc: MainCell<i64>,
 }
@@ -89,8 +88,7 @@ impl Pacer {
             qpc_freq,
             resync_threshold_qpc: qpc_freq * RESYNC_THRESHOLD_MS / 1000,
             timer: MainCell::new(create_waitable_timer()),
-            period_qpc: MainCell::new(period_qpc_from(policy.target_fps(), qpc_freq)),
-            lead_active: MainCell::new(policy.lead_active()),
+            policy: MainCell::new(policy),
             deadline_qpc: MainCell::new(0),
         }
     }
@@ -100,19 +98,20 @@ impl Pacer {
     /// Resets the deadline so the next `wait()` resyncs. Otherwise, a stale deadline
     /// would chase the wrong period for several frames after a rate change.
     pub fn apply_policy(&self, tok: &MainToken, policy: PacingPolicy) {
-        self.period_qpc
-            .set(tok, period_qpc_from(policy.target_fps(), self.qpc_freq));
-        self.lead_active.set(tok, policy.lead_active());
+        self.policy.set(tok, policy);
         self.deadline_qpc.set(tok, 0);
     }
 
     /// Blocks until the next frame's deadline, then advances the deadline.
     /// Call once per `Present`.
     pub fn wait(&self, tok: &MainToken) {
-        let period = self.period_qpc.get(tok);
-        if period <= 0 {
+        let policy = self.policy.get(tok);
+        let target_fps = policy.target_fps();
+        // 0 disengages the pacer; the early return also avoids the division below.
+        if target_fps == 0 {
             return;
         }
+        let period = self.qpc_freq / i64::from(target_fps);
         let now = qpc();
         let mut deadline = self.deadline_qpc.get(tok);
         if deadline == 0 || now > deadline + self.resync_threshold_qpc {
@@ -124,7 +123,7 @@ impl Pacer {
         }
         // Shift only the wait target, not the stored deadline.
         // Long-run cadence still locks to `target_fps`.
-        let target = if self.lead_active.get(tok) {
+        let target = if policy.lead_active() {
             deadline - period / 2
         } else {
             deadline
@@ -185,16 +184,6 @@ fn create_waitable_timer() -> HANDLE {
     };
     info!(kind = "waitable_timer", path);
     h
-}
-
-// 0 is the sentinel value for disengaging the pacer.
-// We handle it specially and avoid division by 0.
-fn period_qpc_from(target_fps: u32, qpc_freq: i64) -> i64 {
-    if target_fps == 0 {
-        0
-    } else {
-        qpc_freq / i64::from(target_fps)
-    }
 }
 
 fn qpc() -> i64 {

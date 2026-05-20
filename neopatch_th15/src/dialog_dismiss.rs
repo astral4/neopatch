@@ -103,8 +103,8 @@ unsafe extern "system" fn hook_create_dialog_param_a(
         let res_radio_id = RES_RADIO_FIRST_ID + i32::from(th15_cfg.resolution.index());
         let fullscreen = matches!(core_cfg.display.mode, DisplayMode::Fullscreen);
 
-        // Restrict the radio range to 0xCD..0xCF. Otherwise, `CheckRadioButton`'s
-        // "clear all others in range" would otherwise hit the checkboxes at 0xCA/CB/CC.
+        // Restrict the radio range to 0xCD..0xCF; otherwise `CheckRadioButton`'s
+        // "clear all others in range" would hit the checkboxes at 0xCA/CB/CC.
         let radio_ret = CheckRadioButton(hwnd, RES_RADIO_FIRST_ID, RES_RADIO_LAST_ID, res_radio_id);
         let fs_state = if fullscreen {
             BST_CHECKED

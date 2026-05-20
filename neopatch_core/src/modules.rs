@@ -80,16 +80,15 @@ pub(crate) fn walk_modules() -> Vec<Module> {
             };
             let mut name_buf = [0u16; NAME_LEN];
             let name_len = GetModuleFileNameExW(process, module, name_buf.as_mut_ptr(), NAME_CAP);
-            let full = if name_len == 0 {
+            let mut name = if name_len == 0 {
                 String::from("<unknown>")
             } else {
                 String::from_utf16_lossy(&name_buf[..name_len as usize])
             };
-            let leaf = full
-                .rsplit_once('\\')
-                .map(|(_, n)| n.to_string())
-                .unwrap_or(full);
-            result.push(Module { range, name: leaf });
+            if let Some(slash) = name.rfind('\\') {
+                name.drain(..=slash);
+            }
+            result.push(Module { range, name });
         }
     }
     result
