@@ -8,7 +8,7 @@ Currently, only Touhou 15 (`th15.exe v1.00b`) is supported. Support for more gam
 
 neopatch ships as a DLL file. The file should be named `dinput8.dll` and placed in the game directory alongside the game executable.
 
-neopatch is configured through a `neopatch.ini` file, which should also be placed in the game directory. Please see [`neopatch.ini.example`](neopatch.ini.example) for information on all of the settings and what's possible with neopatch!
+neopatch is configured through a `neopatch.ini` file, which should also be placed in the game directory. Per-game documentation of the available settings lives in each game crate (Touhou 15: [`neopatch_th15/neopatch.ini.example`](neopatch_th15/neopatch.ini.example)).
 
 neopatch is not compatible with similar mods like vpatch and OpenInputLagPatch (OILP). Attempting to use neopatch with them may cause hard-to-troubleshoot issues.
 
