@@ -1,0 +1,212 @@
+//! In-process byte patching primitives.
+//!
+//! Before writing, every patch primitive checks that the bytes currently at
+//! the target address match the expected pattern. In the case of a mismatch,
+//! the patch is not applied and the mismatch is logged.
+
+use crate::protect::with_writable;
+use std::fmt::Write as _;
+use std::ptr::{copy_nonoverlapping, with_exposed_provenance, with_exposed_provenance_mut};
+use tracing::{info, warn};
+
+/// Static byte patch.
+pub struct Patch {
+    addr: usize,
+    expected: &'static [u8],
+    replacement: &'static [u8],
+    name: &'static str,
+}
+
+impl Patch {
+    #[must_use]
+    pub const fn new<const N: usize>(
+        addr: usize,
+        expected: &'static [u8; N],
+        replacement: &'static [u8; N],
+        name: &'static str,
+    ) -> Self {
+        Self {
+            addr,
+            expected,
+            replacement,
+            name,
+        }
+    }
+
+    /// # Safety
+    /// `self.addr` must be a writable code address.
+    pub unsafe fn apply(&self) {
+        unsafe {
+            if !pre_check(self.addr, self.expected, self.name) {
+                return;
+            }
+            patch_bytes(self.addr, self.replacement);
+            verify_patch(self.addr, self.replacement, self.name);
+        }
+    }
+}
+
+/// Writes a 5-byte relative `e9 disp32` jmp at `target` to `hook`.
+/// `expected` is the 5 bytes the site must currently hold for the write to proceed.
+///
+/// # Safety
+/// `target` must be a writable code address.
+pub unsafe fn patch_jmp(target: usize, expected: &[u8; 5], hook: *mut (), name: &str) {
+    unsafe { write_relative_branch(target, expected, hook, 0xe9, name) };
+}
+
+/// Writes a 6-byte `e8 disp32 90` (direct call + NOP) at `target` to `hook`,
+/// overwriting a 6-byte `FF 15 disp32` indirect-call site in place.
+/// `expected` is the 6 bytes the site must currently hold for the write to proceed.
+///
+/// # Safety
+/// `target` must be a writable code address.
+pub unsafe fn patch_call_over_indirect(
+    target: usize,
+    expected: &[u8; 6],
+    hook: *mut (),
+    name: &str,
+) {
+    unsafe { write_relative_branch(target, expected, hook, 0xe8, name) };
+}
+
+unsafe fn write_relative_branch(
+    target: usize,
+    expected: &[u8],
+    hook: *mut (),
+    opcode: u8,
+    name: &str,
+) {
+    let len = expected.len();
+    #[allow(clippy::cast_possible_truncation)]
+    let (target_u32, hook_u32) = (target as u32, hook as u32);
+
+    // The displacement is always relative to `target + 5`, the byte after
+    // the 5-byte `e8/e9 disp32`. A trailing NOP at offset 5 (for the 6-byte form)
+    // is padding, not part of the next instruction's address.
+    let disp = hook_u32.wrapping_sub(target_u32.wrapping_add(5));
+    let mut bytes = [0u8; 6];
+    bytes[0] = opcode;
+    bytes[1..5].copy_from_slice(&disp.to_le_bytes());
+    if len == 6 {
+        bytes[5] = 0x90;
+    }
+
+    unsafe {
+        if !pre_check(target, expected, name) {
+            return;
+        }
+        patch_bytes(target, &bytes[..len]);
+
+        let mut actual = [0u8; 6];
+        copy_nonoverlapping(
+            with_exposed_provenance::<u8>(target),
+            actual.as_mut_ptr(),
+            len,
+        );
+        let read_disp = i32::from_le_bytes([actual[1], actual[2], actual[3], actual[4]]);
+        let resolved = target_u32.wrapping_add(5).wrapping_add_signed(read_disp);
+        if actual[0] == opcode && resolved == hook_u32 {
+            info!(
+                kind = "patch_verify",
+                addr = format_args!("{target:#010x}"),
+                name,
+                expected = %bytes_hex(&bytes[..len]),
+                actual = %bytes_hex(&actual[..len]),
+                resolved_target = format_args!("{resolved:#010x}"),
+                expected_target = format_args!("{hook_u32:#010x}"),
+                status = "OK",
+            );
+        } else {
+            warn!(
+                kind = "patch_verify",
+                addr = format_args!("{target:#010x}"),
+                name,
+                expected = %bytes_hex(&bytes[..len]),
+                actual = %bytes_hex(&actual[..len]),
+                resolved_target = format_args!("{resolved:#010x}"),
+                expected_target = format_args!("{hook_u32:#010x}"),
+                status = "MISMATCH",
+            );
+        }
+    }
+}
+
+fn bytes_hex(bs: &[u8]) -> String {
+    let mut s = String::with_capacity(bs.len() * 3);
+    for (i, b) in bs.iter().enumerate() {
+        if i > 0 {
+            s.push(' ');
+        }
+        let _ = write!(s, "{b:02x}");
+    }
+    s
+}
+
+unsafe fn patch_bytes(addr: usize, src: &[u8]) {
+    unsafe {
+        let dst: *mut u8 = with_exposed_provenance_mut(addr);
+        let _ = with_writable(dst, src.len(), |p| {
+            copy_nonoverlapping(src.as_ptr(), p, src.len());
+        });
+    }
+}
+
+/// Stack-buffer ceiling for patch reads. The longest patch in the project is
+/// the 6-byte `FF 15 disp32` rewrite, so 16 should be enough.
+const MAX_PATCH_LEN: usize = 16;
+
+unsafe fn read_at(addr: usize, len: usize) -> [u8; MAX_PATCH_LEN] {
+    assert!(
+        len <= MAX_PATCH_LEN,
+        "patch length {len} exceeds MAX_PATCH_LEN ({MAX_PATCH_LEN})",
+    );
+    let mut buf = [0u8; MAX_PATCH_LEN];
+    unsafe {
+        copy_nonoverlapping(with_exposed_provenance::<u8>(addr), buf.as_mut_ptr(), len);
+    }
+    buf
+}
+
+unsafe fn verify_patch(addr: usize, expected: &[u8], name: &str) {
+    let buf = unsafe { read_at(addr, expected.len()) };
+    let actual = &buf[..expected.len()];
+    if actual == expected {
+        info!(
+            kind = "patch_verify",
+            addr = format_args!("{addr:#010x}"),
+            name,
+            expected = %bytes_hex(expected),
+            actual = %bytes_hex(actual),
+            status = "OK",
+        );
+    } else {
+        warn!(
+            kind = "patch_verify",
+            addr = format_args!("{addr:#010x}"),
+            name,
+            expected = %bytes_hex(expected),
+            actual = %bytes_hex(actual),
+            status = "MISMATCH",
+        );
+    }
+}
+
+/// Reads `expected.len()` bytes at `addr` and returns `true` if they match `expected`.
+/// In the case of a mismatch, this returns `false` and the mismatch is logged.
+unsafe fn pre_check(addr: usize, expected: &[u8], name: &str) -> bool {
+    let buf = unsafe { read_at(addr, expected.len()) };
+    let actual = &buf[..expected.len()];
+    if actual == expected {
+        return true;
+    }
+    warn!(
+        kind = "patch_skipped",
+        addr = format_args!("{addr:#010x}"),
+        name,
+        expected = %bytes_hex(expected),
+        actual = %bytes_hex(actual),
+        status = "PRE_MISMATCH",
+    );
+    false
+}

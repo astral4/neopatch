@@ -1,6 +1,7 @@
 //! Direct reads of game state for th15.exe v1.00b.
 
-use crate::game_addr::GameAddr;
+use neopatch_core::d3d9::ReplayMode;
+use neopatch_core::game_addr::GameAddr;
 use std::ptr::read_volatile;
 
 /// `CReplayManager**`; null outside the replay menu.
@@ -22,15 +23,9 @@ struct CReplayManager {
     mode: i32,
 }
 
-#[repr(u32)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ReplayMode {
-    Normal = 0,
-    Skip = 1,
-    Slow = 2,
-}
-
-#[inline]
+/// Probe registered with [`neopatch_core::d3d9::set_replay_mode_fn`].
+/// Reads the replay-manager pointer and input bitfield to classify the current
+/// pacing intent.
 pub(crate) fn replay_mode() -> ReplayMode {
     let mgr = REPLAY_MGR_INSTANCE_PTR.read();
     if mgr.is_null() {
@@ -51,4 +46,3 @@ pub(crate) fn replay_mode() -> ReplayMode {
         ReplayMode::Normal
     }
 }
-

@@ -1,208 +1,144 @@
-//! In-process byte patching primitives.
-//!
-//! Before writing, every patch primitive checks that the bytes currently at
-//! the target address match the expected pattern. In the case of a mismatch,
-//! the patch is not applied and the mismatch is logged.
+//! Static byte patches and hooks for th15.exe v1.00b.
 
-use crate::protect::with_writable;
-use std::fmt::Write as _;
-use std::ptr::{copy_nonoverlapping, with_exposed_provenance, with_exposed_provenance_mut};
-use tracing::{info, warn};
+use neopatch_core::patches::{Patch, patch_jmp};
+use neopatch_core::vtable::parse_fn_ptr;
+use std::arch::naked_asm;
+use std::ffi::c_void;
+use std::ptr::{null_mut, read_unaligned, with_exposed_provenance_mut};
+use tracing::info;
+use windows_sys::Win32::Foundation::{HANDLE, WAIT_TIMEOUT};
+use windows_sys::Win32::System::Threading::WaitForSingleObject;
 
-/// Static byte patch.
-pub(crate) struct Patch {
-    addr: usize,
-    expected: &'static [u8],
-    replacement: &'static [u8],
-    name: &'static str,
-}
-
-impl Patch {
-    pub(crate) const fn new<const N: usize>(
-        addr: usize,
-        expected: &'static [u8; N],
-        replacement: &'static [u8; N],
-        name: &'static str,
-    ) -> Self {
-        Self {
-            addr,
-            expected,
-            replacement,
-            name,
-        }
-    }
-
-    /// # Safety
-    /// `self.addr` must be a writable code address.
-    pub(crate) unsafe fn apply(&self) {
-        unsafe {
-            if !pre_check(self.addr, self.expected, self.name) {
-                return;
-            }
-            patch_bytes(self.addr, self.replacement);
-            verify_patch(self.addr, self.replacement, self.name);
-        }
-    }
-}
-
-/// Writes a 5-byte relative `e9 disp32` jmp at `target` to `hook`.
-/// `expected` is the 5 bytes the site must currently hold for the write to proceed.
+/// "UpdateFast skip": unconditional `jmp +0x4A` past the game's `Sleep`,
+/// spin, and deadline-advance. Without it, the game's own pacer
+/// holds the inter-Present interval at >=33ms in slow replay.
 ///
-/// # Safety
-/// `target` must be a writable code address.
-pub(crate) unsafe fn patch_jmp(target: usize, expected: &[u8; 5], hook: *mut (), name: &str) {
-    unsafe { write_relative_branch(target, expected, hook, 0xe9, name) };
-}
-
-/// Writes a 6-byte `e8 disp32 90` (direct call + NOP) at `target` to `hook`,
-/// overwriting a 6-byte `FF 15 disp32` indirect-call site in place.
-/// `expected` is the 6 bytes the site must currently hold for the write to proceed.
+/// "fast input latency #1/#2": flip the cond jumps to `EB`, forcing the input preamble
+/// to "fast" mode. OILP also does this under "Force fast input latency mode."
 ///
-/// # Safety
-/// `target` must be a writable code address.
-pub(crate) unsafe fn patch_call_over_indirect(
-    target: usize,
-    expected: &[u8; 6],
-    hook: *mut (),
-    name: &str,
-) {
-    unsafe { write_relative_branch(target, expected, hook, 0xe8, name) };
-}
+/// "replay speed control skip": skip the game's own replay-speed control
+/// so it doesn't fight our pacer.
+///
+/// See `dialog_dismiss.rs` for dialog-flow byte patches.
+pub(crate) const PATCHES: &[Patch] = &[
+    Patch::new(0x0047_27de, &[0x72, 0x08], &[0xeb, 0x4a], "UpdateFast skip"),
+    Patch::new(0x0047_1a86, &[0x74], &[0xeb], "fast input latency #1"),
+    Patch::new(0x0047_1a9b, &[0x75], &[0xeb], "fast input latency #2"),
+    Patch::new(
+        0x0045_ced2,
+        &[0x75, 0x04],
+        &[0xeb, 0x1d],
+        "replay speed control skip",
+    ),
+];
 
-unsafe fn write_relative_branch(
-    target: usize,
-    expected: &[u8],
-    hook: *mut (),
-    opcode: u8,
-    name: &str,
-) {
-    let len = expected.len();
-    #[allow(clippy::cast_possible_truncation)]
-    let (target_u32, hook_u32) = (target as u32, hook as u32);
+const FCN_0044BED0: usize = 0x0044_bed0;
+/// `fcn.004865f0` is th15's anim driver. It iterates the 30-slot anim table
+/// and dispatches one `fcn.00486110` work-step on the first slot that needs it.
+/// It returns non-zero if work was done. The calling convention is cdecl with no args;
+/// it only uses globals.
+const FCN_004865F0: usize = 0x0048_65f0;
 
-    // The displacement is always relative to `target + 5`, the byte after
-    // the 5-byte `e8/e9 disp32`. A trailing NOP at offset 5 (for the 6-byte form)
-    // is padding, not part of the next instruction's address.
-    let disp = hook_u32.wrapping_sub(target_u32.wrapping_add(5));
-    let mut bytes = [0u8; 6];
-    bytes[0] = opcode;
-    bytes[1..5].copy_from_slice(&disp.to_le_bytes());
-    if len == 6 {
-        bytes[5] = 0x90;
-    }
+/// Byte offset within the loader-context (`fcn.0044bed0`'s `this`) of the loader thread's
+/// `HANDLE`. `fcn.0044be50` stores the `_beginthreadex` return value here.
+/// `fcn.00403f30`, called from the destructor with `loader_ctx + 0xc`,
+/// reads `[+4]` of that pointer, i.e. `loader_ctx + 0x10`.
+const LOADER_CTX_HANDLE_OFFSET: usize = 0x10;
 
+/// Length of the original prologue at `fcn.0044bed0` that the entry-jmp displaces.
+/// The bytes are `55  8b ec  6a ff` (push ebp; mov ebp, esp; push -1);
+/// the trampoline below replays the same instructions.
+const PROLOGUE_LEN: usize = 5;
+const FCN_0044BED0_AFTER_PROLOGUE: usize = FCN_0044BED0 + PROLOGUE_LEN;
+
+pub(crate) unsafe fn apply_basic() {
     unsafe {
-        if !pre_check(target, expected, name) {
-            return;
+        for patch in PATCHES {
+            patch.apply();
         }
-        patch_bytes(target, &bytes[..len]);
+    }
+}
 
-        let mut actual = [0u8; 6];
-        copy_nonoverlapping(
-            with_exposed_provenance::<u8>(target),
-            actual.as_mut_ptr(),
-            len,
-        );
-        let read_disp = i32::from_le_bytes([actual[1], actual[2], actual[3], actual[4]]);
-        let resolved = target_u32.wrapping_add(5).wrapping_add_signed(read_disp);
-        if actual[0] == opcode && resolved == hook_u32 {
-            info!(
-                kind = "patch_verify",
-                addr = format_args!("{target:#010x}"),
-                name,
-                expected = %bytes_hex(&bytes[..len]),
-                actual = %bytes_hex(&actual[..len]),
-                resolved_target = format_args!("{resolved:#010x}"),
-                expected_target = format_args!("{hook_u32:#010x}"),
-                status = "OK",
-            );
+/// Replays `fcn.0044bed0`'s overwritten prologue, then resumes past the patch site.
+/// None of the replayed instructions touch ECX, so `this` survives the trampoline.
+#[unsafe(naked)]
+unsafe extern "thiscall" fn fcn_0044bed0_trampoline(_this: *mut c_void) -> i32 {
+    naked_asm!(
+        "push ebp",
+        "mov ebp, esp",
+        "push -1",
+        // Absolute jmp so the ASLR-relocated trampoline address doesn't matter.
+        "mov eax, {after_prologue}",
+        "jmp eax",
+        after_prologue = const FCN_0044BED0_AFTER_PROLOGUE,
+    )
+}
+
+unsafe extern "thiscall" fn hooked_fcn_0044bed0(this: *mut c_void) -> i32 {
+    unsafe {
+        let loader_handle: HANDLE = if this.is_null() {
+            null_mut()
         } else {
-            warn!(
-                kind = "patch_verify",
-                addr = format_args!("{target:#010x}"),
-                name,
-                expected = %bytes_hex(&bytes[..len]),
-                actual = %bytes_hex(&actual[..len]),
-                resolved_target = format_args!("{resolved:#010x}"),
-                expected_target = format_args!("{hook_u32:#010x}"),
-                status = "MISMATCH",
+            read_unaligned(
+                this.cast::<u8>()
+                    .add(LOADER_CTX_HANDLE_OFFSET)
+                    .cast::<HANDLE>(),
+            )
+        };
+
+        info!(
+            kind = "destructor_entered",
+            this = format_args!("{this:p}"),
+            loader_handle = format_args!("{loader_handle:p}"),
+        );
+
+        // Drive the anim driver from main until the loader exits.
+        // The initial probe with `timeout = 0` lets the no-bug case,
+        // where the loader is already done, skip the pump entirely.
+        if !loader_handle.is_null() {
+            let driver: unsafe extern "C" fn() -> i32 =
+                parse_fn_ptr(with_exposed_provenance_mut::<()>(FCN_004865F0))
+                    .expect("FCN_004865F0 is a non-zero constant");
+            let mut pump_iters: u32 = 0;
+            let mut r = WaitForSingleObject(loader_handle, 0);
+            while r == WAIT_TIMEOUT {
+                driver();
+                pump_iters = pump_iters.saturating_add(1);
+                r = WaitForSingleObject(loader_handle, 1);
+            }
+            info!(
+                kind = "destructor_pump_drained",
+                this = format_args!("{this:p}"),
+                pump_iters,
             );
         }
-    }
-}
 
-fn bytes_hex(bs: &[u8]) -> String {
-    let mut s = String::with_capacity(bs.len() * 3);
-    for (i, b) in bs.iter().enumerate() {
-        if i > 0 {
-            s.push(' ');
-        }
-        let _ = write!(s, "{b:02x}");
-    }
-    s
-}
-
-unsafe fn patch_bytes(addr: usize, src: &[u8]) {
-    unsafe {
-        let dst: *mut u8 = with_exposed_provenance_mut(addr);
-        let _ = with_writable(dst, src.len(), |p| {
-            copy_nonoverlapping(src.as_ptr(), p, src.len());
-        });
-    }
-}
-
-unsafe fn verify_patch(addr: usize, expected: &[u8], name: &str) {
-    let mut actual = vec![0u8; expected.len()];
-    unsafe {
-        copy_nonoverlapping(
-            with_exposed_provenance::<u8>(addr),
-            actual.as_mut_ptr(),
-            actual.len(),
-        );
-    }
-    if actual == expected {
+        let result = fcn_0044bed0_trampoline(this);
         info!(
-            kind = "patch_verify",
-            addr = format_args!("{addr:#010x}"),
-            name,
-            expected = %bytes_hex(expected),
-            actual = %bytes_hex(&actual),
-            status = "OK",
+            kind = "destructor_returned",
+            this = format_args!("{this:p}"),
+            result,
         );
-    } else {
-        warn!(
-            kind = "patch_verify",
-            addr = format_args!("{addr:#010x}"),
-            name,
-            expected = %bytes_hex(expected),
-            actual = %bytes_hex(&actual),
-            status = "MISMATCH",
-        );
+        result
     }
 }
 
-/// Reads `expected.len()` bytes at `addr` and returns `true` if they match `expected`.
-/// In the case of a mismatch, this returns `false` and the mismatch is logged;
-/// callers must refuse the write.
-unsafe fn pre_check(addr: usize, expected: &[u8], name: &str) -> bool {
-    let mut actual = vec![0u8; expected.len()];
+/// Function-entry hook on `fcn.0044bed0` (the loader-context destructor)
+/// that resolves a deadlock between the destructor's thread-join and a worker
+/// spinning in `preloadAnim`. The worker spins on `[anim+0x128]`, which is cleared
+/// only by the anim driver `fcn.004865f0`, reachable only from `main`'s per-frame state-tick.
+/// Once the destructor takes `main`, the state-tick stops, the flag never clears,
+/// the worker never exits, and the destructor's `WaitForSingleObject` waits forever.
+/// We hook at the function entry (rather than at every call site) just to be sure.
+pub(crate) unsafe fn install_destructor_hook() {
     unsafe {
-        copy_nonoverlapping(
-            with_exposed_provenance::<u8>(addr),
-            actual.as_mut_ptr(),
-            actual.len(),
+        patch_jmp(
+            FCN_0044BED0,
+            // Original 5-byte prologue (`push ebp; mov ebp, esp; push -1`)
+            // that the entry-jmp displaces.
+            &[0x55, 0x8b, 0xec, 0x6a, 0xff],
+            hooked_fcn_0044bed0 as *mut (),
+            "fcn.0044bed0 entry-jmp -> hooked_fcn_0044bed0",
         );
     }
-    if actual == expected {
-        return true;
-    }
-    warn!(
-        kind = "patch_skipped",
-        addr = format_args!("{addr:#010x}"),
-        name,
-        expected = %bytes_hex(expected),
-        actual = %bytes_hex(&actual),
-        status = "PRE_MISMATCH",
-    );
-    false
 }

@@ -16,7 +16,7 @@ use windows::core::HRESULT;
 use windows_sys::Win32::Foundation::HMODULE;
 
 iat_hook! {
-    REAL_D3DX_CREATE_TEX / real_d3dx_create_texture : c"D3DXCreateTexture"
+    REAL_D3DX_CREATE_TEX / real_d3dx_create_texture : "D3DXCreateTexture"
         as fn(
             device: *mut c_void,
             width: u32,
@@ -31,7 +31,7 @@ iat_hook! {
 
 iat_hook! {
     REAL_D3DX_CREATE_TEX_FROM_FILE_IN_MEM_EX / real_d3dx_create_texture_from_file_in_memory_ex
-        : c"D3DXCreateTextureFromFileInMemoryEx"
+        : "D3DXCreateTextureFromFileInMemoryEx"
         as fn(
             device: *mut c_void,
             src_data: *const c_void,
@@ -54,7 +54,12 @@ iat_hook! {
 static D3DX_CREATE_TEX_LOG: LogCap = LogCap::new(NonZero::new(32).unwrap());
 static D3DX_CREATE_FROM_MEM_LOG: LogCap = LogCap::new(NonZero::new(32).unwrap());
 
-pub(crate) unsafe fn install(host: HMODULE) {
+/// IAT-hooks `D3DXCreateTexture` and `D3DXCreateTextureFromFileInMemoryEx`
+/// against `host`'s import table for every `d3dx9_*.dll` version.
+///
+/// # Safety
+/// `host` must be a loaded module handle.
+pub unsafe fn install(host: HMODULE) {
     unsafe {
         REAL_D3DX_CREATE_TEX.install(host, hook_d3dx_create_texture);
         REAL_D3DX_CREATE_TEX_FROM_FILE_IN_MEM_EX

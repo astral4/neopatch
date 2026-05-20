@@ -22,14 +22,14 @@ use crate::config::{CONFIG, RefreshRateMode};
 use crate::log::LogCap;
 use crate::pacer::{PACER, PacingPolicy};
 use crate::patches::patch_call_over_indirect;
-use crate::th15_state::{ReplayMode, replay_mode};
 use crate::thread::{MainCell, MainToken};
 use crate::vtable::{capture_slot, install_vtable};
 use crate::{iat_hook, match_named, vtable_sig, vtable_slot, vtbl_field};
 use std::ffi::c_void;
 use std::num::NonZero;
 use std::ptr::{NonNull, null, null_mut};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU32, Ordering};
 use tracing::{info, warn};
 use windows::Win32::Foundation::{HANDLE, HWND, RECT};
 use windows::Win32::Graphics::Direct3D9::{
@@ -52,7 +52,6 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 
 /// Renders an HRESULT as `0xNNNNNNNN`.
-/// This is crate-exported so all d3dx9 hooks have consistent formatting.
 #[macro_export]
 macro_rules! fmt_hr {
     ($hr:expr) => {
@@ -63,15 +62,32 @@ macro_rules! fmt_hr {
 #[allow(clippy::cast_possible_truncation)]
 const D3DDISPLAYMODEEX_SIZE: u32 = size_of::<D3DDISPLAYMODEEX>() as u32;
 
-/// `0x0047158C` in the game is `FF 15 disp32` (6-byte indirect call to `Direct3DCreate9`).
-/// We rewrite it to `E8 disp32 90` (5-byte direct call to our hook plus a trailing NOP).
-/// This is defense for the IAT hook below in case another program IAT-hooks
-/// `Direct3DCreate9` after us, so the main call still lands on us.
-///
-/// A second `FF 15 [iat]` site exists at `0x00472e72` in what seems like
-/// dead error-recovery code. We intentionally don't patch this site.
-/// The IAT hook below covers it for any live caller.
-const TH15_DIRECT3DCREATE9_CALL_ADDR: usize = 0x0047_158c;
+/// Replay-speed state observed by game-specific crates, queried each `Present`
+/// to decide whether to switch the pacer policy.
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReplayMode {
+    Normal = 0,
+    Skip = 1,
+    Slow = 2,
+}
+
+/// Callback registered by game-specific crates via [`set_replay_mode_fn`].
+/// Defaults to `Normal` before `install` or for games without replay-speed control.
+static REPLAY_MODE_FN: OnceLock<fn() -> ReplayMode> = OnceLock::new();
+
+/// Registers the game-specific replay-mode probe. Idempotent: the first caller wins.
+/// Call before [`install`]; later callers are silently ignored.
+pub fn set_replay_mode_fn(f: fn() -> ReplayMode) {
+    let _ = REPLAY_MODE_FN.set(f);
+}
+
+fn replay_mode() -> ReplayMode {
+    REPLAY_MODE_FN
+        .get()
+        .copied()
+        .map_or(ReplayMode::Normal, |f| f())
+}
 
 // At most one `IDirect3D9` and one device is live at a time in the game.
 // `REAL_CREATE_DEVICE_EX` and `REAL_RESET_EX` are read at install time,
@@ -185,7 +201,7 @@ vtable_sig! {
 }
 
 iat_hook! {
-    REAL_DIRECT3D_CREATE9 / real_direct3d_create9 : c"Direct3DCreate9"
+    REAL_DIRECT3D_CREATE9 / real_direct3d_create9 : "Direct3DCreate9"
         as fn(sdk_version: u32) -> *mut c_void;
 }
 
@@ -193,9 +209,7 @@ static TEX_LOG: LogCap = LogCap::new(NonZero::new(64).unwrap());
 static VBUF_LOG: LogCap = LogCap::new(NonZero::new(64).unwrap());
 static CHECK_DEVICE_FORMAT_LOG: LogCap = LogCap::new(NonZero::new(64).unwrap());
 
-/// Incremented on every `hook_present`. This is read by `watchdog::watchdog_loop`
-/// to annotate ticks with the current frame number.
-static PRESENT_COUNT: AtomicU64 = AtomicU64::new(0);
+static PRESENT_COUNT: AtomicU32 = AtomicU32::new(0);
 
 // `Pacer::apply_policy` resets the deadline, so call it only on mode change.
 static MODE: MainCell<ReplayMode> = MainCell::new(ReplayMode::Normal);
@@ -210,18 +224,34 @@ struct ResetCtx {
 }
 static RESET_CTX: MainCell<Option<ResetCtx>> = MainCell::new(None);
 
-pub(crate) fn present_count() -> u64 {
+pub(crate) fn present_count() -> u32 {
     PRESENT_COUNT.load(Ordering::Relaxed)
 }
 
-pub(crate) unsafe fn install(host: HMODULE) {
+/// IAT-hook `Direct3DCreate9` against `host`'s import table, forwarding to `Direct3DCreate9Ex`.
+/// For defense against tools that IAT-hook the same import after us, game-specific crates
+/// should additionally call [`install_call_site_rewrite`] for each known live call site.
+/// Rewritten sites bypass the IAT entirely.
+///
+/// # Safety
+/// `host` must be a loaded module handle.
+pub unsafe fn install(host: HMODULE) {
     unsafe {
         REAL_DIRECT3D_CREATE9.install(host, hook_direct3dcreate9);
+    }
+}
+
+/// Rewrites a 6-byte `FF 15 disp32` indirect-call site to a 5-byte direct call
+/// to our `Direct3DCreate9` hook plus a trailing NOP.
+///
+/// # Safety
+/// `addr` must be a writable code address holding a 6-byte indirect call whose
+/// bytes equal `expected`.
+pub unsafe fn install_call_site_rewrite(addr: usize, expected: &[u8; 6]) {
+    unsafe {
         patch_call_over_indirect(
-            TH15_DIRECT3DCREATE9_CALL_ADDR,
-            // Original 6-byte indirect call: `FF 15 [iat]`, where the IAT entry is
-            // `0x004be2b0` (the `Direct3DCreate9` slot in th15.exe v1.00b).
-            &[0xff, 0x15, 0xb0, 0xe2, 0x4b, 0x00],
+            addr,
+            expected,
             hook_direct3dcreate9 as *mut (),
             "Direct3DCreate9 call-site rewrite",
         );
@@ -386,9 +416,8 @@ unsafe extern "system" fn hook_create_device(
 /// Unfortunately, this means we can't discover refresh rates above the current desktop's
 /// under the `NativeMultiple` setting. Users who need that can use `Fixed(N)`.
 ///
-/// On `GetAdapterDisplayModeEx` failure we try `EnumDisplaySettingsExW` (Win32 GDI path;
-/// doesn't touch d3d9 and works on the configurations where the d3d9 path breaks),
-/// then fall back to 60 Hz if both fail.
+/// On `GetAdapterDisplayModeEx` failure we try `EnumDisplaySettingsExW`
+/// (Win32 GDI path; doesn't touch d3d9), then fall back to 60 Hz if both fail.
 unsafe fn pick_refresh_rate(this: *mut c_void, adapter: u32, mode: RefreshRateMode) -> u32 {
     unsafe {
         let mut current = D3DDISPLAYMODEEX {
@@ -438,7 +467,7 @@ unsafe fn apply_refresh_override(
 
 /// Win32 fallback for refresh-rate query. Returns the current desktop's refresh rate
 /// via `EnumDisplaySettingsExW`. Returns `None` if the call fails, or if `dmDisplayFrequency`
-/// is 0 or 1 (the magic values that mean "hardware default rate," not a real refresh rate).
+/// is 0 or 1 (magic values that mean "hardware default rate," not a real refresh rate).
 fn win32_current_refresh_rate() -> Option<u32> {
     // Caller-set `dmSize` tells Win32 which `DEVMODE` fields are valid.
     // `dmDisplayFrequency` lives well within the size we report.
@@ -459,8 +488,7 @@ fn win32_current_refresh_rate() -> Option<u32> {
 
 /// `NativeMultiple` floors to a multiple of 60 capped at `current_rate`.
 /// On sub-60-Hz desktops, it falls back to 60 Hz rather than picking 0.
-/// `Fixed` passes through; the caller is responsible
-/// for the `refresh_rate_fixed_unvalidated` log line.
+/// `Fixed` passes through.
 fn compute_refresh_rate(mode: RefreshRateMode, current_rate: u32) -> u32 {
     match mode {
         RefreshRateMode::Native => current_rate,
@@ -553,13 +581,12 @@ unsafe fn install_device_hooks(dev: NonNull<c_void>) {
     }
 }
 
-/// Substitutes `X8R8G8B8` for `A8R8G8B8` when the game passes the latter as `AdapterFormat`.
+/// Substitutes `X8R8G8B8` for `A8R8G8B8` when a game passes the latter as `AdapterFormat`.
 ///
-/// `fcn.00473460` in the game calls `CheckDeviceFormat` with `A8R8G8B8` as the adapter format,
-/// which is invalid (`A8R8G8B8` is not a displayable format). Vanilla D3D9 returns
-/// `D3D_OK` regardless, but D3D9Ex is strict and returns `D3DERR_NOTAVAILABLE`.
-/// This sends the game down a reduced-color-mode path that fails to create 5 textures
-/// and exits. The substitution fixes this bug by giving the call its intended meaning.
+/// `A8R8G8B8` isn't a displayable format. Vanilla D3D9 silently accepts it and returns
+/// `D3D_OK`; D3D9Ex is strict and returns `D3DERR_NOTAVAILABLE`. Games written against
+/// the lenient behavior can fall down a reduced-color-mode path that fails subsequent
+/// resource creation. The substitution gives the call its intended meaning.
 unsafe extern "system" fn hook_check_device_format(
     this: *mut c_void,
     adapter: u32,

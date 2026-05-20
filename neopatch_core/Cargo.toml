@@ -1,24 +1,23 @@
 [package]
-name = "neopatch_th15"
+name = "neopatch_core"
 version.workspace = true
 authors.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description = "neopatch for Touhou 15"
+description = "Game-agnostic foundation for neopatch (hooks, pacer, diagnostics)"
 readme.workspace = true
 repository.workspace = true
 license.workspace = true
 publish.workspace = true
 
 [lib]
-name = "dinput8"
-crate-type = ["cdylib"]
+name = "neopatch_core"
 
 [lints]
 workspace = true
 
 [dependencies]
-neopatch_core = { path = "../neopatch_core" }
 windows-sys = { workspace = true }
 windows = { workspace = true }
 tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

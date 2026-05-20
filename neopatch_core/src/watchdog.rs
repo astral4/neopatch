@@ -1,8 +1,7 @@
 //! Watchdog for thread snapshots and hang diagnostics.
 //!
-//! The watchdog suspends every thread in the process except itself,
-//! captures `CONTEXT` and the top of the stack via `safe_read_stack`,
-//! walks EBP frames, and emits an annotated log line per thread.
+//! The watchdog suspends every thread in the process except itself, captures `CONTEXT`
+//! and the top of the stack, walks EBP frames, and emits an annotated log line per thread.
 
 use crate::d3d9::present_count;
 use crate::log::flush;
@@ -51,19 +50,19 @@ struct UnicodeStringHeader {
 /// Per-thread sample. EBP drives `walk_ebp_frames`.
 /// In case the EBP walk terminates early, we fall back to the 64-word stack window.
 struct ThreadSample {
-    // Windows TIDs are non-zero by API convention.
+    // Windows TIDs are non-zero by convention.
     tid: NonZero<u32>,
     eip: u32,
     esp: u32,
     ebp: u32,
     // `NtQueryInformationThread` returns the user-mode entry point
-    // passed to `CreateThread`; a zero result means the query failed
+    // passed to `CreateThread`. A zero result means the query failed
     // or the thread is in a state where the address isn't yet recorded.
     start_addr: Option<NonZero<u32>>,
     stack: [u32; 64],
 }
 
-pub(crate) fn install() {
+pub fn install() {
     Builder::new()
         .name("neopatch-watchdog".into())
         .spawn(watchdog_loop)
@@ -100,13 +99,13 @@ fn lookup_handle_type(handle: NonZero<u32>) -> Option<String> {
 }
 
 /// Run `f` with `h` suspended. The body runs between `SuspendThread` and `ResumeThread`.
-/// We don't use a RAII guard because we have `panic = "abort"`.
 ///
 /// # Safety
 /// `h` must be a valid thread handle with `THREAD_SUSPEND_RESUME` access.
 /// `f` must not allocate or otherwise take a lock the suspended thread may hold;
 /// if `h` is inside that critical section, the closure deadlocks against it.
 unsafe fn with_suspended<R>(h: HANDLE, f: impl FnOnce() -> R) -> R {
+    // We don't use a RAII guard because we have `panic = "abort"`.
     unsafe {
         SuspendThread(h);
     }
@@ -139,9 +138,9 @@ fn lookup_thread_start(thread_handle: HANDLE) -> Option<NonZero<u32>> {
     }
 }
 
-/// Opens `tid`, suspends it, snapshots its `CONTEXT` and the top of its stack,
-/// then resumes. Returns `None` for `tid = 0`, a thread that cannot be opened,
-/// or a thread whose context cannot be read.
+/// Opens `tid`, suspends it, snapshots its `CONTEXT` and the top of its stack, then resumes.
+/// Returns `None` for `tid = 0`, a thread that cannot be opened, or a thread whose context
+/// cannot be read.
 fn sample_thread(tid: u32) -> Option<ThreadSample> {
     let tid = NonZero::new(tid)?;
     // SAFETY: `with_suspended` requires `h` valid (non-null after `OpenThread`)
@@ -218,7 +217,7 @@ fn enumerate_thread_samples(skip_tid: u32) -> Vec<ThreadSample> {
 
 fn watchdog_loop() {
     let mut iter: u64 = 0;
-    let mut prev_frame: Option<u64> = None;
+    let mut prev_frame: Option<u32> = None;
     loop {
         sleep(Duration::from_secs(1));
         iter += 1;
@@ -239,10 +238,10 @@ fn watchdog_loop() {
     }
 }
 
-/// Walks all loaded modules, samples `main` and every other thread,
-/// and walks EBP chains and stack words. This is a heavyweight diagnostic
-/// and is only called when the frame counter hasn't advanced for ~1 second.
-fn snapshot_stuck(iter: u64, frame: u64) {
+/// Walks all loaded modules, samples `main` and every other thread, and walks EBP chains
+/// and stack words. This is a heavyweight diagnostic and is only called
+/// when the frame counter hasn't advanced for ~1 second.
+fn snapshot_stuck(iter: u64, frame: u32) {
     let modules = walk_modules();
     let main_tid = main_id();
     let Some(s) = sample_thread(main_tid) else {
@@ -315,9 +314,9 @@ fn snapshot_stuck(iter: u64, frame: u64) {
     }
 }
 
-/// Walks the saved-EBP linked list and returns up to `MAX_FRAMES`
-/// annotated return addresses. Stops when EBP leaves the heuristic stack range,
-/// becomes misaligned, or stops strictly increasing.
+/// Walks the saved-EBP linked list and returns up to `MAX_FRAMES` annotated return addresses.
+/// Stops when EBP leaves the heuristic stack range, becomes misaligned,
+/// or stops strictly increasing.
 fn walk_ebp_frames(initial_ebp: u32, esp: u32, modules: &[Module]) -> Vec<String> {
     const MAX_FRAMES: usize = 32;
     const MAX_STACK_SPAN: u32 = 0x0010_0000;

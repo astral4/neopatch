@@ -72,48 +72,64 @@ macro_rules! vtbl_field {
 static OUR_DLL_RANGE: OnceLock<ModuleRange> = OnceLock::new();
 
 /// Marker for a function-pointer type `F`. Use through `vtable_sig!`.
-pub(crate) struct Sig<F>(PhantomData<F>);
+pub struct Sig<F>(PhantomData<F>);
+
+impl<F> Default for Sig<F> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl<F> Sig<F> {
-    pub(crate) const fn new() -> Self {
+    #[must_use]
+    pub const fn new() -> Self {
         Self(PhantomData)
     }
 }
 
 /// A typed function-pointer slot. `F` is the function pointer type.
 // TODO: Tighten to `F: FnPtr` if the `fn_ptr_trait` feature stabilizes.
-pub(crate) struct FnSlot<F: Copy + Send + Sync + 'static> {
+pub struct FnSlot<F: Copy + Send + Sync + 'static> {
     slot: OnceLock<F>,
     /// The slot's identifier used for panic and diagnostic messages.
     name: &'static str,
 }
 
 impl<F: Copy + Send + Sync + 'static> FnSlot<F> {
-    pub(crate) const fn new(name: &'static str) -> Self {
+    #[must_use]
+    pub const fn new(name: &'static str) -> Self {
         Self {
             slot: OnceLock::new(),
             name,
         }
     }
 
-    pub(crate) const fn name(&self) -> &'static str {
+    pub const fn name(&self) -> &'static str {
         self.name
     }
 
-    /// Reads the pointer. Panics if the pointer is uncaptured.
-    pub(crate) fn get(&self) -> F {
+    /// Reads the pointer.
+    ///
+    /// # Panics
+    /// Panics if the slot has not been captured. Always call `store` (directly
+    /// or via the vtable/IAT installers) before calling `get` from a hook body.
+    pub fn get(&self) -> F {
         *self
             .slot
             .get()
             .unwrap_or_else(|| panic!("slot `{}` not captured", self.name))
     }
 
-    pub(crate) fn try_get(&self) -> Option<F> {
+    pub fn try_get(&self) -> Option<F> {
         self.slot.get().copied()
     }
 
-    /// Stores `f` in the slot. Panics on double-capture.
-    pub(crate) fn store(&self, f: F) {
+    /// Stores `f` in the slot.
+    ///
+    /// # Panics
+    /// Panics on double-capture. The vtable and IAT installers call this exactly
+    /// once per slot; if you call it directly, do so only once.
+    pub fn store(&self, f: F) {
         assert!(
             self.slot.set(f).is_ok(),
             "slot `{}`: already captured",
@@ -125,7 +141,7 @@ impl<F: Copy + Send + Sync + 'static> FnSlot<F> {
 /// Reinterprets a raw pointer as a function pointer of type `F`.
 /// Returns `None` for null. Sound when invoked iff `raw` points to
 /// a function with `F`'s signature.
-pub(crate) fn parse_fn_ptr<F: Copy>(raw: *mut ()) -> Option<F> {
+pub fn parse_fn_ptr<F: Copy>(raw: *mut ()) -> Option<F> {
     const { assert!(size_of::<F>() == size_of::<*mut ()>()) };
     if raw.is_null() {
         return None;
@@ -140,14 +156,14 @@ pub(crate) fn parse_fn_ptr<F: Copy>(raw: *mut ()) -> Option<F> {
 /// `F` must be a function pointer (e.g. `unsafe extern "system" fn(...)`),
 /// not a function item (ZST) or pointer-sized non-fn-ptr type
 /// (`*mut T`, `usize`, `NonNull<T>`).
-pub(crate) fn hook_to_raw<F: Copy + 'static>(hook: F) -> *mut () {
+pub fn hook_to_raw<F: Copy + 'static>(hook: F) -> *mut () {
     // TODO: Tighten to `F: FnPtr` if the `fn_ptr_trait` feature stabilizes.
     const { assert!(size_of::<F>() == size_of::<*mut ()>()) };
     // SAFETY: `F` is asserted pointer-sized; only function-pointer types are intended here.
     unsafe { transmute_copy(&hook) }
 }
 
-pub(crate) fn set_our_dll_handle(hinst: HMODULE) {
+pub fn set_our_dll_handle(hinst: HMODULE) {
     if let Some(range) = module_info(hinst) {
         let _ = OUR_DLL_RANGE.set(range);
     }
@@ -161,7 +177,7 @@ fn our_dll_range() -> Option<ModuleRange> {
 ///
 /// Construct via `vtbl_field!`. Writes through this projection are guaranteed to land
 /// inside the protect window opened by `install_vtable` over `size_of::<V>()` bytes.
-pub(crate) struct SlotProjection<V, F> {
+pub struct SlotProjection<V, F> {
     offset: usize,
     _phantom: PhantomData<(*mut V, F)>,
 }
@@ -175,7 +191,12 @@ impl<V, F> Clone for SlotProjection<V, F> {
 impl<V, F> Copy for SlotProjection<V, F> {}
 
 impl<V, F> SlotProjection<V, F> {
-    pub(crate) const fn at(offset: usize) -> Self {
+    /// Constructs a projection at `offset` bytes within vtable type `V`.
+    ///
+    /// # Panics
+    /// Panics if `offset + size_of::<F>() > size_of::<V>()`.
+    #[must_use]
+    pub const fn at(offset: usize) -> Self {
         assert!(
             offset + size_of::<F>() <= size_of::<V>(),
             "SlotProjection: slot extends past size_of::<V>()",
@@ -187,9 +208,9 @@ impl<V, F> SlotProjection<V, F> {
     }
 
     fn slot_ptr(self, vtbl: *mut V) -> *mut F {
-        // SAFETY: the assertion in `SlotProjection::at` bounds
-        // `offset + size_of::<F>()` by `size_of::<V>()`,
-        // so the resulting pointer stays inside `V`'s allocation when `vtbl` does.
+        // SAFETY: the assertion in `SlotProjection::at` bounds `offset + size_of::<F>()`
+        // by `size_of::<V>()`, so the resulting pointer stays inside `V`'s allocation
+        // when `vtbl` does.
         unsafe { vtbl.cast::<u8>().add(self.offset).cast::<F>() }
     }
 
@@ -205,11 +226,8 @@ impl<V, F> SlotProjection<V, F> {
 ///
 /// # Safety
 /// `vtbl` must point to a valid `V`. The slot at `proj` is read as a function pointer.
-pub(crate) unsafe fn capture_slot<F, V>(
-    vtbl: NonNull<V>,
-    proj: SlotProjection<V, F>,
-    dst: &FnSlot<F>,
-) where
+pub unsafe fn capture_slot<F, V>(vtbl: NonNull<V>, proj: SlotProjection<V, F>, dst: &FnSlot<F>)
+where
     F: Copy + Send + Sync + 'static,
 {
     let slot_ptr: *const F = proj.slot_ptr(vtbl.as_ptr()).cast_const();
@@ -221,7 +239,7 @@ pub(crate) unsafe fn capture_slot<F, V>(
     }
 }
 
-pub(crate) struct VtblScope<'a, V> {
+pub struct VtblScope<'a, V> {
     vtbl: *mut V,
     modules: &'a [Module],
     our_range: Option<ModuleRange>,
@@ -231,7 +249,7 @@ pub(crate) struct VtblScope<'a, V> {
 impl<V> VtblScope<'_, V> {
     /// Capture the displaced original into `original`
     /// and write `hook` at the slot reached by `proj`.
-    pub(crate) fn intercept<F>(
+    pub fn intercept<F>(
         &self,
         original: &FnSlot<F>,
         proj: SlotProjection<V, F>,
@@ -245,7 +263,7 @@ impl<V> VtblScope<'_, V> {
 
     /// Like `intercept`, except the displaced original isn't captured.
     /// `_sig` is  declared via `vtable_sig!` and used as type inference for `F`.
-    pub(crate) fn redirect<F>(&self, _sig: &Sig<F>, proj: SlotProjection<V, F>, name: &str, hook: F)
+    pub fn redirect<F>(&self, _sig: &Sig<F>, proj: SlotProjection<V, F>, name: &str, hook: F)
     where
         F: Copy + Send + Sync + 'static,
     {
@@ -302,7 +320,7 @@ impl<V> VtblScope<'_, V> {
             slot.store(f);
         }
         let hook_raw = hook_to_raw(hook);
-        // Release fence: order `slot.store` before the vtable write so trampolines reading
+        // The fence orders `slot.store` before the vtable write so trampolines reading
         // the new slot value also see the captured `original` via `FnSlot::try_get`.
         fence(Ordering::Release);
         // SAFETY: see above.
@@ -389,8 +407,8 @@ enum Outcome {
 /// # Safety
 /// `vtbl` must point to a valid `V` whose backing memory can be made writable
 /// through `VirtualProtect`.
-#[must_use = "the Option carries the scope's result; `None` signals VirtualProtect failure"]
-pub(crate) unsafe fn install_vtable<V, R>(
+#[must_use]
+pub unsafe fn install_vtable<V, R>(
     vtbl: NonNull<V>,
     scope: impl FnOnce(&VtblScope<'_, V>) -> R,
 ) -> Option<R> {

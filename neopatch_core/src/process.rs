@@ -10,7 +10,7 @@ use windows_sys::Win32::System::Threading::{
     PROCESS_CREATION_FLAGS, SetPriorityClass, SetProcessAffinityMask,
 };
 
-pub(crate) fn apply(cfg: &ProcessCfg) {
+pub fn apply(cfg: &ProcessCfg) {
     if let Some(pc) = priority_class(cfg.priority) {
         let ok = unsafe { SetPriorityClass(GetCurrentProcess(), pc) };
         // We snapshot `GetLastError` eagerly because `format_args!` is lazy

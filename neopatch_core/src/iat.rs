@@ -1,7 +1,7 @@
 //! Utilities for walking a loaded module's import directory and replacing IAT slots.
 //!
-//! `IatHook<F>` carries the import's function-pointer type through the install /
-//! capture / call chain. The trampoline calls the captured original directly
+//! `IatHook<F>` carries the import's function-pointer type through
+//! the install/capture/call chain. The trampoline calls the captured original directly
 //! without transmuting. The install method takes the hook as typed `F`,
 //! so a hook with a mismatched signature is a compile error.
 
@@ -25,7 +25,7 @@ use windows_sys::Win32::System::WindowsProgramming::IMAGE_THUNK_DATA32;
 ///
 /// ```text
 /// iat_hook! {
-///     REAL_GET_DEVICE_CAPS / real_get_device_caps : c"GetDeviceCaps"
+///     REAL_GET_DEVICE_CAPS / real_get_device_caps : "GetDeviceCaps"
 ///         as fn(hdc: HDC, index: i32) -> i32;
 /// }
 /// ```
@@ -37,12 +37,12 @@ use windows_sys::Win32::System::WindowsProgramming::IMAGE_THUNK_DATA32;
 #[macro_export]
 macro_rules! iat_hook {
     (
-        $real:ident / $trampoline:ident : $cstr:literal
+        $real:ident / $trampoline:ident : $name:literal
             as fn($($arg:ident : $argty:ty),* $(,)?) -> $ret:ty;
     ) => {
         static $real: $crate::iat::IatHook<
             unsafe extern "system" fn($($argty),*) -> $ret,
-        > = $crate::iat::IatHook::new($cstr, stringify!($real));
+        > = $crate::iat::IatHook::new($name, stringify!($real));
 
         #[inline]
         #[allow(dead_code, clippy::too_many_arguments)]
@@ -61,21 +61,25 @@ struct ImageImportByName {
 /// Set-once-with-non-null storage for an IAT hook's import name and displaced original pointer.
 /// Use through `iat_hook!`. `IatHook::original` panics if `install` was never called or missed,
 /// so an uncaptured trampoline fires a named panic instead of dispatching through null.
-pub(crate) struct IatHook<F: Copy + Send + Sync + 'static> {
+pub struct IatHook<F: Copy + Send + Sync + 'static> {
     slot: FnSlot<F>,
-    name: &'static CStr,
+    name: &'static str,
 }
 
 impl<F: Copy + Send + Sync + 'static> IatHook<F> {
-    pub(crate) const fn new(name: &'static CStr, slot_name: &'static str) -> Self {
+    #[must_use]
+    pub const fn new(name: &'static str, slot_name: &'static str) -> Self {
         Self {
             slot: FnSlot::new(slot_name),
             name,
         }
     }
 
-    /// Reads the captured original. Panics if `install` was never called or missed.
-    pub(crate) fn original(&self) -> F {
+    /// Reads the captured original.
+    ///
+    /// # Panics
+    /// Panics if `install` was never called or returned without capturing the slot.
+    pub fn original(&self) -> F {
         self.slot
             .try_get()
             .unwrap_or_else(|| panic!("IAT hook {:?} not installed", self.name))
@@ -87,11 +91,10 @@ impl<F: Copy + Send + Sync + 'static> IatHook<F> {
     ///
     /// # Safety
     /// `host` must be a loaded module handle.
-    pub(crate) unsafe fn install(&self, host: HMODULE, hook: F) -> bool {
+    pub unsafe fn install(&self, host: HMODULE, hook: F) -> bool {
         let hook_raw = hook_to_raw(hook);
-        let name_str = self.name.to_str().unwrap();
         let Some(slot_ptr) = (unsafe { find_iat_slot(host, self.name) }) else {
-            warn!(kind = "iat_hook", name = name_str, status = "MISS");
+            warn!(kind = "iat_hook", name = self.name, status = "MISS");
             return false;
         };
         let slot_raw = slot_ptr.as_ptr();
@@ -100,11 +103,11 @@ impl<F: Copy + Send + Sync + 'static> IatHook<F> {
         // without touching protection.
         let raw_current: *mut () = unsafe { read_unaligned(slot_raw) };
         let Some(original) = parse_fn_ptr::<F>(raw_current) else {
-            warn!(kind = "iat_hook", name = name_str, status = "MISS_NULL");
+            warn!(kind = "iat_hook", name = self.name, status = "MISS_NULL");
             return false;
         };
         self.slot.store(original);
-        // Release fence: order `slot.store` before the IAT write so trampolines reading
+        // The fence orders `slot.store` before the IAT write so trampolines reading
         // the new IAT value also see the captured `original` via `FnSlot::try_get`.
         let written = unsafe {
             with_writable(slot_raw.cast::<u8>(), size_of::<*mut ()>(), |_| {
@@ -113,10 +116,10 @@ impl<F: Copy + Send + Sync + 'static> IatHook<F> {
             })
         };
         if written.is_some() {
-            info!(kind = "iat_hook", name = name_str, status = "OK");
+            info!(kind = "iat_hook", name = self.name, status = "OK");
             true
         } else {
-            warn!(kind = "iat_hook", name = name_str, status = "MISS");
+            warn!(kind = "iat_hook", name = self.name, status = "MISS");
             false
         }
     }
@@ -165,7 +168,7 @@ unsafe fn data_directory(module: HMODULE, idx: usize) -> Option<(*const u8, u32)
 /// and returns a pointer to the `FirstThunk` slot for the hit, or `None`.
 /// `module` should always be the game (e.g. th15.exe via `GetModuleHandleW(NULL)`),
 /// never our own DLL.
-unsafe fn find_iat_slot(module: HMODULE, import_name: &CStr) -> Option<NonNull<*mut ()>> {
+unsafe fn find_iat_slot(module: HMODULE, import_name: &str) -> Option<NonNull<*mut ()>> {
     unsafe {
         let (imp_dir, _) = data_directory(module, IMAGE_DIRECTORY_ENTRY_IMPORT as usize)?;
         let base_mut = module.cast::<u8>();
@@ -212,7 +215,7 @@ unsafe fn find_iat_slot(module: HMODULE, import_name: &CStr) -> Option<NonNull<*
                     let name_offset = entry as usize + offset_of!(ImageImportByName, name);
                     let name_ptr = base.add(name_offset).cast::<c_char>();
                     let imp_name = CStr::from_ptr(name_ptr).to_bytes();
-                    if imp_name.eq_ignore_ascii_case(import_name.to_bytes()) {
+                    if imp_name.eq_ignore_ascii_case(import_name.as_bytes()) {
                         let slot_offset = ft as usize + i * size_of::<IMAGE_THUNK_DATA32>();
                         // All accesses through the returned pointer occur via `read_unaligned`
                         // and `write_unaligned`, so the alignment bump from `*mut u8` is fine.

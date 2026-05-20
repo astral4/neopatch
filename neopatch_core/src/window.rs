@@ -19,7 +19,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 
 iat_hook! {
-    REAL_CREATEWINDOWEXA / real_create_window_ex_a : c"CreateWindowExA"
+    REAL_CREATEWINDOWEXA / real_create_window_ex_a : "CreateWindowExA"
         as fn(
             dw_ex_style: u32,
             lp_class_name: *const u8,
@@ -70,7 +70,13 @@ struct State {
     restyle: ResolvedWindowCfg,
 }
 
-pub(crate) unsafe fn install(
+/// Caches the resolved `WindowCfg` and IAT-hooks `CreateWindowExA` against
+/// `host`'s import table. The hook restyles the game's main render window
+/// (matched by the `"BASE"` class name) to the configured setting.
+///
+/// # Safety
+/// `host` must be a loaded module handle.
+pub unsafe fn install(
     host: HMODULE,
     restyle: &WindowCfg,
     framebuffer: (u32, u32),
@@ -127,7 +133,7 @@ unsafe extern "system" fn hook_create_window_ex_a(
         };
         // We log the configuration and recomputed dimensions
         // before the `CreateWindowExA` call in case there's a failure
-        // or wrong-sized client area, so we can troubleshoot.
+        // or wrong-sized client area.
         if is_main {
             info!(
                 kind = "create_window_call",
@@ -172,9 +178,8 @@ unsafe extern "system" fn hook_create_window_ex_a(
 
 // `CreateWindowExA`'s `lpClassName` is either a Win32 `ATOM` (16-bit integer
 // in the pointer slot, < 0x10000) or a pointer to a null-terminated string.
-// `ATOM` values land in the process's null-guard region of address space,
-// so `safe_read` returns 0 bytes for them and the length check below
-// rejects without a special case.
+// `ATOM` values land in the process's null-guard region of address space, so `safe_read`
+// returns 0 bytes for them and the length check below rejects without a special case.
 fn class_name_matches(p: Untrusted<u8>, expected: &[u8]) -> bool {
     let want_len = expected.len() + 1;
     let mut buf = [0u8; 32];

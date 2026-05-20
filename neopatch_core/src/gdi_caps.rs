@@ -14,13 +14,17 @@ use windows_sys::Win32::Foundation::HMODULE;
 const VREFRESH: i32 = SDK_VREFRESH.0.cast_signed();
 
 iat_hook! {
-    REAL_GET_DEVICE_CAPS / real_get_device_caps : c"GetDeviceCaps"
+    REAL_GET_DEVICE_CAPS / real_get_device_caps : "GetDeviceCaps"
         as fn(hdc: HDC, index: i32) -> i32;
 }
 
 static VREFRESH_LOG: LogCap = LogCap::new(NonZero::new(1).unwrap());
 
-pub(crate) unsafe fn install(host: HMODULE) {
+/// IAT-hooks `GetDeviceCaps` against `host`'s import table.
+///
+/// # Safety
+/// `host` must be a loaded module handle.
+pub unsafe fn install(host: HMODULE) {
     unsafe {
         REAL_GET_DEVICE_CAPS.install(host, hook_get_device_caps);
     }

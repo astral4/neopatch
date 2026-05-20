@@ -15,7 +15,7 @@ use windows_sys::Win32::System::Threading::GetCurrentProcess;
 // Sealed marker: the all-zero bit pattern is a valid value of `T`.
 // Required by `safe_read`'s partial-`T` zero-fill at page boundaries.
 mod sealed {
-    pub(crate) trait Zeroable: Copy {}
+    pub trait Zeroable: Copy {}
     impl Zeroable for u8 {}
     impl Zeroable for u16 {}
     impl Zeroable for u32 {}
@@ -24,17 +24,18 @@ mod sealed {
 
 /// A pointer whose validity isn't established by code we control.
 #[derive(Clone, Copy)]
-pub(crate) struct Untrusted<T>(*const T);
+pub struct Untrusted<T>(*const T);
 
 impl<T> Untrusted<T> {
     // This is sound to construct from any raw pointer
     // because `Untrusted` has no `Deref` impl or raw accessor.
-    pub(crate) const fn from_raw(raw: *const T) -> Self {
+    pub const fn from_raw(raw: *const T) -> Self {
         Self(raw)
     }
 
     #[allow(clippy::wrong_self_convention)]
-    pub(crate) fn is_null(self) -> bool {
+    #[must_use]
+    pub fn is_null(self) -> bool {
         self.0.is_null()
     }
 }
@@ -42,13 +43,13 @@ impl<T> Untrusted<T> {
 impl<T: sealed::Zeroable> Untrusted<T> {
     /// Best-effort copy of up to `buf.len()` elements. See `safe_read` for more details.
     /// Partial-`T` trailing reads are zeroed.
-    pub(crate) fn safe_read(self, buf: &mut [T]) -> usize {
+    pub fn safe_read(self, buf: &mut [T]) -> usize {
         safe_read(self.0, buf)
     }
 
     /// `safe_read`s into `buf`, then returns the populated prefix up to (but excluding)
     /// the first `terminator` element (or the full read length if no terminator is found).
-    pub(crate) fn safe_read_until(self, buf: &mut [T], terminator: T) -> &[T]
+    pub fn safe_read_until(self, buf: &mut [T], terminator: T) -> &[T]
     where
         T: PartialEq,
     {
@@ -60,8 +61,8 @@ impl<T: sealed::Zeroable> Untrusted<T> {
 
 /// Best-effort copy of up to `buf.len()` elements from `src` into `buf`.
 /// Returns the number of complete `T`s read. A partial-`T` trailing read
-/// (RPM stopping mid-`T` at a page boundary) zeroes `buf[n]`, so the all-zero bit pattern
-/// must be valid for `T`. The returned `n` excludes the partial slot.
+/// (RPM stopping mid-`T` at a page boundary) zeroes `buf[n]`, so the all-zero
+/// bit pattern must be valid for `T`. The returned `n` excludes the partial slot.
 fn safe_read<T: sealed::Zeroable>(src: *const T, buf: &mut [T]) -> usize {
     let bytes = rpm(
         src.cast::<c_void>(),
@@ -82,9 +83,8 @@ fn safe_read<T: sealed::Zeroable>(src: *const T, buf: &mut [T]) -> usize {
     n
 }
 
-/// Best-effort copy of up to `N` `u32`s starting at `esp`. The raw-register-value
-/// entry point that parallels `Untrusted::from_raw` for pointer-shaped inputs.
-pub(crate) fn safe_read_stack<const N: usize>(esp: u32, out: &mut [u32; N]) -> usize {
+/// Best-effort copy of up to `N` `u32`s starting at `esp`.
+pub fn safe_read_stack<const N: usize>(esp: u32, out: &mut [u32; N]) -> usize {
     let src: *const u32 = with_exposed_provenance(esp as usize);
     safe_read(src, out)
 }

@@ -5,11 +5,11 @@
 //! `<install_dir>\neopatch_logs\`, falling back to `%LOCALAPPDATA%\neopatch\logs\`
 //! when the install dir isn't writable (e.g. Program Files).
 
-use crate::config::Config;
+use crate::config::LogCfg;
 use std::cell::{Cell, RefCell};
 use std::env::var;
 use std::ffi::c_void;
-use std::fmt::{Debug, Display, Write as _};
+use std::fmt::{Debug, Write as _};
 use std::fs::{File, OpenOptions, create_dir_all, read_dir, remove_dir_all};
 use std::io::{BufWriter, Result as IoResult, Write};
 use std::mem::zeroed;
@@ -41,8 +41,19 @@ static START: OnceLock<Instant> = OnceLock::new();
 
 /// Sets up the per-session log directory, opens `events.log`, writes `manifest.txt`,
 /// and installs the global tracing layer. No-op if logging is off or already initialized.
-pub(crate) fn init(install_dir: &Path, cfg: &Config, host_exe: Option<&Path>) -> bool {
-    let log_cfg = &cfg.log;
+///
+/// `extra_manifest` writes game-specific lines (e.g. `[display]`, `[window]`,
+/// `[framerate]`, `[process]` keys) into the manifest after the shared
+/// neopatch-version / build-target / host-exe / log-root / log preamble.
+pub fn init<F>(
+    install_dir: &Path,
+    log_cfg: &LogCfg,
+    host_exe: Option<&Path>,
+    extra_manifest: F,
+) -> bool
+where
+    F: FnOnce(&mut dyn Write) -> IoResult<()>,
+{
     let Some(level) = log_cfg.level.into_level() else {
         return false;
     };
@@ -66,7 +77,13 @@ pub(crate) fn init(install_dir: &Path, cfg: &Config, host_exe: Option<&Path>) ->
     // Retention runs first so we don't sweep our own new directory.
     apply_retention(&log_root, log_cfg.sessions_to_keep, &session_id);
 
-    drop(write_manifest(&session_dir, host_exe, cfg, &log_root));
+    drop(write_manifest(
+        &session_dir,
+        host_exe,
+        log_cfg,
+        &log_root,
+        extra_manifest,
+    ));
 
     let events_path = session_dir.join("events.log");
     let Ok(file) = OpenOptions::new()
@@ -216,12 +233,16 @@ fn is_session_id(name: &str) -> bool {
         .all(|(i, b)| matches!(i, 8 | 15 | 16) || b.is_ascii_digit())
 }
 
-fn write_manifest(
+fn write_manifest<F>(
     session_dir: &Path,
     host_exe: Option<&Path>,
-    cfg: &Config,
+    log_cfg: &LogCfg,
     log_root: &Path,
-) -> IoResult<()> {
+    extra: F,
+) -> IoResult<()>
+where
+    F: FnOnce(&mut dyn Write) -> IoResult<()>,
+{
     let path = session_dir.join("manifest.txt");
     let mut f = File::create(path)?;
     writeln!(f, "neopatch_version={}", env!("CARGO_PKG_VERSION"))?;
@@ -238,53 +259,10 @@ fn write_manifest(
         }
     )?;
     writeln!(f, "log_root={}", log_root.display())?;
-
-    writeln!(f, "display.mode={}", cfg.display.mode)?;
-    writeln!(f, "display.refresh_rate={}", cfg.display.refresh_rate)?;
-    writeln!(f, "display.resolution={}", cfg.display.resolution)?;
-
-    let w = &cfg.window;
-    writeln!(
-        f,
-        "window={}x{} at ({},{}) frame={} always_on_top={}",
-        fmt_opt(w.width.as_ref()),
-        fmt_opt(w.height.as_ref()),
-        w.x,
-        w.y,
-        fmt_opt(w.frame.as_ref()),
-        w.always_on_top,
-    )?;
-
-    writeln!(f, "framerate.game_fps={}", cfg.framerate.game_fps)?;
-    writeln!(
-        f,
-        "framerate.replay_skip_fps={}",
-        cfg.framerate.replay_skip_fps,
-    )?;
-    writeln!(
-        f,
-        "framerate.replay_slow_fps={}",
-        cfg.framerate.replay_slow_fps,
-    )?;
-
-    writeln!(f, "process.priority={}", cfg.process.priority)?;
-    writeln!(
-        f,
-        "process.affinity_mask={}",
-        fmt_mask(cfg.process.affinity_mask),
-    )?;
-
-    writeln!(f, "log.level={}", cfg.log.level)?;
-    writeln!(f, "log.sessions_to_keep={}", cfg.log.sessions_to_keep)?;
+    writeln!(f, "log.level={}", log_cfg.level)?;
+    writeln!(f, "log.sessions_to_keep={}", log_cfg.sessions_to_keep)?;
+    extra(&mut f)?;
     Ok(())
-}
-
-fn fmt_opt<T: Display>(v: Option<&T>) -> String {
-    v.map_or_else(|| "auto".to_owned(), ToString::to_string)
-}
-
-fn fmt_mask(v: Option<NonZero<u32>>) -> String {
-    v.map_or_else(|| "0 (default)".to_owned(), |m| format!("{:#x}", m.get()))
 }
 
 pub(crate) struct NeopatchLayer {
@@ -361,20 +339,21 @@ impl Visit for FieldVisitor<'_> {
 /// The first `limit` calls to `LogCap::tick` return `Some(n)` (0-indexed).
 /// Subsequent calls return `None`. This can be used to gate `info!`/`warn!`
 /// on a per-frame or loop path so a single such site doesn't flood the log.
-pub(crate) struct LogCap {
+pub struct LogCap {
     count: AtomicU32,
     limit: NonZero<u32>,
 }
 
 impl LogCap {
-    pub(crate) const fn new(limit: NonZero<u32>) -> Self {
+    #[must_use]
+    pub const fn new(limit: NonZero<u32>) -> Self {
         Self {
             count: AtomicU32::new(0),
             limit,
         }
     }
 
-    pub(crate) fn tick(&self) -> Option<u32> {
+    pub fn tick(&self) -> Option<u32> {
         // Early-return via `load` introduces a race window, but the window
         // can leak at most one extra increment past the limit, which is harmless.
         let limit = self.limit.get();

@@ -15,17 +15,18 @@ use std::ptr::{
 };
 
 #[derive(Clone, Copy)]
-pub(crate) struct GameAddr<T: Copy> {
+pub struct GameAddr<T: Copy> {
     addr: usize,
     _t: PhantomData<*mut T>,
 }
 
 impl<T: Copy> GameAddr<T> {
     /// # Safety
-    /// `addr` must point to a value of layout `T` in `th15.exe v1.00b`
-    /// for the lifetime of the process. The caller is responsible for
+    /// `addr` must point to a value of layout `T` for the lifetime of the process
+    /// in the game-binary version the call site targets. The caller is responsible for
     /// confirming this against the disasm at the declaration site.
-    pub(crate) const unsafe fn new(addr: usize) -> Self {
+    #[must_use]
+    pub const unsafe fn new(addr: usize) -> Self {
         Self {
             addr,
             _t: PhantomData,
@@ -33,12 +34,13 @@ impl<T: Copy> GameAddr<T> {
     }
 
     #[inline]
-    pub(crate) fn read(self) -> T {
+    #[must_use]
+    pub fn read(self) -> T {
         unsafe { read_volatile(with_exposed_provenance::<T>(self.addr)) }
     }
 
     #[inline]
-    pub(crate) fn write(self, v: T) {
+    pub fn write(self, v: T) {
         unsafe { write_volatile(with_exposed_provenance_mut::<T>(self.addr), v) };
     }
 }

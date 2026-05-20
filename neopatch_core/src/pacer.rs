@@ -23,9 +23,9 @@
 //! (with the timer resolution pinned to 1 ms by `timer_period`) on older OS versions.
 
 use crate::thread::{MainCell, MainToken};
+use std::hint::spin_loop;
 use std::ptr::null;
 use std::sync::OnceLock;
-use std::thread::yield_now;
 use tracing::info;
 use windows_sys::Win32::Foundation::HANDLE;
 use windows_sys::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
@@ -46,18 +46,19 @@ const SAFETY_MARGIN_100NS: i64 = 2_000;
 /// There isn't anything special about 50 ms in particular.
 const RESYNC_THRESHOLD_MS: i64 = 50;
 
-pub(crate) static PACER: OnceLock<Pacer> = OnceLock::new();
+pub static PACER: OnceLock<Pacer> = OnceLock::new();
 
 /// Distinguishes when the game reads real-time input (lead applies)
 /// from when the game drives its own schedule (lead doesn't apply).
 #[derive(Clone, Copy, Debug)]
-pub(crate) enum PacingPolicy {
+pub enum PacingPolicy {
     LiveInput { target_fps: u32 },
     InternalCadence { target_fps: u32 },
 }
 
 impl PacingPolicy {
-    pub(crate) fn target_fps(self) -> u32 {
+    #[must_use]
+    pub fn target_fps(self) -> u32 {
         match self {
             Self::LiveInput { target_fps } | Self::InternalCadence { target_fps } => target_fps,
         }
@@ -67,7 +68,7 @@ impl PacingPolicy {
     }
 }
 
-pub(crate) struct Pacer {
+pub struct Pacer {
     qpc_freq: i64,
     resync_threshold_qpc: i64,
     /// Created eagerly in `new`; null means `CreateWaitableTimerExW` failed both attempts
@@ -81,7 +82,8 @@ pub(crate) struct Pacer {
 }
 
 impl Pacer {
-    pub(crate) fn new(policy: PacingPolicy) -> Self {
+    #[must_use]
+    pub fn new(policy: PacingPolicy) -> Self {
         let qpc_freq = read_qpc_freq();
         Self {
             qpc_freq,
@@ -97,7 +99,7 @@ impl Pacer {
     ///
     /// Resets the deadline so the next `wait()` resyncs. Otherwise, a stale deadline
     /// would chase the wrong period for several frames after a rate change.
-    pub(crate) fn apply_policy(&self, tok: &MainToken, policy: PacingPolicy) {
+    pub fn apply_policy(&self, tok: &MainToken, policy: PacingPolicy) {
         self.period_qpc
             .set(tok, period_qpc_from(policy.target_fps(), self.qpc_freq));
         self.lead_active.set(tok, policy.lead_active());
@@ -106,7 +108,7 @@ impl Pacer {
 
     /// Blocks until the next frame's deadline, then advances the deadline.
     /// Call once per `Present`.
-    pub(crate) fn wait(&self, tok: &MainToken) {
+    pub fn wait(&self, tok: &MainToken) {
         let period = self.period_qpc.get(tok);
         if period <= 0 {
             return;
@@ -231,8 +233,12 @@ fn qpc_to_100ns(ticks: i64, freq: i64) -> i64 {
 }
 
 fn spin_until(deadline: i64) {
-    // `yield_now()` yields to ready-to-run neighbors on this core (`SwitchToThread`).
+    // PAUSE-loop rather than `SwitchToThread`: this only runs after the timer
+    // has already brought us within `SAFETY_MARGIN_100NS` of the deadline,
+    // so we want the core to ourselves for the ~0.2 ms closing stretch.
+    // A `SwitchToThread` here would either no-op (no ready neighbor) at the
+    // cost of a syscall per iteration, or yield and risk missing the deadline.
     while qpc() < deadline {
-        yield_now();
+        spin_loop();
     }
 }

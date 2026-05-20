@@ -5,10 +5,11 @@
 //! overriding the dialog's selections from our config, and then using
 //! `PostMessage` to send an OK click and set the pump's exit-flag bit.
 
-use crate::config::{CONFIG, DisplayMode};
-use crate::game_addr::GameAddr;
-use crate::iat_hook;
-use crate::patches::Patch;
+use crate::config::CONFIG;
+use neopatch_core::config::{self as core_config, DisplayMode};
+use neopatch_core::game_addr::GameAddr;
+use neopatch_core::iat_hook;
+use neopatch_core::patches::Patch;
 use std::ffi::c_char;
 use tracing::info;
 use windows_sys::Win32::Foundation::{HMODULE, HWND, LPARAM, WPARAM};
@@ -51,7 +52,7 @@ const DIALOG_PATCHES: &[Patch] = &[
 ];
 
 iat_hook! {
-    REAL_CREATE_DIALOG_PARAM_A / real_create_dialog_param_a : c"CreateDialogParamA"
+    REAL_CREATE_DIALOG_PARAM_A / real_create_dialog_param_a : "CreateDialogParamA"
         as fn(
             hinst: HMODULE,
             template: *const c_char,
@@ -96,10 +97,11 @@ unsafe extern "system" fn hook_create_dialog_param_a(
             return hwnd;
         }
 
-        let cfg = CONFIG.get().unwrap();
+        let th15_cfg = CONFIG.get().unwrap();
+        let core_cfg = core_config::CONFIG.get().unwrap();
 
-        let res_radio_id = RES_RADIO_FIRST_ID + i32::from(cfg.display.resolution.index());
-        let fullscreen = matches!(cfg.display.mode, DisplayMode::Fullscreen);
+        let res_radio_id = RES_RADIO_FIRST_ID + i32::from(th15_cfg.resolution.index());
+        let fullscreen = matches!(core_cfg.display.mode, DisplayMode::Fullscreen);
 
         // Restrict the radio range to 0xCD..0xCF. Otherwise, `CheckRadioButton`'s
         // "clear all others in range" would otherwise hit the checkboxes at 0xCA/CB/CC.
@@ -121,8 +123,8 @@ unsafe extern "system" fn hook_create_dialog_param_a(
         EXIT_FLAG.write(next);
         info!(
             kind = "dialog_auto_dismissed",
-            resolution = %cfg.display.resolution,
-            mode = %cfg.display.mode,
+            resolution = %th15_cfg.resolution,
+            mode = %core_cfg.display.mode,
             res_radio = format_args!("{res_radio_id:#x}"),
             fullscreen,
             fs_state,

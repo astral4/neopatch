@@ -13,27 +13,27 @@ use windows_sys::Win32::System::Threading::LPTHREAD_START_ROUTINE;
 use windows_sys::core::{PCSTR, PCWSTR};
 
 iat_hook! {
-    REAL_EXIT_PROCESS / real_exit_process : c"ExitProcess"
+    REAL_EXIT_PROCESS / real_exit_process : "ExitProcess"
         as fn(exit_code: u32) -> ();
 }
 iat_hook! {
-    REAL_TERMINATE_PROCESS / real_terminate_process : c"TerminateProcess"
+    REAL_TERMINATE_PROCESS / real_terminate_process : "TerminateProcess"
         as fn(process: HANDLE, exit_code: u32) -> i32;
 }
 iat_hook! {
-    REAL_MESSAGE_BOX_A / real_message_box_a : c"MessageBoxA"
+    REAL_MESSAGE_BOX_A / real_message_box_a : "MessageBoxA"
         as fn(parent: HWND, text: PCSTR, caption: PCSTR, flags: u32) -> i32;
 }
 iat_hook! {
-    REAL_MESSAGE_BOX_W / real_message_box_w : c"MessageBoxW"
+    REAL_MESSAGE_BOX_W / real_message_box_w : "MessageBoxW"
         as fn(parent: HWND, text: PCWSTR, caption: PCWSTR, flags: u32) -> i32;
 }
 iat_hook! {
-    REAL_RAISE_EXCEPTION / real_raise_exception : c"RaiseException"
+    REAL_RAISE_EXCEPTION / real_raise_exception : "RaiseException"
         as fn(code: u32, flags: u32, nargs: u32, args: *const u32) -> ();
 }
 iat_hook! {
-    REAL_CREATE_THREAD / real_create_thread : c"CreateThread"
+    REAL_CREATE_THREAD / real_create_thread : "CreateThread"
         as fn(
             sec: *const SECURITY_ATTRIBUTES,
             stack: usize,
@@ -44,7 +44,13 @@ iat_hook! {
         ) -> HANDLE;
 }
 
-pub(crate) unsafe fn install(host: HMODULE) {
+/// IAT-hooks the process-lifetime imports we wrap for diagnostics
+/// (`ExitProcess`, `TerminateProcess`, `MessageBox{A,W}`, `RaiseException`, `CreateThread`)
+/// against `host`'s import table.
+///
+/// # Safety
+/// `host` must be a loaded module handle.
+pub unsafe fn install(host: HMODULE) {
     unsafe {
         REAL_EXIT_PROCESS.install(host, hook_exit_process);
         REAL_TERMINATE_PROCESS.install(host, hook_terminate_process);
@@ -61,7 +67,7 @@ unsafe extern "system" fn hook_exit_process(exit_code: u32) {
             kind = "exit_process_intercepted",
             exit_code = format_args!("{exit_code:#010x}"),
         );
-        // Drain the `BufWriter` before the OS tears down the process.
+        // We drain the `BufWriter` before the OS tears down the process.
         // Otherwise, the destructor and shutdown tail of the log are lost.
         flush();
         real_exit_process(exit_code);

@@ -1,9 +1,9 @@
 //! Constructs for main-thread identity, access, and mutable statics.
 //!
-//! `MAIN_TID` is set once from `DllMain` via `lib.rs::install_hooks`.
+//! `MAIN_TID` is set once from `DllMain` when hooks are installed.
 //! `MainToken` is a ZST witness that the holding thread is the main render thread.
 //! It is `!Send + !Sync`, so rustc rejects any code that tries to move it
-//! or share it across threads. Accessors on `MainCell<T>` take `&MainToken`,
+//! or share it across threads. `MainCell<T>` accessors take `&MainToken`,
 //! propagating the "main-thread only" requirement to every call site at the type level.
 
 use crate::log::flush;
@@ -16,11 +16,11 @@ use windows_sys::Win32::System::Threading::GetCurrentThreadId;
 
 static MAIN_TID: AtomicU32 = AtomicU32::new(0);
 
-pub(crate) fn set_main_id(tid: u32) {
+pub fn set_main_id(tid: u32) {
     MAIN_TID.store(tid, Ordering::Release);
 }
 
-pub(crate) fn main_id() -> u32 {
+pub fn main_id() -> u32 {
     MAIN_TID.load(Ordering::Acquire)
 }
 
@@ -28,13 +28,12 @@ pub(crate) fn main_id() -> u32 {
 /// Holding `&MainToken` is the compile-time proof required to call
 /// `MainCell::get` and `MainCell::set`.
 ///
-/// `PhantomData<*const ()>` makes the type `!Send + !Sync`.
-/// Auto-trait propagation gives `&MainToken: !Send + !Sync` as well (since `&T: Send`
-/// iff `T: Sync`), so trait-bound checks at `std::thread::spawn` and similar APIs
-/// reject any closure that would carry the token or a reference to it onto another thread.
+/// This type is `!Send + !Sync`, so `&MainToken` is also `!Send + !Sync`.
+/// Trait-bound checks at `std::thread::spawn` and similar APIs reject any closure
+/// that would carry the token or a reference to it onto another thread.
 /// Combined with the runtime check at construction, this means: if the constructor returns,
 /// then every downstream cell access through the resulting token is on the main thread.
-pub(crate) struct MainToken {
+pub struct MainToken {
     _marker: PhantomData<*const ()>,
 }
 
@@ -44,7 +43,8 @@ impl MainToken {
     ///
     /// This must not be called before `set_main_id`. Until then, `MAIN_TID` is 0,
     /// and `GetCurrentThreadId` never returns 0, so this will abort.
-    pub(crate) fn new() -> Self {
+    #[allow(clippy::new_without_default)]
+    pub fn new() -> Self {
         let current = unsafe { GetCurrentThreadId() };
         let main = main_id();
         if current != main {
@@ -61,19 +61,17 @@ impl MainToken {
 /// Interior-mutable cell for state that is single-thread by construction
 /// but lives in a `Sync`-required slot (e.g. a `static`, or inside a `OnceLock<...>`).
 ///
-/// The `T: Copy` bound is required by `Cell::get`. It also has the useful side effect of
-/// forbidding `Drop` on `T`, since `Copy` and `Drop` are mutually exclusive.
-/// So, even a hypothetical off-thread drop of a `MainCell` (if one ever lived
-/// outside a `static`) runs no thread-affine destructor.
-///
 /// Prefer this over atomic types when there is no cross-thread sharing;
 /// atomics would misleadingly signal lock-free synchronization that isn't present.
-pub(crate) struct MainCell<T: Copy>(Cell<T>);
+// The `T: Copy` bound is required by `Cell::get`. It also has the useful side effect of
+// forbidding `Drop` on `T`, since `Copy` and `Drop` are mutually exclusive. So, even a
+// hypothetical off-thread drop of a `MainCell` (if one ever lived outside a `static`)
+// runs no thread-affine destructor.
+pub struct MainCell<T: Copy>(Cell<T>);
 
-// SAFETY: cross-thread access is prevented at the type level.
-// `get` and `set` require `&MainToken` with `MainToken: !Send + !Sync`
-// and `&MainToken: !Send + !Sync`. So, neither the token nor a reference to it
-// can reach another thread.
+// SAFETY: cross-thread access is prevented at the type level. `get` and `set` require
+// `&MainToken` with `MainToken: !Send + !Sync` and `&MainToken: !Send + !Sync`.
+// So, neither the token nor a reference to it can reach another thread.
 //
 // `Sync` lets `MainCell` live inside `static` and `OnceLock<...>`.
 // `Send` is needed transitively because `OnceLock<T>: Sync` requires `T: Send + Sync`.
@@ -81,15 +79,15 @@ unsafe impl<T: Copy> Sync for MainCell<T> {}
 unsafe impl<T: Copy> Send for MainCell<T> {}
 
 impl<T: Copy> MainCell<T> {
-    pub(crate) const fn new(v: T) -> Self {
+    pub const fn new(v: T) -> Self {
         Self(Cell::new(v))
     }
     #[inline]
-    pub(crate) fn get(&self, _tok: &MainToken) -> T {
+    pub fn get(&self, _tok: &MainToken) -> T {
         self.0.get()
     }
     #[inline]
-    pub(crate) fn set(&self, _tok: &MainToken, v: T) {
+    pub fn set(&self, _tok: &MainToken, v: T) {
         self.0.set(v);
     }
 }

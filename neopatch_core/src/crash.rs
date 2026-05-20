@@ -283,7 +283,7 @@ unsafe extern "system" fn unhandled_filter(info: *const EXCEPTION_POINTERS) -> i
     unsafe { handle_exception(info, ExceptionSource::Unhandled) }
 }
 
-pub(crate) fn install_handlers() {
+pub fn install_handlers() {
     unsafe {
         // 1 = call our handler first in the dispatch order.
         AddVectoredExceptionHandler(1, Some(vectored_handler));

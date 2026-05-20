@@ -6,32 +6,18 @@
 //! the real System32 DLL we load by full path; everything else is hooks.
 
 mod config;
-mod crash;
-mod d3d9;
-mod d3dx9;
 mod dialog_dismiss;
-mod exit_hooks;
-mod game_addr;
-mod gdi_caps;
-mod iat;
-mod log;
-mod modules;
-mod pacer;
 mod patches;
-mod process;
-mod protect;
-mod th15_patches;
-mod th15_state;
-mod thread;
-mod timer_period;
-mod untrusted;
-mod vtable;
-mod watchdog;
-mod window;
+mod state;
 
-use crate::config::Config;
-use crate::pacer::{Pacer, PacingPolicy};
-use crate::vtable::{FnSlot, parse_fn_ptr};
+use crate::config::{self as th15_config, Th15Config};
+use neopatch_core::config::{self as core_config, CoreConfig};
+use neopatch_core::pacer::{PACER, Pacer, PacingPolicy};
+use neopatch_core::vtable::{FnSlot, parse_fn_ptr};
+use neopatch_core::{
+    crash, d3d9, d3dx9, exit_hooks, gdi_caps, log, process, thread, timer_period, vtable, watchdog,
+    window,
+};
 use std::env::current_exe;
 use std::ffi::c_void;
 use std::fs::read;
@@ -55,18 +41,16 @@ compile_error!("neopatch is x86-only");
 #[cfg(all(not(panic = "abort"), not(test)))]
 compile_error!("neopatch requires `panic = \"abort\"`");
 
-/// Match `$v` against a list of `const` identifiers, returning the literal identifier name
-/// (via `stringify!`) on hit and `"?"` on miss. This lets the printed name and value
-/// share a single source.
-#[macro_export]
-macro_rules! match_named {
-    ($v:expr, $($name:ident),* $(,)?) => {
-        match $v {
-            $($name => stringify!($name),)*
-            _ => "?",
-        }
-    };
-}
+/// `0x0047158C` in the game is `FF 15 disp32` (6-byte indirect call to `Direct3DCreate9`).
+/// We rewrite it to `E8 disp32 90` (5-byte direct call to our hook plus a trailing NOP).
+/// This is defense for the IAT hook in case another program IAT-hooks
+/// `Direct3DCreate9` after us, so the main call still lands on us.
+///
+/// A second `FF 15 [iat]` site exists at `0x00472e72` in what seems like
+/// dead error-recovery code. We intentionally don't patch this site.
+/// The IAT hook covers it for any live caller.
+const TH15_DIRECT3DCREATE9_CALL_ADDR: usize = 0x0047_158c;
+const TH15_DIRECT3DCREATE9_CALL_BYTES: [u8; 6] = [0xff, 0x15, 0xb0, 0xe2, 0x4b, 0x00];
 
 type DirectInput8CreateFn = unsafe extern "system" fn(
     HINSTANCE,
@@ -162,24 +146,36 @@ unsafe fn install_hooks() {
         let host_exe_path = current_exe().ok();
         let exe_dir = host_exe_path.as_deref().and_then(Path::parent);
 
-        let cfg = exe_dir
+        let (th15_cfg, core_cfg): (Th15Config, CoreConfig) = exe_dir
             .and_then(|d| read(d.join("neopatch.ini")).ok())
-            .map_or_else(Config::default, |b| Config::parse(&config::decode_text(&b)));
-        let cfg = config::CONFIG.get_or_init(|| cfg);
+            .map_or_else(
+                || (Th15Config::default(), CoreConfig::default()),
+                |b| th15_config::parse(&core_config::decode_text(&b)),
+            );
+        // Set core first because `log::init` reads from it via `core_cfg_ref`.
+        drop(core_config::CONFIG.set(core_cfg));
+        drop(config::CONFIG.set(th15_cfg));
+        let core_cfg_ref = core_config::CONFIG.get().unwrap();
+        let th15_cfg_ref = config::CONFIG.get().unwrap();
 
         // Initialize logging first so the earliest install events are captured.
         // Minidumps land in `log::dump_dir`, the per-session directory next to `events.log`.
         let install_dir = exe_dir.map_or_else(|| PathBuf::from("."), Path::to_path_buf);
-        log::init(&install_dir, cfg, host_exe_path.as_deref());
+        log::init(
+            &install_dir,
+            &core_cfg_ref.log,
+            host_exe_path.as_deref(),
+            |w| th15_config::write_manifest_extras(w, core_cfg_ref, th15_cfg_ref),
+        );
 
         // `DllMain` runs on the `LoadLibrary` caller.
-        // For a static-imported, DLL this is the process' main thread.
+        // For a statically-imported DLL this is the process' main thread.
         // We do this before `watchdog::install` so the watchdog has the TID at startup.
         thread::set_main_id(GetCurrentThreadId());
 
         crash::install_handlers();
         // The watchdog only emits at INFO level anyway.
-        if cfg.log.level >= LevelFilter::INFO {
+        if core_cfg_ref.log.level >= LevelFilter::INFO {
             watchdog::install();
         }
 
@@ -188,30 +184,39 @@ unsafe fn install_hooks() {
         // and silently no-op for symbols we don't import ourselves.
         let host_exe: HMODULE = GetModuleHandleW(null());
 
-        process::apply(&cfg.process);
+        process::apply(&core_cfg_ref.process);
 
         timer_period::install(host_exe);
         gdi_caps::install(host_exe);
         window::install(
             host_exe,
-            &cfg.window,
-            cfg.display.resolution.dimensions(),
-            cfg.display.mode,
+            &core_cfg_ref.window,
+            th15_cfg_ref.resolution.dimensions(),
+            core_cfg_ref.display.mode,
         );
         dialog_dismiss::install(host_exe);
         exit_hooks::install(host_exe);
         d3dx9::install(host_exe);
 
+        // Wire the replay-mode probe before any `Present` can fire.
+        d3d9::set_replay_mode_fn(state::replay_mode);
+
         // We do this before `d3d9::install` because that call
         // wires `Present` into `hook_present`, which unwraps `PACER.get()`.
-        _ = pacer::PACER.set(Pacer::new(PacingPolicy::LiveInput {
-            target_fps: cfg.framerate.game_fps,
+        _ = PACER.set(Pacer::new(PacingPolicy::LiveInput {
+            target_fps: core_cfg_ref.framerate.game_fps,
         }));
 
         d3d9::install(host_exe);
+        // We rewrite a live `Direct3DCreate9` call site in th15 so a downstream IAT hijack
+        // can't reroute the main call away from us.
+        d3d9::install_call_site_rewrite(
+            TH15_DIRECT3DCREATE9_CALL_ADDR,
+            &TH15_DIRECT3DCREATE9_CALL_BYTES,
+        );
 
-        th15_patches::apply_basic();
-        th15_patches::install_destructor_hook();
+        patches::apply_basic();
+        patches::install_destructor_hook();
     }
 }
 
