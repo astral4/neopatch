@@ -38,3 +38,18 @@ macro_rules! match_named {
         }
     };
 }
+
+// Stub for SJLJ-built mingw-w64 toolchains whose `libgcc_eh.a` doesn't provide `_Unwind_Resume`.
+// Rust's precompiled standard library for `i686-pc-windows-gnu` still references it;
+// we have the linker pull this definition in to satisfy that reference. See `build.rs`
+// for more details. The body is unreachable at runtime since we have `panic = "abort"`.
+#[cfg(needs_unwind_resume_stub)]
+mod unwind_resume_stub {
+    use std::ffi::c_void;
+    use windows_sys::Win32::System::Threading::ExitProcess;
+
+    #[unsafe(no_mangle)]
+    unsafe extern "C" fn _Unwind_Resume(_: *mut c_void) -> ! {
+        unsafe { ExitProcess(0xDEAD) }
+    }
+}
