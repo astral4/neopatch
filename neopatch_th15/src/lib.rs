@@ -35,10 +35,10 @@ use windows_sys::core::{GUID, HRESULT};
 
 // We assume x86 and abort-on-panic throughout the codebase.
 // This is load-bearing for correctness.
-#[cfg(all(not(target_arch = "x86"), not(test)))]
+#[cfg(all(not(target_arch = "x86"), not(test), not(doc)))]
 compile_error!("neopatch is x86-only");
 
-#[cfg(all(not(panic = "abort"), not(test)))]
+#[cfg(all(not(panic = "abort"), not(test), not(doc)))]
 compile_error!("neopatch requires `panic = \"abort\"`");
 
 /// `0x0047158C` in the game is `FF 15 disp32` (6-byte indirect call to `Direct3DCreate9`).
