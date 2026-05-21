@@ -12,6 +12,7 @@ pub mod config;
 pub mod crash;
 pub mod d3d9;
 pub mod d3dx9;
+pub mod dinput8;
 pub mod exit_hooks;
 pub mod game_addr;
 pub mod gdi_caps;

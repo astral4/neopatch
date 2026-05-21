@@ -5,6 +5,7 @@
 //! (e.g. `Resolution`) and specifies its own parsing logic.
 
 use std::fmt::{Display, Formatter, Result as FmtResult};
+use std::io::{Result as IoResult, Write};
 use std::num::NonZero;
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -434,6 +435,53 @@ pub fn parse_bitmask(v: &str) -> Option<u32> {
 pub fn decode_text(bytes: &[u8]) -> String {
     let body = bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(bytes);
     String::from_utf8_lossy(body).into_owned()
+}
+
+/// Writes the game-agnostic manifest lines. Game crates should call this from their
+/// `extra_manifest` closure in `log::init` and append any game-specific lines after.
+///
+/// # Errors
+/// Returns an error if writing to the provided sink fails.
+pub fn write_manifest_common<W: Write + ?Sized>(w: &mut W, core: &CoreConfig) -> IoResult<()> {
+    writeln!(w, "display.mode={}", core.display.mode)?;
+    writeln!(w, "display.refresh_rate={}", core.display.refresh_rate)?;
+    let win = &core.window;
+    writeln!(
+        w,
+        "window={}x{} at ({},{}) frame={} always_on_top={}",
+        fmt_opt(win.width.as_ref()),
+        fmt_opt(win.height.as_ref()),
+        win.x,
+        win.y,
+        fmt_opt(win.frame.as_ref()),
+        win.always_on_top,
+    )?;
+    writeln!(w, "framerate.game_fps={}", core.framerate.game_fps)?;
+    writeln!(
+        w,
+        "framerate.replay_skip_fps={}",
+        core.framerate.replay_skip_fps
+    )?;
+    writeln!(
+        w,
+        "framerate.replay_slow_fps={}",
+        core.framerate.replay_slow_fps
+    )?;
+    writeln!(w, "process.priority={}", core.process.priority)?;
+    writeln!(
+        w,
+        "process.affinity_mask={}",
+        fmt_mask(core.process.affinity_mask)
+    )?;
+    Ok(())
+}
+
+fn fmt_opt<T: Display>(v: Option<&T>) -> String {
+    v.map_or_else(|| "auto".to_owned(), ToString::to_string)
+}
+
+fn fmt_mask(v: Option<NonZero<u32>>) -> String {
+    v.map_or_else(|| "0 (default)".to_owned(), |m| format!("{:#x}", m.get()))
 }
 
 #[cfg(test)]

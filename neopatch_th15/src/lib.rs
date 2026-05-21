@@ -1,9 +1,6 @@
 //! neopatch_th15: latency reductions, optimizations, and other fixes for Touhou 15.
 //!
-//! Shipped as `dinput8.dll` next to `th15.exe`. Windows's DLL search order
-//! makes us load as part of th15's static-import resolution, and `DllMain` runs
-//! before any game code. The exported `DirectInput8Create` forwards to
-//! the real System32 DLL we load by full path; everything else is hooks.
+//! Shipped as `dinput8.dll` next to `th15.exe`.
 
 #[cfg(all(not(panic = "abort"), not(test), not(doc)))]
 compile_error!("neopatch_th15 requires `panic = \"abort\"`");
@@ -16,10 +13,9 @@ mod state;
 use crate::config::{self as th15_config, Th15Config};
 use neopatch_core::config::{self as core_config, CoreConfig};
 use neopatch_core::pacer::{PACER, Pacer, PacingPolicy};
-use neopatch_core::vtable::{FnSlot, parse_fn_ptr};
 use neopatch_core::{
-    crash, d3d9, d3dx9, exit_hooks, gdi_caps, log, process, thread, timer_period, vtable, watchdog,
-    window,
+    crash, d3d9, d3dx9, dinput8, dinput8_export, exit_hooks, gdi_caps, log, process, thread,
+    timer_period, vtable, watchdog, window,
 };
 use std::env::current_exe;
 use std::ffi::c_void;
@@ -27,14 +23,10 @@ use std::fs::read;
 use std::path::{Path, PathBuf};
 use std::ptr::null;
 use tracing::level_filters::LevelFilter;
-use windows_sys::Win32::Foundation::{E_FAIL, HINSTANCE, HMODULE, MAX_PATH};
-use windows_sys::Win32::System::LibraryLoader::{
-    DisableThreadLibraryCalls, GetModuleHandleW, GetProcAddress, LoadLibraryW,
-};
-use windows_sys::Win32::System::SystemInformation::GetSystemDirectoryW;
+use windows_sys::Win32::Foundation::{HINSTANCE, HMODULE};
+use windows_sys::Win32::System::LibraryLoader::{DisableThreadLibraryCalls, GetModuleHandleW};
 use windows_sys::Win32::System::SystemServices::DLL_PROCESS_ATTACH;
 use windows_sys::Win32::System::Threading::GetCurrentThreadId;
-use windows_sys::core::{GUID, HRESULT};
 
 /// `0x0047158C` in the game is `FF 15 disp32` (6-byte indirect call to `Direct3DCreate9`).
 /// We rewrite it to `E8 disp32 90` (5-byte direct call to our hook plus a trailing NOP).
@@ -47,15 +39,7 @@ use windows_sys::core::{GUID, HRESULT};
 const TH15_DIRECT3DCREATE9_CALL_ADDR: usize = 0x0047_158c;
 const TH15_DIRECT3DCREATE9_CALL_BYTES: [u8; 6] = [0xff, 0x15, 0xb0, 0xe2, 0x4b, 0x00];
 
-type DirectInput8CreateFn = unsafe extern "system" fn(
-    HINSTANCE,
-    u32,
-    *const GUID,
-    *mut *mut c_void,
-    *mut c_void,
-) -> HRESULT;
-static REAL_DIRECT_INPUT_8_CREATE: FnSlot<DirectInput8CreateFn> =
-    FnSlot::new(stringify!(REAL_DIRECT_INPUT_8_CREATE));
+dinput8_export!();
 
 #[unsafe(no_mangle)]
 #[allow(non_snake_case, clippy::missing_safety_doc)]
@@ -72,66 +56,12 @@ pub unsafe extern "system" fn DllMain(
         // Lets the vtable patcher distinguish "already our hook" (idempotent re-entry)
         // from a shim-layer chain like `apphelp.dll`'s `CreateDevice` hijack.
         vtable::set_our_dll_handle(hinst as HMODULE);
-        // We cache the real `DirectInput8Create` first because
-        // the proxy export must work even if hook installation fails.
-        load_real_dinput8();
+        // Cache the real `DirectInput8Create` before `install_hooks`
+        // so the proxy export works even if hook installation fails.
+        dinput8::init();
         install_hooks();
     }
     1
-}
-
-/// Loads by full path so the bare name doesn't resolve back to us
-/// via the same DLL search order that put us here.
-fn load_real_dinput8() {
-    const SUFFIX: [u16; 13] = {
-        let s = b"\\dinput8.dll";
-        let mut out = [0u16; 13];
-        let mut i = 0;
-        while i < s.len() {
-            assert!(s[i] < 0x80);
-            out[i] = s[i] as u16;
-            i += 1;
-        }
-        out
-    };
-    let mut buf = [0u16; MAX_PATH as usize];
-    let len = unsafe { GetSystemDirectoryW(buf.as_mut_ptr(), MAX_PATH) };
-    if len == 0 || (len as usize) + SUFFIX.len() > buf.len() {
-        return;
-    }
-    let path_end = len as usize;
-    buf[path_end..path_end + SUFFIX.len()].copy_from_slice(&SUFFIX);
-    let dll = unsafe { LoadLibraryW(buf.as_ptr()) };
-    if dll.is_null() {
-        return;
-    }
-    if let Some(f) = unsafe { GetProcAddress(dll, c"DirectInput8Create".as_ptr().cast()) }
-        && let Some(real) = parse_fn_ptr::<DirectInput8CreateFn>(f as *mut ())
-    {
-        REAL_DIRECT_INPUT_8_CREATE.store(real);
-    }
-}
-
-/// Proxy export. Forwards to the cached real `DirectInput8Create`.
-///
-/// # Safety
-///
-/// Called by th15's import resolver (or another caller of `dinput8.dll`'s
-/// `DirectInput8Create` export). Pointer arguments must obey the dinput8 export's
-/// published contract.
-#[unsafe(no_mangle)]
-#[allow(non_snake_case)]
-pub unsafe extern "system" fn DirectInput8Create(
-    hinst: HINSTANCE,
-    dw_version: u32,
-    riidltf: *const GUID,
-    ppv_out: *mut *mut c_void,
-    punk_outer: *mut c_void,
-) -> HRESULT {
-    let Some(real) = REAL_DIRECT_INPUT_8_CREATE.try_get() else {
-        return E_FAIL;
-    };
-    unsafe { real(hinst, dw_version, riidltf, ppv_out, punk_outer) }
 }
 
 unsafe fn install_hooks() {
