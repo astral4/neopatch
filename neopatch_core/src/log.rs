@@ -5,7 +5,7 @@
 //! `<install_dir>\neopatch_logs\`, falling back to `%LOCALAPPDATA%\neopatch\logs\`
 //! when the install dir isn't writable (e.g. Program Files).
 
-use crate::config::LogCfg;
+use crate::config::{CoreConfig, write_manifest_common};
 use std::cell::{Cell, RefCell};
 use std::env::var;
 use std::ffi::c_void;
@@ -42,19 +42,19 @@ static START: OnceLock<Instant> = OnceLock::new();
 /// Sets up the per-session log directory, opens `events.log`, writes `manifest.txt`,
 /// and installs the global tracing layer. No-op if logging is off or already initialized.
 ///
-/// `extra_manifest` writes game-specific lines (e.g. `[display]`, `[window]`,
-/// `[framerate]`, `[process]` keys) into the manifest after the shared
-/// neopatch-version / build-target / host-exe / log-root / log preamble.
+/// The shared neopatch-version / build-target / host-exe / log-root / log preamble and the
+/// `[display]` / `[window]` / `[framerate]` / `[process]` keys from `core_cfg` are written
+/// automatically; `extra_manifest` writes any genuinely game-specific lines after them.
 pub fn init<F>(
     install_dir: &Path,
-    log_cfg: &LogCfg,
+    core_cfg: &CoreConfig,
     host_exe: Option<&Path>,
     extra_manifest: F,
 ) -> bool
 where
     F: FnOnce(&mut dyn Write) -> IoResult<()>,
 {
-    let Some(level) = log_cfg.level.into_level() else {
+    let Some(level) = core_cfg.log.level.into_level() else {
         return false;
     };
     if SESSION_DIR.get().is_some() {
@@ -63,7 +63,7 @@ where
 
     _ = START.set(Instant::now());
 
-    let log_root = pick_log_root(install_dir, log_cfg.log_dir.as_deref());
+    let log_root = pick_log_root(install_dir, core_cfg.log.log_dir.as_deref());
     let Some(log_root) = log_root else {
         return false;
     };
@@ -75,12 +75,12 @@ where
     }
 
     // Retention runs first so we don't sweep our own new directory.
-    apply_retention(&log_root, log_cfg.sessions_to_keep, &session_id);
+    apply_retention(&log_root, core_cfg.log.sessions_to_keep, &session_id);
 
     drop(write_manifest(
         &session_dir,
         host_exe,
-        log_cfg,
+        core_cfg,
         &log_root,
         extra_manifest,
     ));
@@ -208,7 +208,6 @@ fn apply_retention(log_root: &Path, keep: NonZero<u32>, current: &str) {
     // Session IDs sort lexicographically by timestamp; ties are broken by PID.
     dirs.sort();
     // -1 to reserve a slot for the session we're about to write.
-    // #[allow(clippy::cast_possible_truncation)]
     let to_keep = (keep.get() - 1) as usize;
     if dirs.len() > to_keep {
         for old in &dirs[..dirs.len() - to_keep] {
@@ -237,7 +236,7 @@ fn is_session_id(name: &str) -> bool {
 fn write_manifest<F>(
     session_dir: &Path,
     host_exe: Option<&Path>,
-    log_cfg: &LogCfg,
+    core_cfg: &CoreConfig,
     log_root: &Path,
     extra: F,
 ) -> IoResult<()>
@@ -260,8 +259,9 @@ where
         }
     )?;
     writeln!(f, "log_root={}", log_root.display())?;
-    writeln!(f, "log.level={}", log_cfg.level)?;
-    writeln!(f, "log.sessions_to_keep={}", log_cfg.sessions_to_keep)?;
+    writeln!(f, "log.level={}", core_cfg.log.level)?;
+    writeln!(f, "log.sessions_to_keep={}", core_cfg.log.sessions_to_keep)?;
+    write_manifest_common(&mut f, core_cfg)?;
     extra(&mut f)?;
     Ok(())
 }
@@ -340,21 +340,21 @@ impl Visit for FieldVisitor<'_> {
 /// The first `limit` calls to `LogCap::tick` return `Some(n)` (0-indexed).
 /// Subsequent calls return `None`. This can be used to gate `info!`/`warn!`
 /// on a per-frame or loop path so a single such site doesn't flood the log.
-pub struct LogCap {
+pub(crate) struct LogCap {
     count: AtomicU32,
     limit: NonZero<u32>,
 }
 
 impl LogCap {
     #[must_use]
-    pub const fn new(limit: NonZero<u32>) -> Self {
+    pub(crate) const fn new(limit: NonZero<u32>) -> Self {
         Self {
             count: AtomicU32::new(0),
             limit,
         }
     }
 
-    pub fn tick(&self) -> Option<u32> {
+    pub(crate) fn tick(&self) -> Option<u32> {
         // Early-return via `load` introduces a race window, but the window
         // can leak at most one extra increment past the limit, which is harmless.
         let limit = self.limit.get();

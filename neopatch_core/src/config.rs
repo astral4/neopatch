@@ -279,7 +279,7 @@ pub fn apply_log(cfg: &mut LogCfg, k: &str, v: &str) {
 }
 
 #[must_use]
-pub fn parse_level(v: &str) -> Option<LevelFilter> {
+pub(crate) fn parse_level(v: &str) -> Option<LevelFilter> {
     match v.to_ascii_lowercase().as_str() {
         "off" => Some(LevelFilter::OFF),
         "error" => Some(LevelFilter::ERROR),
@@ -320,7 +320,7 @@ pub fn for_each_setting(text: &str, mut f: impl FnMut(&str, &str, &str)) {
 // are preserved, so a path like `log_dir = "C:\foo;bar"` parses intact.
 // Outside quotes, `;` and `#` mark the start of a comment.
 #[must_use]
-pub fn strip_comment(line: &str) -> &str {
+pub(crate) fn strip_comment(line: &str) -> &str {
     let mut in_double = false;
     let mut in_single = false;
     for (i, c) in line.char_indices() {
@@ -337,7 +337,7 @@ pub fn strip_comment(line: &str) -> &str {
 /// Strips one matching `"..."` or `'...'` pair so quoted INI values
 /// like `mode = "fullscreen"` parse the same as unquoted ones.
 #[must_use]
-pub fn unquote(v: &str) -> &str {
+pub(crate) fn unquote(v: &str) -> &str {
     let bytes = v.as_bytes();
     if bytes.len() >= 2 {
         let first = bytes[0];
@@ -350,7 +350,7 @@ pub fn unquote(v: &str) -> &str {
 }
 
 #[must_use]
-pub fn parse_bool(v: &str) -> Option<bool> {
+pub(crate) fn parse_bool(v: &str) -> Option<bool> {
     match v.to_ascii_lowercase().as_str() {
         "0" | "false" | "off" | "no" => Some(false),
         "1" | "true" | "on" | "yes" => Some(true),
@@ -359,21 +359,22 @@ pub fn parse_bool(v: &str) -> Option<bool> {
 }
 
 #[must_use]
-pub fn parse_u32(v: &str) -> Option<u32> {
+pub(crate) fn parse_u32(v: &str) -> Option<u32> {
     v.parse().ok()
 }
 
-pub fn parse_nonzero_u32(v: &str) -> Option<NonZero<u32>> {
+#[must_use]
+pub(crate) fn parse_nonzero_u32(v: &str) -> Option<NonZero<u32>> {
     parse_u32(v).and_then(NonZero::new)
 }
 
 #[must_use]
-pub fn parse_i32(v: &str) -> Option<i32> {
+pub(crate) fn parse_i32(v: &str) -> Option<i32> {
     v.parse().ok()
 }
 
 #[must_use]
-pub fn parse_display_mode(v: &str) -> Option<DisplayMode> {
+pub(crate) fn parse_display_mode(v: &str) -> Option<DisplayMode> {
     match v.to_ascii_lowercase().as_str() {
         "windowed" => Some(DisplayMode::Windowed),
         "fullscreen" => Some(DisplayMode::Fullscreen),
@@ -381,7 +382,8 @@ pub fn parse_display_mode(v: &str) -> Option<DisplayMode> {
     }
 }
 
-pub fn parse_refresh_rate(v: &str) -> Option<RefreshRateMode> {
+#[must_use]
+pub(crate) fn parse_refresh_rate(v: &str) -> Option<RefreshRateMode> {
     match v.to_ascii_lowercase().as_str() {
         "native" => Some(RefreshRateMode::Native),
         "nativemultiple" => Some(RefreshRateMode::NativeMultiple),
@@ -390,7 +392,7 @@ pub fn parse_refresh_rate(v: &str) -> Option<RefreshRateMode> {
 }
 
 #[must_use]
-pub fn parse_window_frame(v: &str) -> Option<WindowFrame> {
+pub(crate) fn parse_window_frame(v: &str) -> Option<WindowFrame> {
     match v.to_ascii_lowercase().as_str() {
         "framed" => Some(WindowFrame::Framed),
         "frameless" => Some(WindowFrame::Frameless),
@@ -400,7 +402,7 @@ pub fn parse_window_frame(v: &str) -> Option<WindowFrame> {
 }
 
 #[must_use]
-pub fn parse_priority_class(v: &str) -> Option<PriorityClass> {
+pub(crate) fn parse_priority_class(v: &str) -> Option<PriorityClass> {
     match v.to_ascii_lowercase().as_str() {
         "unchanged" => Some(PriorityClass::Unchanged),
         "idle" => Some(PriorityClass::Idle),
@@ -415,7 +417,7 @@ pub fn parse_priority_class(v: &str) -> Option<PriorityClass> {
 // `0x` / `0o` / `0b` radix prefixes are recognized.
 // Bare numbers are interpreted as decimal.
 #[must_use]
-pub fn parse_bitmask(v: &str) -> Option<u32> {
+pub(crate) fn parse_bitmask(v: &str) -> Option<u32> {
     let bytes = v.as_bytes();
     let (radix, rest) = if bytes.len() >= 2 && bytes[0] == b'0' {
         match bytes[1].to_ascii_lowercase() {
@@ -437,12 +439,12 @@ pub fn decode_text(bytes: &[u8]) -> String {
     String::from_utf8_lossy(body).into_owned()
 }
 
-/// Writes the game-agnostic manifest lines. Game crates should call this from their
-/// `extra_manifest` closure in `log::init` and append any game-specific lines after.
-///
-/// # Errors
-/// Returns an error if writing to the provided sink fails.
-pub fn write_manifest_common<W: Write + ?Sized>(w: &mut W, core: &CoreConfig) -> IoResult<()> {
+/// Writes the game-agnostic manifest lines after the log preamble.
+/// Called automatically by [`crate::log::init`] before the game's `extra_manifest` runs.
+pub(crate) fn write_manifest_common<W: Write + ?Sized>(
+    w: &mut W,
+    core: &CoreConfig,
+) -> IoResult<()> {
     writeln!(w, "display.mode={}", core.display.mode)?;
     writeln!(w, "display.refresh_rate={}", core.display.refresh_rate)?;
     let win = &core.window;

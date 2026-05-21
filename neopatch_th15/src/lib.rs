@@ -77,7 +77,6 @@ unsafe fn install_hooks() {
                 || (Th15Config::default(), CoreConfig::default()),
                 |b| th15_config::parse(&core_config::decode_text(&b)),
             );
-        // Set core first because `log::init` reads from it via `core_cfg_ref`.
         drop(core_config::CONFIG.set(core_cfg));
         drop(config::CONFIG.set(th15_cfg));
         let core_cfg_ref = core_config::CONFIG.get().unwrap();
@@ -86,12 +85,9 @@ unsafe fn install_hooks() {
         // Initialize logging first so the earliest install events are captured.
         // Minidumps land in `log::dump_dir`, the per-session directory next to `events.log`.
         let install_dir = exe_dir.map_or_else(|| PathBuf::from("."), Path::to_path_buf);
-        log::init(
-            &install_dir,
-            &core_cfg_ref.log,
-            host_exe_path.as_deref(),
-            |w| th15_config::write_manifest_extras(w, core_cfg_ref, th15_cfg_ref),
-        );
+        log::init(&install_dir, core_cfg_ref, host_exe_path.as_deref(), |w| {
+            th15_config::write_manifest_extras(w, th15_cfg_ref)
+        });
 
         // `DllMain` runs on the `LoadLibrary` caller.
         // For a statically-imported DLL this is the process' main thread.

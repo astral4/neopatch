@@ -47,6 +47,14 @@ impl Patch {
             verify_patch(self.addr, self.replacement, self.name);
         }
     }
+
+    /// # Safety
+    /// Each patch's `addr` must be a writable code address.
+    pub unsafe fn apply_all(patches: &[Self]) {
+        for p in patches {
+            unsafe { p.apply() };
+        }
+    }
 }
 
 /// Writes a 5-byte relative `e9 disp32` jmp at `target` to `hook`.
@@ -64,7 +72,7 @@ pub unsafe fn patch_jmp(target: usize, expected: &[u8; 5], hook: *mut (), name: 
 ///
 /// # Safety
 /// `target` must be a writable code address.
-pub unsafe fn patch_call_over_indirect(
+pub(crate) unsafe fn patch_call_over_indirect(
     target: usize,
     expected: &[u8; 6],
     hook: *mut (),

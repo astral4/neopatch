@@ -49,9 +49,7 @@ iat_hook! {
 pub(crate) unsafe fn install(host: HMODULE) {
     unsafe {
         REAL_DIALOG_BOX_PARAM_A.install(host, hook_dialog_box_param_a);
-        for patch in DIALOG_PATCHES {
-            patch.apply();
-        }
+        Patch::apply_all(DIALOG_PATCHES);
     }
 }
 

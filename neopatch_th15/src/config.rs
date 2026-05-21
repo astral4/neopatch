@@ -92,13 +92,12 @@ fn apply_display(disp: &mut DisplayCfg, resolution: &mut Resolution, k: &str, v:
     }
 }
 
-/// Writes the th15 manifest body.
+/// Writes th15-specific manifest lines that aren't already covered
+/// by the shared core preamble.
 pub(crate) fn write_manifest_extras<W: Write + ?Sized>(
     w: &mut W,
-    core: &CoreConfig,
     th15: &Th15Config,
 ) -> std::io::Result<()> {
-    config::write_manifest_common(w, core)?;
     writeln!(w, "display.resolution={}", th15.resolution)
 }
 

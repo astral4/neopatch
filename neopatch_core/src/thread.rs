@@ -20,7 +20,7 @@ pub fn set_main_id(tid: u32) {
     MAIN_TID.store(tid, Ordering::Release);
 }
 
-pub fn main_id() -> u32 {
+pub(crate) fn main_id() -> u32 {
     MAIN_TID.load(Ordering::Acquire)
 }
 
@@ -33,7 +33,7 @@ pub fn main_id() -> u32 {
 /// that would carry the token or a reference to it onto another thread.
 /// Combined with the runtime check at construction, this means: if the constructor returns,
 /// then every downstream cell access through the resulting token is on the main thread.
-pub struct MainToken {
+pub(crate) struct MainToken {
     _marker: PhantomData<*const ()>,
 }
 
@@ -44,7 +44,7 @@ impl MainToken {
     /// This must not be called before `set_main_id`. Until then, `MAIN_TID` is 0,
     /// and `GetCurrentThreadId` never returns 0, so this will abort.
     #[allow(clippy::new_without_default)]
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let current = unsafe { GetCurrentThreadId() };
         let main = main_id();
         if current != main {
@@ -67,7 +67,7 @@ impl MainToken {
 // forbidding `Drop` on `T`, since `Copy` and `Drop` are mutually exclusive. So, even a
 // hypothetical off-thread drop of a `MainCell` (if one ever lived outside a `static`)
 // runs no thread-affine destructor.
-pub struct MainCell<T: Copy>(Cell<T>);
+pub(crate) struct MainCell<T: Copy>(Cell<T>);
 
 // SAFETY: cross-thread access is prevented at the type level. `get` and `set` require
 // `&MainToken` with `MainToken: !Send + !Sync` and `&MainToken: !Send + !Sync`.
@@ -79,15 +79,15 @@ unsafe impl<T: Copy> Sync for MainCell<T> {}
 unsafe impl<T: Copy> Send for MainCell<T> {}
 
 impl<T: Copy> MainCell<T> {
-    pub const fn new(v: T) -> Self {
+    pub(crate) const fn new(v: T) -> Self {
         Self(Cell::new(v))
     }
     #[inline]
-    pub fn get(&self, _tok: &MainToken) -> T {
+    pub(crate) fn get(&self, _tok: &MainToken) -> T {
         self.0.get()
     }
     #[inline]
-    pub fn set(&self, _tok: &MainToken, v: T) {
+    pub(crate) fn set(&self, _tok: &MainToken, v: T) {
         self.0.set(v);
     }
 }

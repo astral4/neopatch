@@ -11,7 +11,7 @@ use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 use windows_sys::Win32::System::SystemInformation::GetSystemDirectoryW;
 use windows_sys::core::{GUID, HRESULT};
 
-pub type DirectInput8CreateFn = unsafe extern "system" fn(
+pub(crate) type DirectInput8CreateFn = unsafe extern "system" fn(
     HINSTANCE,
     u32,
     *const GUID,

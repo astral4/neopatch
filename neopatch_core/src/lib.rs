@@ -33,7 +33,6 @@ pub mod window;
 /// Match `$v` against a list of `const` identifiers, returning the literal identifier name
 /// (via `stringify!`) on hit and `"?"` on miss. This lets the printed name and value
 /// share a single source.
-#[macro_export]
 macro_rules! match_named {
     ($v:expr, $($name:ident),* $(,)?) => {
         match $v {
@@ -42,6 +41,7 @@ macro_rules! match_named {
         }
     };
 }
+pub(crate) use match_named;
 
 // Stub for SJLJ-built mingw-w64 toolchains whose `libgcc_eh.a` doesn't provide `_Unwind_Resume`.
 // Rust's precompiled standard library for `i686-pc-windows-gnu` still references it;

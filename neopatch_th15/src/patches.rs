@@ -52,11 +52,7 @@ const PROLOGUE_LEN: usize = 5;
 const FCN_0044BED0_AFTER_PROLOGUE: usize = FCN_0044BED0 + PROLOGUE_LEN;
 
 pub(crate) unsafe fn apply_basic() {
-    unsafe {
-        for patch in PATCHES {
-            patch.apply();
-        }
-    }
+    unsafe { Patch::apply_all(PATCHES) };
 }
 
 /// Replays `fcn.0044bed0`'s overwritten prologue, then resumes past the patch site.

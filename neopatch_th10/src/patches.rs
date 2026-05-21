@@ -28,9 +28,5 @@ pub(crate) const PATCHES: &[Patch] = &[
 ];
 
 pub(crate) unsafe fn apply_basic() {
-    unsafe {
-        for patch in PATCHES {
-            patch.apply();
-        }
-    }
+    unsafe { Patch::apply_all(PATCHES) };
 }

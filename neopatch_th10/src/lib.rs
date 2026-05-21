@@ -74,12 +74,9 @@ unsafe fn install_hooks() {
         // Initialize logging first so the earliest install events are captured.
         // Minidumps land in `log::dump_dir`, the per-session directory next to `events.log`.
         let install_dir = exe_dir.map_or_else(|| PathBuf::from("."), Path::to_path_buf);
-        log::init(
-            &install_dir,
-            &core_cfg_ref.log,
-            host_exe_path.as_deref(),
-            |w| core_config::write_manifest_common(w, core_cfg_ref),
-        );
+        log::init(&install_dir, core_cfg_ref, host_exe_path.as_deref(), |_w| {
+            Ok(())
+        });
 
         // `DllMain` runs on the `LoadLibrary` caller.
         // For a statically-imported DLL this is the process' main thread.
