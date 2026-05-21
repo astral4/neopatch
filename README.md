@@ -2,19 +2,24 @@
 
 neopatch is a Touhou game mod for input-to-display latency reductions, optimizations, and other fixes.
 
-Currently, only Touhou 15 (`th15.exe v1.00b`) is supported. Support for more games is planned for the near future.
+Currently supported: Touhou 10 (`th10.exe v1.00a`) and Touhou 15 (`th15.exe v1.00b`). Support for more games is planned for the near future.
 
 ## Usage
 
 neopatch ships as a DLL file. The file should be named `dinput8.dll` and placed in the game directory alongside the game executable.
 
-neopatch is configured through a `neopatch.ini` file, which should also be placed in the game directory. Per-game documentation of the available settings lives in each game crate (Touhou 15: [`neopatch_th15/neopatch.ini.example`](neopatch_th15/neopatch.ini.example)).
+neopatch is configured through a `neopatch.ini` file, which should also be placed in the game directory. Please check the per-game example files to see what's possible with neopatch!
+
+- Touhou 10: [`neopatch_th10/neopatch.ini.example`](neopatch_th10/neopatch.ini.example)
+- Touhou 15: [`neopatch_th15/neopatch.ini.example`](neopatch_th15/neopatch.ini.example)
 
 neopatch is not compatible with similar mods like vpatch and OpenInputLagPatch (OILP). Attempting to use neopatch with them may cause hard-to-troubleshoot issues.
 
 ## Development
 
-neopatch is cross-compiled from Linux to `i686-pc-windows-gnu`. Build hosts need a mingw-w64 i686 toolchain. [Wine](https://www.winehq.org/) is used as the Cargo test runner. 
+neopatch is cross-compiled from Linux to `i686-pc-windows-gnu`. Build hosts need a mingw-w64 i686 toolchain. [Wine](https://www.winehq.org/) is used as the Cargo test runner.
+
+An example with the [`neopatch_th15`](neopatch_th15/) crate:
 
 ```
 cargo build -p neopatch_th15 --target i686-pc-windows-gnu --release

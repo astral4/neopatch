@@ -1,3 +1,7 @@
+build-th10:
+    cargo build -p neopatch_th10 --target i686-pc-windows-gnu --release
+    cp target/i686-pc-windows-gnu/release/neopatch_th10.dll sandbox/games/th10/dinput8.dll
+
 build-th15:
     cargo build -p neopatch_th15 --target i686-pc-windows-gnu --release
     cp target/i686-pc-windows-gnu/release/neopatch_th15.dll sandbox/games/th15/dinput8.dll
@@ -15,11 +19,15 @@ _release game:
     (cd "${out}" && zip -qr "${name}.zip" "${name}/")
     echo "Created ${out}/${name}.zip"
 
+release-th10: (_release "th10")
 release-th15: (_release "th15")
 
-release: release-th15
+release: release-th10 release-th15
 
-test: test-th15
+test: test-th10 test-th15
+
+test-th10:
+    cargo test -p neopatch_th10 --target i686-pc-windows-gnu --release
 
 test-th15:
     cargo test -p neopatch_th15 --target i686-pc-windows-gnu --release
@@ -27,7 +35,10 @@ test-th15:
 fmt:
     cargo fmt --all
 
-clippy: clippy-th15
+clippy: clippy-th10 clippy-th15
+
+clippy-th10:
+    cargo clippy -p neopatch_th10 --target i686-pc-windows-gnu --release --all-targets -- -D warnings
 
 clippy-th15:
     cargo clippy -p neopatch_th15 --target i686-pc-windows-gnu --release --all-targets -- -D warnings

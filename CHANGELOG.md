@@ -4,6 +4,10 @@ All notable changes to neopatch will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- Support for Touhou 10 ~ Mountain of Faith (`th10.exe v1.00a`).
+
 ## [0.2.0] - 2026-05-17
 
 ### Added
