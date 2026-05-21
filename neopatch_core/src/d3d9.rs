@@ -749,10 +749,26 @@ unsafe fn prep_present_params(
 /// On D3D9Ex with `SWAPEFFECT_DISCARD`, `D3DPRESENTFLAG_LOCKABLE_BACKBUFFER`
 /// breaks flip-model presentation on native NVIDIA: window opens; black screen; exit.
 /// DXVK doesn't trip on it because Vulkan has no equivalent concept.
+///
+/// `BackBufferFormat` is forced to `X8R8G8B8` because 16-bit modes (e.g. `R5G6B5`,
+/// which th10 still offers as an option) are inferior on modern displays and force a needless
+/// adapter-mode constraint. Games that ask for `A8R8G8B8` get the equivalent without-alpha
+/// format, matching the existing `CheckDeviceFormat` substitution one frame later.
 fn rewrite_present_params(pp: &mut D3DPRESENT_PARAMETERS) {
     // `cast_unsigned` preserves the bit pattern.
     pp.PresentationInterval = D3DPRESENT_INTERVAL_IMMEDIATE.cast_unsigned();
     pp.Flags &= !D3DPRESENTFLAG_LOCKABLE_BACKBUFFER;
+    let original_format = pp.BackBufferFormat;
+    pp.BackBufferFormat = D3DFMT_X8R8G8B8;
+    if original_format != D3DFMT_X8R8G8B8 {
+        info!(
+            kind = "backbuffer_format_normalized",
+            original = format_name(original_format),
+            original_n = original_format.0,
+            forced = format_name(D3DFMT_X8R8G8B8),
+            forced_n = D3DFMT_X8R8G8B8.0,
+        );
+    }
 }
 
 /// Override the game's hard-coded 60 Hz in `pp.FullScreen_RefreshRateInHz`
@@ -972,10 +988,11 @@ mod tests {
 
     #[test]
     fn rewrite_present_params_preserves_other_fields() {
-        // Locks in the current "we only touch interval + lockable flag" contract.
+        // Locks in the current contract of only touching interval,
+        // lockable flag, and backbuffer format.
         //
         // TODO: The FLIPEX-direct backlog item will modify `SwapEffect`
-        // and `BackBufferCount here, so this test should be updated.
+        // and `BackBufferCount` here, so this test should be updated.
         let baseline = D3DPRESENT_PARAMETERS {
             BackBufferWidth: 1280,
             BackBufferHeight: 960,
@@ -1002,6 +1019,18 @@ mod tests {
             pp.FullScreen_RefreshRateInHz,
             baseline.FullScreen_RefreshRateInHz,
         );
+    }
+
+    #[test]
+    fn rewrite_present_params_normalizes_backbuffer_format() {
+        for src in [D3DFMT_R5G6B5, D3DFMT_A8R8G8B8, D3DFMT_X1R5G5B5] {
+            let mut pp = D3DPRESENT_PARAMETERS {
+                BackBufferFormat: src,
+                ..Default::default()
+            };
+            rewrite_present_params(&mut pp);
+            assert_eq!(pp.BackBufferFormat, D3DFMT_X8R8G8B8, "src={src:?}");
+        }
     }
 
     #[test]

@@ -8,6 +8,10 @@ All notable changes to neopatch will be documented in this file.
 
 - Support for Touhou 10 ~ Mountain of Faith (`th10.exe v1.00a`).
 
+### Changed
+
+- Color depth is now normalized to 32-bit regardless of what the game requests.
+
 ## [0.2.0] - 2026-05-17
 
 ### Added
