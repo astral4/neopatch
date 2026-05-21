@@ -1,6 +1,6 @@
 build-th15:
     cargo build -p neopatch_th15 --target i686-pc-windows-gnu --release
-    mv target/i686-pc-windows-gnu/release/dinput8.dll sandbox/games/th15/dinput8.dll
+    cp target/i686-pc-windows-gnu/release/neopatch_th15.dll sandbox/games/th15/dinput8.dll
 
 _release game:
     #!/usr/bin/env bash
@@ -10,7 +10,7 @@ _release game:
     cargo build -p ${name} --target i686-pc-windows-gnu --release
     rm -rf "${out}/${name}" "${out}/${name}.zip"
     mkdir -p "${out}/${name}"
-    cp target/i686-pc-windows-gnu/release/${name}.dll "${out}/${name}/dinput8.dll"
+    cp "target/i686-pc-windows-gnu/release/${name}.dll" "${out}/${name}/dinput8.dll"
     cp ${name}/neopatch.ini.example "${out}/${name}/neopatch.ini"
     (cd "${out}" && zip -qr "${name}.zip" "${name}/")
     echo "Created ${out}/${name}.zip"
