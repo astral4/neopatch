@@ -77,8 +77,7 @@ pub enum ReplayMode {
 /// Defaults to `Normal` before `install` or for games without replay-speed control.
 static REPLAY_MODE_FN: OnceLock<fn() -> ReplayMode> = OnceLock::new();
 
-/// Registers the game-specific replay-mode probe. Idempotent: the first caller wins.
-/// Call before [`install`]; later callers are silently ignored.
+/// Registers the game-specific replay-mode probe; first caller wins. Call before [`install`].
 pub fn set_replay_mode_fn(f: fn() -> ReplayMode) {
     let _ = REPLAY_MODE_FN.set(f);
 }

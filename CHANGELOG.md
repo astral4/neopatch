@@ -6,6 +6,12 @@ All notable changes to neopatch will be documented in this file.
 
 ### Added
 
+- Controller D-pad input now produces movement. The vanilla games only read the analog stick, so the D-pad on modern gamepads was previously silently dropped.
+
+## [0.3.0] - 2026-05-20
+
+### Added
+
 - Support for Touhou 10 ~ Mountain of Faith (`th10.exe v1.00a`).
 
 ### Changed

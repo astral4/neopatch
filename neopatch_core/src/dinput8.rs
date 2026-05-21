@@ -6,6 +6,7 @@
 
 use crate::vtable::{FnSlot, parse_fn_ptr};
 use std::ffi::c_void;
+use std::sync::OnceLock;
 use windows_sys::Win32::Foundation::{E_FAIL, HINSTANCE, MAX_PATH};
 use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 use windows_sys::Win32::System::SystemInformation::GetSystemDirectoryW;
@@ -20,6 +21,16 @@ pub(crate) type DirectInput8CreateFn = unsafe extern "system" fn(
 ) -> HRESULT;
 
 static REAL: FnSlot<DirectInput8CreateFn> = FnSlot::new("REAL_DIRECT_INPUT_8_CREATE");
+
+/// Optional callback run with the new `IDirectInput8` after each successful
+/// `DirectInput8Create`. Set by [`set_on_created`]; first caller wins.
+static ON_CREATED: OnceLock<unsafe fn(*mut c_void)> = OnceLock::new();
+
+/// Registers a hook to run after `DirectInput8Create` returns a new `IDirectInput8`;
+/// first caller wins. This should be called before any DirectInput call from the game.
+pub fn set_on_created(f: unsafe fn(*mut c_void)) {
+    let _ = ON_CREATED.set(f);
+}
 
 /// Loads System32's `dinput8.dll` by full path so the bare name doesn't resolve back to us
 /// via the same DLL search order that put us here, and caches the real `DirectInput8Create`.
@@ -57,6 +68,9 @@ pub fn init() {
 /// Forwards to the cached real `DirectInput8Create`. Returns `E_FAIL` if `init` hasn't run
 /// or System32's `dinput8.dll` cannot be resolved.
 ///
+/// On success, hands the returned `IDirectInput8` to any callback registered
+/// via [`set_on_created`]. If no callback is registered, the call simply passes through.
+///
 /// # Safety
 /// The caller must obey the dinput8 export's published contract for the pointer arguments.
 pub unsafe fn forward(
@@ -69,7 +83,16 @@ pub unsafe fn forward(
     let Some(real) = REAL.try_get() else {
         return E_FAIL;
     };
-    unsafe { real(hinst, dw_version, riidltf, ppv_out, punk_outer) }
+    let hr = unsafe { real(hinst, dw_version, riidltf, ppv_out, punk_outer) };
+    if hr >= 0
+        && !ppv_out.is_null()
+        && let Some(on_created) = ON_CREATED.get()
+    {
+        // SAFETY: `ppv_out` now holds the new `IDirectInput8`.
+        let di = unsafe { *ppv_out };
+        unsafe { on_created(di) };
+    }
+    hr
 }
 
 /// Emits the `DirectInput8Create` export.

@@ -10,6 +10,7 @@ pub(crate) fn parse(text: &str) -> CoreConfig {
             "display" => config::apply_display(&mut core.display, k, v),
             "window" => config::apply_window(&mut core.window, k, v),
             "framerate" => config::apply_framerate(&mut core.framerate, k, v),
+            "input" => config::apply_input(&mut core.input, k, v),
             "process" => config::apply_process(&mut core.process, k, v),
             "log" => config::apply_log(&mut core.log, k, v),
             _ => {}

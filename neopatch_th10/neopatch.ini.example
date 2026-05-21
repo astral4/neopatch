@@ -60,6 +60,15 @@ y = 0
 always_on_top = false
 
 
+[input]
+; Treat the controller's D-pad (POV hat) as movement input.
+;
+; This can be disabled if you already remap controller inputs
+; or the analog stick stops responding while the D-pad is held.
+; Default: true
+dpad = true
+
+
 [process]
 ; Process priority class. Default: Unchanged
 ;   Unchanged

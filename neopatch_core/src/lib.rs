@@ -17,6 +17,7 @@ pub mod exit_hooks;
 pub mod game_addr;
 pub mod gdi_caps;
 pub mod iat;
+pub mod input;
 pub mod log;
 pub mod modules;
 pub mod pacer;

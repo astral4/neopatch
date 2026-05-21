@@ -25,6 +25,7 @@ pub struct CoreConfig {
     pub display: DisplayCfg,
     pub window: WindowCfg,
     pub framerate: FramerateCfg,
+    pub input: InputCfg,
     pub process: ProcessCfg,
     pub log: LogCfg,
 }
@@ -56,6 +57,17 @@ pub struct FramerateCfg {
     pub game_fps: u32,
     pub replay_skip_fps: u32,
     pub replay_slow_fps: u32,
+}
+
+pub struct InputCfg {
+    /// Fold joystick POV hat / D-pad inputs into directions read by the game.
+    pub dpad: bool,
+}
+
+impl Default for InputCfg {
+    fn default() -> Self {
+        Self { dpad: true }
+    }
 }
 
 pub struct ProcessCfg {
@@ -238,6 +250,14 @@ pub fn apply_framerate(cfg: &mut FramerateCfg, k: &str, v: &str) {
             cfg.replay_slow_fps = parse_u32(v).unwrap_or(DEFAULT_REPLAY_SLOW_FPS);
         }
         _ => {}
+    }
+}
+
+pub fn apply_input(cfg: &mut InputCfg, k: &str, v: &str) {
+    if k.eq_ignore_ascii_case("dpad")
+        && let Some(b) = parse_bool(v)
+    {
+        cfg.dpad = b;
     }
 }
 
@@ -469,6 +489,7 @@ pub(crate) fn write_manifest_common<W: Write + ?Sized>(
         "framerate.replay_slow_fps={}",
         core.framerate.replay_slow_fps
     )?;
+    writeln!(w, "input.dpad={}", core.input.dpad)?;
     writeln!(w, "process.priority={}", core.process.priority)?;
     writeln!(
         w,
@@ -686,10 +707,27 @@ mod tests {
         assert_eq!(cfg.framerate.game_fps, DEFAULT_GAME_FPS);
         assert_eq!(cfg.framerate.replay_skip_fps, DEFAULT_REPLAY_SKIP_FPS);
         assert_eq!(cfg.framerate.replay_slow_fps, DEFAULT_REPLAY_SLOW_FPS);
+        assert!(cfg.input.dpad);
         assert_eq!(cfg.process.priority, PriorityClass::Unchanged);
         assert_eq!(cfg.process.affinity_mask, None);
         assert_eq!(cfg.log.level, LevelFilter::INFO);
         assert_eq!(cfg.log.sessions_to_keep, DEFAULT_SESSIONS_TO_KEEP);
         assert_eq!(cfg.log.log_dir, None);
+    }
+
+    #[test]
+    fn apply_input_toggles_dpad() {
+        let mut cfg = InputCfg::default();
+        assert!(cfg.dpad);
+        apply_input(&mut cfg, "dpad", "off");
+        assert!(!cfg.dpad);
+        apply_input(&mut cfg, "dpad", "on");
+        assert!(cfg.dpad);
+        // Unknown values leave the current setting alone.
+        apply_input(&mut cfg, "dpad", "garbage");
+        assert!(cfg.dpad);
+        // Unknown keys are ignored.
+        apply_input(&mut cfg, "other_key", "off");
+        assert!(cfg.dpad);
     }
 }

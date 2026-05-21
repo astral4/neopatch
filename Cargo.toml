@@ -13,36 +13,37 @@ license = "MIT OR Apache-2.0"
 publish = false
 
 [workspace.dependencies]
+tracing = { version = "0.1", default-features = false, features = ["std"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["registry"] }
+windows = { version = "0.62", default-features = false, features = [
+    "Win32_Devices_HumanInterfaceDevice",
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D9",
+    "Win32_Graphics_Gdi",
+] }
 windows-sys = { version = "0.61", features = [
     "Wdk_Foundation",
     "Wdk_System_Threading",
     "Win32_Foundation",
     "Win32_Globalization",
+    "Win32_Graphics_Gdi",
+    "Win32_Media",
     "Win32_Security",
-    "Win32_System_LibraryLoader",
-    "Win32_System_SystemServices",
-    "Win32_System_SystemInformation",
-    "Win32_System_Memory",
+    "Win32_Storage_FileSystem",
     "Win32_System_Diagnostics_Debug",
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_Kernel",
-    "Win32_System_Threading",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
     "Win32_System_Performance",
-    "Win32_System_WindowsProgramming",
     "Win32_System_ProcessStatus",
+    "Win32_System_SystemInformation",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
+    "Win32_System_WindowsProgramming",
     "Win32_UI_Controls",
     "Win32_UI_WindowsAndMessaging",
-    "Win32_Graphics_Gdi",
-    "Win32_Media",
-    "Win32_Storage_FileSystem",
 ] }
-windows = { version = "0.62", default-features = false, features = [
-    "Win32_Graphics_Direct3D9",
-    "Win32_Graphics_Gdi",
-    "Win32_Foundation",
-] }
-tracing = { version = "0.1", default-features = false, features = ["std"] }
-tracing-subscriber = { version = "0.3", default-features = false, features = ["registry"] }
 
 [workspace.lints.rust]
 async_fn_in_trait = "allow"

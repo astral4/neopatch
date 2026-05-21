@@ -74,6 +74,7 @@ pub(crate) fn parse(text: &str) -> (Th15Config, CoreConfig) {
             "display" => apply_display(&mut core.display, &mut th15.resolution, k, v),
             "window" => config::apply_window(&mut core.window, k, v),
             "framerate" => config::apply_framerate(&mut core.framerate, k, v),
+            "input" => config::apply_input(&mut core.input, k, v),
             "process" => config::apply_process(&mut core.process, k, v),
             "log" => config::apply_log(&mut core.log, k, v),
             _ => {}

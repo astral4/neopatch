@@ -13,7 +13,7 @@ mod state;
 use neopatch_core::config::{self as core_config, CoreConfig};
 use neopatch_core::pacer::{PACER, Pacer, PacingPolicy};
 use neopatch_core::{
-    crash, d3d9, d3dx9, dinput8, dinput8_export, exit_hooks, gdi_caps, log, process, thread,
+    crash, d3d9, d3dx9, dinput8, dinput8_export, exit_hooks, gdi_caps, input, log, process, thread,
     timer_period, vtable, watchdog, window,
 };
 use std::env::current_exe;
@@ -69,14 +69,17 @@ unsafe fn install_hooks() {
                 config::parse(&core_config::decode_text(&b))
             });
         drop(core_config::CONFIG.set(core_cfg));
-        let core_cfg_ref = core_config::CONFIG.get().unwrap();
+        let core_cfg = core_config::CONFIG.get().unwrap();
 
         // Initialize logging first so the earliest install events are captured.
         // Minidumps land in `log::dump_dir`, the per-session directory next to `events.log`.
         let install_dir = exe_dir.map_or_else(|| PathBuf::from("."), Path::to_path_buf);
-        log::init(&install_dir, core_cfg_ref, host_exe_path.as_deref(), |_w| {
-            Ok(())
-        });
+        log::init(
+            &install_dir,
+            core_cfg,
+            host_exe_path.as_deref(),
+            |_w| Ok(()),
+        );
 
         // `DllMain` runs on the `LoadLibrary` caller.
         // For a statically-imported DLL this is the process' main thread.
@@ -85,7 +88,7 @@ unsafe fn install_hooks() {
 
         crash::install_handlers();
         // The watchdog only emits at INFO level anyway.
-        if core_cfg_ref.log.level >= LevelFilter::INFO {
+        if core_cfg.log.level >= LevelFilter::INFO {
             watchdog::install();
         }
 
@@ -94,15 +97,15 @@ unsafe fn install_hooks() {
         // and silently no-op for symbols we don't import ourselves.
         let host_exe: HMODULE = GetModuleHandleW(null());
 
-        process::apply(&core_cfg_ref.process);
+        process::apply(&core_cfg.process);
 
         timer_period::install(host_exe);
         gdi_caps::install(host_exe);
         window::install(
             host_exe,
-            &core_cfg_ref.window,
+            &core_cfg.window,
             TH10_FRAMEBUFFER_SIZE,
-            core_cfg_ref.display.mode,
+            core_cfg.display.mode,
         );
         dialog_dismiss::install(host_exe);
         exit_hooks::install(host_exe);
@@ -114,10 +117,14 @@ unsafe fn install_hooks() {
         // We do this before `d3d9::install` because that call
         // wires `Present` into `hook_present`, which unwraps `PACER.get()`.
         _ = PACER.set(Pacer::new(PacingPolicy::LiveInput {
-            target_fps: core_cfg_ref.framerate.game_fps,
+            target_fps: core_cfg.framerate.game_fps,
         }));
 
         d3d9::install(host_exe);
+
+        if core_cfg.input.dpad {
+            input::install();
+        }
 
         patches::apply_basic();
     }
