@@ -24,7 +24,10 @@ release-th15: (_release "th15")
 
 release: release-th10 release-th15
 
-test: test-th10 test-th15
+test: test-core test-th10 test-th15
+
+test-core:
+    cargo test -p neopatch_core --target i686-pc-windows-gnu --release
 
 test-th10:
     cargo test -p neopatch_th10 --target i686-pc-windows-gnu --release
@@ -35,7 +38,10 @@ test-th15:
 fmt:
     cargo fmt --all
 
-clippy: clippy-th10 clippy-th15
+clippy: clippy-core clippy-th10 clippy-th15
+
+clippy-core:
+    cargo clippy -p neopatch_core --target i686-pc-windows-gnu --release --all-targets -- -D warnings
 
 clippy-th10:
     cargo clippy -p neopatch_th10 --target i686-pc-windows-gnu --release --all-targets -- -D warnings
