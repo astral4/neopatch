@@ -24,8 +24,7 @@ struct CReplayManager {
 }
 
 /// Probe registered with [`neopatch_core::d3d9::set_replay_mode_fn`].
-/// Reads the replay-manager pointer and input bitfield to classify the current
-/// pacing intent.
+/// Reads the replay-manager pointer and input bitfield to classify the current pacing intent.
 pub(crate) fn replay_mode() -> ReplayMode {
     let mgr = REPLAY_MGR_INSTANCE_PTR.read();
     if mgr.is_null() {

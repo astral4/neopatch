@@ -85,7 +85,6 @@ mod tests {
 
     #[test]
     fn resolution_key_is_silently_ignored() {
-        // th15 carries a [display] resolution key, unlike th10.
         let core = parse("[display]\nmode = windowed\nresolution = 1280x960");
         assert_eq!(core.display.mode, DisplayMode::Windowed);
     }

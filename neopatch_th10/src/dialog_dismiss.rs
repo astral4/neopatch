@@ -1,7 +1,7 @@
 //! Logic for auto-dismissing th10's window-mode startup dialog.
 //!
 //! `fcn.00438ad0` calls `DialogBoxParamA` with template `0xCB` and the dialog proc
-//! at `0x0043a3a0` when `[0x491d78]` bit 8 ("ask every time", loaded from `th10.cfg`) is set.
+//! at `0x0043a3a0` when `[0x491d78] & 0x100` ("ask every time at startup" checkbox) is set.
 //! The proc's `EndDialog` value lands in `[0x491d65]`, which the game later passes
 //! as `Windowed` to `CreateDevice`. We NOP the dialog-creation gate so the call always fires,
 //! then short-circuit the IAT hook to return the value the original proc would have
