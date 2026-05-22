@@ -222,7 +222,12 @@ impl<V, F> SlotProjection<V, F> {
 /// Reads a vtable slot we trampoline through but don't patch
 /// (e.g. `CreateDeviceEx`, `ResetEx`) and publishes the function pointer into `dst`.
 /// Logs `capture_slot_null` and skips the publish if the slot is null (malformed vtable).
-/// Panics if `dst` was already set.
+///
+/// This operation is idempotent. A subsequent call with the same slot value does nothing,
+/// since re-creation of the COM object (e.g. recovery from a lost device) reads
+/// the same function pointer and there's nothing new to capture. A divergent value
+/// indicates that another shim stacked itself on top of us between calls.
+/// If this happens, we keep the originally-captured pointer.
 ///
 /// # Safety
 /// `vtbl` must point to a valid `V`. The slot at `proj` is read as a function pointer.
@@ -235,6 +240,26 @@ pub(crate) unsafe fn capture_slot<F, V>(
 {
     let slot_ptr: *const F = proj.slot_ptr(vtbl.as_ptr()).cast_const();
     let raw: *mut () = unsafe { read_unaligned(slot_ptr.cast::<*mut ()>()) };
+
+    if let Some(existing) = dst.try_get() {
+        let existing_raw = hook_to_raw(existing);
+        if existing_raw == raw {
+            info!(
+                kind = "capture_slot_skipped",
+                slot = dst.name(),
+                value = format_args!("{existing_raw:p}"),
+            );
+        } else {
+            warn!(
+                kind = "capture_slot_divergent",
+                slot = dst.name(),
+                kept = format_args!("{existing_raw:p}"),
+                seen = format_args!("{raw:p}"),
+            );
+        }
+        return;
+    }
+
     if let Some(f) = parse_fn_ptr::<F>(raw) {
         dst.store(f);
     } else {
@@ -320,7 +345,36 @@ impl<V> VtblScope<'_, V> {
                 );
                 return;
             };
-            slot.store(f);
+            // When `AlreadyOurs` misses because the COM implementation gives us a distinct
+            // vtable allocation (e.g. wine's `IDirectInput8A` is not a `.rdata`-shared vtable
+            // across `DirectInput8Create` instances the way `IDirect3D9Ex_Vtbl` is),
+            // the second visit reads a slot that still holds the real original and we'd panic
+            // in `FnSlot::store`. We skip the store but still patch the slot, so calls through
+            // this distinct vtable route through us. In the case of a divergent value
+            // (a shim layered between our two patches), we keep the original capture.
+            // This means the trampoline skips the shim, but at least we don't silently lose
+            // intercept coverage of this slot.
+            if let Some(existing) = slot.try_get() {
+                let existing_raw = hook_to_raw(existing);
+                if existing_raw == current {
+                    info!(
+                        kind = "intercept_recapture_skipped",
+                        name,
+                        offset = format_args!("{offset:#x}"),
+                        value = format_args!("{existing_raw:p}"),
+                    );
+                } else {
+                    warn!(
+                        kind = "intercept_recapture_divergent",
+                        name,
+                        offset = format_args!("{offset:#x}"),
+                        kept = format_args!("{existing_raw:p}"),
+                        seen = format_args!("{current:p}"),
+                    );
+                }
+            } else {
+                slot.store(f);
+            }
         }
         let hook_raw = hook_to_raw(hook);
         // The fence orders `slot.store` before the vtable write so trampolines reading

@@ -8,6 +8,11 @@ All notable changes to neopatch will be documented in this file.
 
 - Controller D-pad input now produces movement. The vanilla games only read the analog stick, so the D-pad on modern gamepads was previously silently dropped.
 
+### Fixed
+
+- Recapturing vtable slots no longer aborts the process.
+- Reinstalling vtable intercepts no longer aborts the process.
+
 ## [0.3.0] - 2026-05-20
 
 ### Added
