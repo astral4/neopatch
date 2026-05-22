@@ -6,6 +6,7 @@ All notable changes to neopatch will be documented in this file.
 
 ### Added
 
+- Support for Touhou 11 ~ Subterranean Animism (`th11.exe v1.00a`).
 - Controller D-pad input now produces movement. The vanilla games only read the analog stick, so the D-pad on modern gamepads was previously silently dropped.
 
 ### Changed
