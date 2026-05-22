@@ -94,7 +94,7 @@ impl<F: Copy + Send + Sync + 'static> IatHook<F> {
     pub unsafe fn install(&self, host: HMODULE, hook: F) -> bool {
         let hook_raw = hook_to_raw(hook);
         let Some(slot_ptr) = (unsafe { find_iat_slot(host, self.name) }) else {
-            warn!(kind = "iat_hook", name = self.name, status = "MISS");
+            info!(kind = "iat_hook", name = self.name, status = "NOT_IMPORTED");
             return false;
         };
         let slot_raw = slot_ptr.as_ptr();
@@ -103,7 +103,7 @@ impl<F: Copy + Send + Sync + 'static> IatHook<F> {
         // without touching protection.
         let raw_current: *mut () = unsafe { read_unaligned(slot_raw) };
         let Some(original) = parse_fn_ptr::<F>(raw_current) else {
-            warn!(kind = "iat_hook", name = self.name, status = "MISS_NULL");
+            warn!(kind = "iat_hook", name = self.name, status = "NULL_SLOT");
             return false;
         };
         self.slot.store(original);
@@ -119,7 +119,11 @@ impl<F: Copy + Send + Sync + 'static> IatHook<F> {
             info!(kind = "iat_hook", name = self.name, status = "OK");
             true
         } else {
-            warn!(kind = "iat_hook", name = self.name, status = "MISS");
+            warn!(
+                kind = "iat_hook",
+                name = self.name,
+                status = "PROTECT_FAILED"
+            );
             false
         }
     }
