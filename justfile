@@ -1,10 +1,32 @@
-build-th10:
-    cargo build -p neopatch_th10 --target i686-pc-windows-gnu --release
-    cp target/i686-pc-windows-gnu/release/neopatch_th10.dll sandbox/games/th10/dinput8.dll
+build game:
+    cargo build -p neopatch_{{game}} --target i686-pc-windows-gnu --release
+    cp target/i686-pc-windows-gnu/release/neopatch_{{game}}.dll sandbox/games/{{game}}/dinput8.dll
 
-build-th15:
-    cargo build -p neopatch_th15 --target i686-pc-windows-gnu --release
-    cp target/i686-pc-windows-gnu/release/neopatch_th15.dll sandbox/games/th15/dinput8.dll
+_test game:
+    cargo test -p neopatch_{{game}} --target i686-pc-windows-gnu --release
+
+test: (_test "core") (_test "th10") (_test "th11") (_test "th15")
+
+_clippy game:
+    cargo clippy -p neopatch_{{game}} --target i686-pc-windows-gnu --release --all-targets -- -D warnings
+
+clippy: (_clippy "core") (_clippy "th10") (_clippy "th11") (_clippy "th15")
+
+doc:
+    cargo doc --no-deps --workspace --target i686-pc-windows-gnu
+
+fmt:
+    cargo fmt --all
+
+clean:
+    cargo clean
+
+run game:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    just build {{game}}
+    cd sandbox/games/{{game}}
+    WINEDLLOVERRIDES="mscoree=,mshtml=" wine {{game}}.exe
 
 _release game:
     #!/usr/bin/env bash
@@ -19,38 +41,4 @@ _release game:
     (cd "${out}" && zip -qr "${name}.zip" "${name}/")
     echo "Created ${out}/${name}.zip"
 
-release-th10: (_release "th10")
-release-th15: (_release "th15")
-
-release: release-th10 release-th15
-
-test: test-core test-th10 test-th15
-
-test-core:
-    cargo test -p neopatch_core --target i686-pc-windows-gnu --release
-
-test-th10:
-    cargo test -p neopatch_th10 --target i686-pc-windows-gnu --release
-
-test-th15:
-    cargo test -p neopatch_th15 --target i686-pc-windows-gnu --release
-
-fmt:
-    cargo fmt --all
-
-clippy: clippy-core clippy-th10 clippy-th15
-
-clippy-core:
-    cargo clippy -p neopatch_core --target i686-pc-windows-gnu --release --all-targets -- -D warnings
-
-clippy-th10:
-    cargo clippy -p neopatch_th10 --target i686-pc-windows-gnu --release --all-targets -- -D warnings
-
-clippy-th15:
-    cargo clippy -p neopatch_th15 --target i686-pc-windows-gnu --release --all-targets -- -D warnings
-
-doc:
-    cargo doc --no-deps --workspace --target i686-pc-windows-gnu
-
-clean:
-    cargo clean
+release: (_release "th10") (_release "th11") (_release "th15")
