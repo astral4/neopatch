@@ -11,7 +11,7 @@ use std::env::var;
 use std::ffi::c_void;
 use std::fmt::{Debug, Write as _};
 use std::fs::{File, OpenOptions, create_dir_all, read_dir, remove_dir_all};
-use std::io::{BufWriter, Result as IoResult, Write};
+use std::io::{Result as IoResult, Write};
 use std::mem::zeroed;
 use std::num::NonZero;
 use std::os::windows::io::AsRawHandle;
@@ -31,10 +31,12 @@ use windows_sys::Win32::Storage::FileSystem::FlushFileBuffers;
 use windows_sys::Win32::System::SystemInformation::GetLocalTime;
 use windows_sys::Win32::System::Threading::{GetCurrentProcessId, GetCurrentThreadId};
 
-static FILE_WRITER: Mutex<Option<BufWriter<File>>> = Mutex::new(None);
-// We read lock-free from `flush` so the crash path can fsync even when
-// the same thread that crashed is holding `FILE_WRITER`. The `BufWriter` owns
-// the underlying `File` for the process lifetime by construction.
+// Each `on_event` write goes straight to the OS via `write_all`. We don't use `BufWriter`
+// so pending event lines won't be silently erased under `panic = "abort"`.
+// The mutex serializes concurrent writers.
+static FILE_WRITER: Mutex<Option<File>> = Mutex::new(None);
+// `FILE_HANDLE` is used by `flush` for `FlushFileBuffers` without taking the mutex,
+// so the crash path can fsync even when the panicking thread holds the writer mutex.
 static FILE_HANDLE: AtomicPtr<c_void> = AtomicPtr::new(null_mut());
 static SESSION_DIR: OnceLock<PathBuf> = OnceLock::new();
 static START: OnceLock<Instant> = OnceLock::new();
@@ -98,7 +100,7 @@ where
     // so `flush` never sees one without the other.
     let raw_handle: *mut c_void = file.as_raw_handle().cast();
     if let Ok(mut guard) = FILE_WRITER.lock() {
-        *guard = Some(BufWriter::with_capacity(8192, file));
+        *guard = Some(file);
         FILE_HANDLE.store(raw_handle, Ordering::Release);
     }
 
@@ -118,17 +120,9 @@ where
 
 /// Forces pending log writes to disk. Safe to call from crash and exit hooks.
 pub(crate) fn flush() {
-    // We use `Mutex::try_lock` instead of `Mutex::lock`. A crash handler can fire on a thread
-    // that's already inside the tracing layer holding `FILE_WRITER`, and `std::sync::Mutex`
-    // is non-reentrant. When `Mutex::try_lock` fails on this thread, we lose the small user-space
-    // buffer's pending bytes. However, the `FlushFileBuffers` call below still forces
-    // whatever has already reached the OS file cache out to disk via the cached `FILE_HANDLE`,
-    // which is set once at init and never invalidated.
-    if let Ok(mut guard) = FILE_WRITER.try_lock()
-        && let Some(writer) = guard.as_mut()
-    {
-        drop(writer.flush());
-    }
+    // `on_event` writes through `File::write_all`, which directly lands in the OS file cache.
+    // `FlushFileBuffers` requests the OS to commit that cache to physical disk,
+    // which matters for power-off/hard-crash scenarios.
     let raw = FILE_HANDLE.load(Ordering::Acquire);
     if !raw.is_null() {
         unsafe {

@@ -8,6 +8,10 @@ All notable changes to neopatch will be documented in this file.
 
 - Controller D-pad input now produces movement. The vanilla games only read the analog stick, so the D-pad on modern gamepads was previously silently dropped.
 
+### Changed
+
+- Log write operations are now unbuffered, so a process abort no longer silently truncates the session log. Every event that completes before the panic/abort should be on disk.
+
 ### Fixed
 
 - Recapturing vtable slots no longer aborts the process.
