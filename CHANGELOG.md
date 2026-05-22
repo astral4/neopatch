@@ -4,6 +4,8 @@ All notable changes to neopatch will be documented in this file.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-05-22
+
 ### Added
 
 - Support for Touhou 11 ~ Subterranean Animism (`th11.exe v1.00a`).
