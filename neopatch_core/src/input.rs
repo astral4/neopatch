@@ -132,6 +132,7 @@ unsafe fn patch_device_vtable(dev: *mut c_void) {
     );
 }
 
+#[allow(clippy::similar_names)]
 unsafe extern "system" fn hook_get_device_state(
     this: *mut c_void,
     cb_data: u32,
