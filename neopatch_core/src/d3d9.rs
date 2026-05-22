@@ -258,8 +258,16 @@ unsafe extern "system" fn hook_direct3dcreate9(sdk_version: u32) -> *mut c_void 
         // The Ex object's first 17 vtable slots are the `IDirect3D9` vtable,
         // so the game can keep using the returned pointer as plain `IDirect3D9`
         // while we get the Ex methods.
-        let Ok(ex) = Direct3DCreate9Ex(sdk_version) else {
-            return null_mut();
+        let ex = match Direct3DCreate9Ex(sdk_version) {
+            Ok(ex) => ex,
+            Err(e) => {
+                warn!(
+                    kind = "d3d9_init_failed",
+                    sdk_version = format_args!("{sdk_version:#x}"),
+                    hr = %fmt_hr!(e.code()),
+                );
+                return null_mut();
+            }
         };
         // `into_raw` transfers the ref to the game without `Release`.
         let p_ex: *mut c_void = ex.into_raw();
