@@ -517,10 +517,10 @@ unsafe fn install_device_hooks(dev: NonNull<c_void>) {
     }
 }
 
-/// `SetMaximumFrameLatency(1)` caps the GPU input queue at 1 (default 3)
-/// so frames spend less time enqueued before display, shaving up to two frames
-/// of end-to-display latency. `SetGPUThreadPriority(7)` reduces CPU-scheduler jitter
-/// on a contended D3D9Ex worker thread marshalling `Present`.
+/// `SetMaximumFrameLatency(1)` caps the GPU input queue at 1 (default 3) so frames spend
+/// less time enqueued before display, shaving up to two frames of end-to-end latency.
+/// `SetGPUThreadPriority(7)` reduces CPU-scheduler jitter on a contended D3D9Ex worker thread
+/// marshalling `Present`.
 unsafe fn apply_device_ex_tunables(dev: NonNull<c_void>) {
     unsafe {
         let latency_hr = call_real_set_max_frame_latency(dev.as_ptr(), 1);
