@@ -215,7 +215,7 @@ fn enumerate_thread_samples(skip_tid: u32) -> Vec<ThreadSample> {
     out
 }
 
-fn watchdog_loop() {
+fn watchdog_loop() -> ! {
     let mut iter: u64 = 0;
     let mut prev_frame: Option<u32> = None;
     loop {

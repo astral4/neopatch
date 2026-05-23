@@ -4,7 +4,6 @@ use crate::iat_hook;
 use crate::log::flush;
 use crate::untrusted::Untrusted;
 use std::ffi::c_void;
-use std::process::abort;
 use std::slice::from_mut as slice_from_mut;
 use tracing::info;
 use windows_sys::Win32::Foundation::{HANDLE, HMODULE, HWND};
@@ -14,7 +13,7 @@ use windows_sys::core::{PCSTR, PCWSTR};
 
 iat_hook! {
     REAL_EXIT_PROCESS / real_exit_process : "ExitProcess"
-        as fn(exit_code: u32) -> ();
+        as fn(exit_code: u32) -> !;
 }
 iat_hook! {
     REAL_TERMINATE_PROCESS / real_terminate_process : "TerminateProcess"
@@ -61,7 +60,7 @@ pub unsafe fn install(host: HMODULE) {
     }
 }
 
-unsafe extern "system" fn hook_exit_process(exit_code: u32) {
+unsafe extern "system" fn hook_exit_process(exit_code: u32) -> ! {
     unsafe {
         info!(
             kind = "exit_process_intercepted",
@@ -70,8 +69,7 @@ unsafe extern "system" fn hook_exit_process(exit_code: u32) {
         // We drain the `BufWriter` before the OS tears down the process.
         // Otherwise, the destructor and shutdown tail of the log are lost.
         flush();
-        real_exit_process(exit_code);
-        abort();
+        real_exit_process(exit_code)
     }
 }
 
