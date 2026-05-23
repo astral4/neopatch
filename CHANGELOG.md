@@ -4,6 +4,15 @@ All notable changes to neopatch will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- More detailed thread information is logged when the process becomes stuck before the render thread has been identified.
+
+### Fixed
+
+- Launching a game via the [thprac](https://github.com/touhouworldcup/thprac) launcher no longer causes an abort.
+- MMCSS "Games" task registration is now applied to the render thread regardless of which thread loaded neopatch. Previously, under loaders that inject via `CreateRemoteThread` (e.g. the thprac launcher), the registration was applied to the short-lived injection thread and lost as soon as that thread exited.
+
 ## [0.4.0] - 2026-05-22
 
 ### Added
