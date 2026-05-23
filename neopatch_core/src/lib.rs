@@ -24,12 +24,14 @@ pub mod pacer;
 pub mod patches;
 pub mod process;
 pub mod protect;
-pub mod thread;
+mod thread;
 pub mod timer_period;
 pub mod untrusted;
 pub mod vtable;
 pub mod watchdog;
 pub mod window;
+
+pub use thread::MainToken;
 
 /// Match `$v` against a list of `const` identifiers, returning the literal identifier name
 /// (via `stringify!`) on hit and `"?"` on miss. This lets the printed name and value

@@ -14,7 +14,7 @@ use crate::config::{self as th15_config, Th15Config};
 use neopatch_core::config::{self as core_config, CoreConfig};
 use neopatch_core::pacer::{PACER, Pacer, PacingPolicy};
 use neopatch_core::{
-    crash, d3d9, d3dx9, dinput8, dinput8_export, exit_hooks, gdi_caps, input, log, process, thread,
+    crash, d3d9, d3dx9, dinput8, dinput8_export, exit_hooks, gdi_caps, input, log, process,
     timer_period, vtable, watchdog, window,
 };
 use std::env::current_exe;
@@ -26,7 +26,6 @@ use tracing::level_filters::LevelFilter;
 use windows_sys::Win32::Foundation::{HINSTANCE, HMODULE};
 use windows_sys::Win32::System::LibraryLoader::{DisableThreadLibraryCalls, GetModuleHandleW};
 use windows_sys::Win32::System::SystemServices::DLL_PROCESS_ATTACH;
-use windows_sys::Win32::System::Threading::GetCurrentThreadId;
 
 /// `0x0047158C` in the game is `FF 15 disp32` (6-byte indirect call to `Direct3DCreate9`).
 /// We rewrite it to `E8 disp32 90` (5-byte direct call to our hook plus a trailing NOP).
@@ -88,11 +87,6 @@ unsafe fn install_hooks() {
         log::init(&install_dir, core_cfg, host_exe_path.as_deref(), |w| {
             th15_config::write_manifest_extras(w, th15_cfg)
         });
-
-        // `DllMain` runs on the `LoadLibrary` caller.
-        // For a statically-imported DLL this is the process' main thread.
-        // We do this before `watchdog::install` so the watchdog has the TID at startup.
-        thread::set_main_id(GetCurrentThreadId());
 
         crash::install_handlers();
         // The watchdog only emits at INFO level anyway.

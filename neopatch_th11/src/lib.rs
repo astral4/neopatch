@@ -13,7 +13,7 @@ mod state;
 use neopatch_core::config::{self as core_config, CoreConfig};
 use neopatch_core::pacer::{PACER, Pacer, PacingPolicy};
 use neopatch_core::{
-    crash, d3d9, d3dx9, dinput8, dinput8_export, exit_hooks, gdi_caps, input, log, process, thread,
+    crash, d3d9, d3dx9, dinput8, dinput8_export, exit_hooks, gdi_caps, input, log, process,
     timer_period, vtable, watchdog, window,
 };
 use std::env::current_exe;
@@ -25,7 +25,6 @@ use tracing::level_filters::LevelFilter;
 use windows_sys::Win32::Foundation::{HINSTANCE, HMODULE};
 use windows_sys::Win32::System::LibraryLoader::{DisableThreadLibraryCalls, GetModuleHandleW};
 use windows_sys::Win32::System::SystemServices::DLL_PROCESS_ATTACH;
-use windows_sys::Win32::System::Threading::GetCurrentThreadId;
 
 // 640x480 is the only render resolution for th11.
 // The 960x720 and 1280x960 startup dialog options just resize the window.
@@ -80,11 +79,6 @@ unsafe fn install_hooks() {
             host_exe_path.as_deref(),
             |_w| Ok(()),
         );
-
-        // `DllMain` runs on the `LoadLibrary` caller.
-        // For a statically-imported DLL this is the process' main thread.
-        // We do this before `watchdog::install` so the watchdog has the TID at startup.
-        thread::set_main_id(GetCurrentThreadId());
 
         crash::install_handlers();
         // The watchdog only emits at INFO level anyway.

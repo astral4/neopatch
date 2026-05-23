@@ -1,59 +1,58 @@
-//! Constructs for main-thread identity, access, and mutable statics.
+//! Constructs for render-thread identity, access, and mutable statics.
 //!
-//! `MAIN_TID` is set once from `DllMain` when hooks are installed.
-//! `MainToken` is a ZST witness that the holding thread is the main render thread.
-//! It is `!Send + !Sync`, so rustc rejects any code that tries to move it
-//! or share it across threads. `MainCell<T>` accessors take `&MainToken`,
-//! propagating the "main-thread only" requirement to every call site at the type level.
+//! `MAIN_TID` records the render thread's TID. It is claimed by the first thread
+//! to construct a `MainToken`, atomically, and verified on every subsequent construction.
+//! `MainToken` is a ZST witness that the holding thread is the render thread.
+//! It is `!Send + !Sync`, so rustc rejects any safe code that tries to move it or share it
+//! across threads. `MainCell<T>` accessors take `&MainToken`, propagating the
+//! "render-thread only" requirement to every call site at the type level.
+//!
+//! Render thread identity is established at first-hook entry, not at `DllMain`. The thread
+//! running `DllMain` and the thread running the render loop are usually the same, but they
+//! diverge when something (e.g. the thprac launcher) injects neopatch via `CreateRemoteThread`
+//! into a `CREATE_SUSPENDED` process before resuming the real initial thread.
 
 use crate::log::flush;
 use std::cell::Cell;
 use std::marker::PhantomData;
 use std::process::abort;
 use std::sync::atomic::{AtomicU32, Ordering};
-use tracing::error;
+use tracing::{error, info};
 use windows_sys::Win32::System::Threading::GetCurrentThreadId;
 
 static MAIN_TID: AtomicU32 = AtomicU32::new(0);
-
-pub fn set_main_id(tid: u32) {
-    MAIN_TID.store(tid, Ordering::Release);
-}
 
 pub(crate) fn main_id() -> u32 {
     MAIN_TID.load(Ordering::Acquire)
 }
 
-/// ZST witness that the constructing thread is the main render thread.
-/// Holding `&MainToken` is the compile-time proof required to call
-/// `MainCell::get` and `MainCell::set`.
+/// ZST witness that the constructing thread is the render thread. Holding `&MainToken`
+/// is the compile-time proof required to call `MainCell::get` and `MainCell::set`,
+/// as well as any other render-thread-only function in the crate (or in a per-game
+/// crate via the `pub use` at the crate root).
 ///
-/// This type is `!Send + !Sync`, so `&MainToken` is also `!Send + !Sync`.
-/// Trait-bound checks at `std::thread::spawn` and similar APIs reject any closure
-/// that would carry the token or a reference to it onto another thread.
-/// Combined with the runtime check at construction, this means: if the constructor returns,
-/// then every downstream cell access through the resulting token is on the main thread.
-pub(crate) struct MainToken {
-    _marker: PhantomData<*const ()>,
-}
+/// This type is `!Send + !Sync`. Combined with the atomic claim in the constructor,
+/// this means: if the constructor returns, then every downstream cell access through
+/// the resulting token is on the same thread that first constructed one.
+pub struct MainToken(PhantomData<*const ()>);
 
 impl MainToken {
-    /// Creates an instance of `MainToken`.
-    /// Aborts via `std::process::abort` if the caller isn't on the main thread.
-    ///
-    /// This must not be called before `set_main_id`. Until then, `MAIN_TID` is 0,
-    /// and `GetCurrentThreadId` never returns 0, so this will abort.
+    /// Creates an instance of `MainToken`. The first call claims `MAIN_TID` atomically.
+    /// A subsequent call must come from the same thread; otherwise, it aborts the process.
     #[allow(clippy::new_without_default)]
     pub(crate) fn new() -> Self {
         let current = unsafe { GetCurrentThreadId() };
-        let main = main_id();
-        if current != main {
-            error!(kind = "main_token_off_main", current, main);
-            flush();
-            abort();
-        }
-        Self {
-            _marker: PhantomData,
+        match MAIN_TID.compare_exchange(0, current, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => {
+                info!(kind = "main_thread_claimed");
+                Self(PhantomData)
+            }
+            Err(existing) if existing == current => Self(PhantomData),
+            Err(existing) => {
+                error!(kind = "main_token_off_main", current, main = existing);
+                flush();
+                abort();
+            }
         }
     }
 }
