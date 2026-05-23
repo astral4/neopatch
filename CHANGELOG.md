@@ -4,13 +4,15 @@ All notable changes to neopatch will be documented in this file.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-05-23
+
 ### Added
 
 - Support for Touhou 12 ~ Undefined Fantastic Object (`th12.exe v1.00b`).
 
 ### Fixed
 
-- Fixed rendering bugs in the vanilla games that miscompute the Z (depth) coordinate of certain sprites and transformation matrices.
+- Z (depth) coordinates of certain sprites and transformation matrices in the vanilla games are now computed correctly.
 
 ## [0.4.1] - 2026-05-23
 
@@ -28,7 +30,7 @@ All notable changes to neopatch will be documented in this file.
 ### Added
 
 - Support for Touhou 11 ~ Subterranean Animism (`th11.exe v1.00a`).
-- Controller D-pad input now produces movement. The vanilla games only read the analog stick, so the D-pad on modern gamepads was previously silently dropped.
+- Support for D-pad input from controllers. The vanilla games only read the analog stick, so the D-pad on modern gamepads was previously silently dropped.
 
 ### Changed
 
