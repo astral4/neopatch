@@ -4,6 +4,10 @@ All notable changes to neopatch will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- Support for Touhou 12 ~ Undefined Fantastic Object (`th12.exe v1.00b`).
+
 ### Fixed
 
 - Fixed rendering bugs in the vanilla games that miscompute the Z (depth) coordinate of certain sprites and transformation matrices.

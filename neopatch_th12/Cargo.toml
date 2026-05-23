@@ -1,0 +1,23 @@
+[package]
+name = "neopatch_th12"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "neopatch for Touhou 12"
+readme.workspace = true
+repository.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[lints]
+workspace = true
+
+[dependencies]
+neopatch_core = { path = "../neopatch_core" }
+tracing = { workspace = true }
+windows = { workspace = true }
+windows-sys = { workspace = true }
