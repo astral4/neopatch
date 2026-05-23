@@ -4,6 +4,8 @@ All notable changes to neopatch will be documented in this file.
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-05-23
+
 ### Changed
 
 - More detailed thread information is logged when the process becomes stuck before the render thread has been identified.
