@@ -244,6 +244,15 @@ fn watchdog_loop() {
 fn snapshot_stuck(iter: u64, frame: u32) {
     let modules = walk_modules();
     let main_tid = main_id();
+    // Before the first hook triggers, we don't know which thread is the renderer,
+    // so we log all threads.
+    if main_tid == 0 {
+        info!("watchdog #{iter} frame={frame}: (render thread not yet identified)");
+        for sample in enumerate_thread_samples(0) {
+            log_thread_header(&sample, &modules);
+        }
+        return;
+    }
     let Some(s) = sample_thread(main_tid) else {
         info!("watchdog #{iter} frame={frame}: (main thread sample unavailable)");
         return;
@@ -285,20 +294,7 @@ fn snapshot_stuck(iter: u64, frame: u32) {
     }
     let others = enumerate_thread_samples(main_tid);
     for sample in others {
-        let start_label = sample.start_addr.map_or_else(
-            || String::from("<unavailable>"),
-            |a| annotate(a.get(), &modules),
-        );
-        let handle = sample.stack[1];
-        let handle_suffix = NonZero::new(handle)
-            .and_then(lookup_handle_type)
-            .map(|ty| format!(" wait={handle:#010x} type={ty}"))
-            .unwrap_or_default();
-        info!(
-            "  thread {}: eip={} start={start_label}{handle_suffix}",
-            sample.tid,
-            annotate(sample.eip, &modules),
-        );
+        log_thread_header(&sample, &modules);
         // Full chain only for the wait-target thread.
         if Some(sample.tid) == wait_target_tid {
             let frames = walk_ebp_frames(sample.ebp, sample.esp, &modules);
@@ -312,6 +308,25 @@ fn snapshot_stuck(iter: u64, frame: u32) {
             }
         }
     }
+}
+
+/// Logs a summary of a non-main thread sample: tid, eip, start address,
+/// and (if applicable) the kernel object the thread is waiting on.
+fn log_thread_header(sample: &ThreadSample, modules: &[Module]) {
+    let start_label = sample.start_addr.map_or_else(
+        || String::from("<unavailable>"),
+        |a| annotate(a.get(), modules),
+    );
+    let handle = sample.stack[1];
+    let handle_suffix = NonZero::new(handle)
+        .and_then(lookup_handle_type)
+        .map(|ty| format!(" wait={handle:#010x} type={ty}"))
+        .unwrap_or_default();
+    info!(
+        "  thread {}: eip={} start={start_label}{handle_suffix}",
+        sample.tid,
+        annotate(sample.eip, modules),
+    );
 }
 
 /// Walks the saved-EBP linked list and returns up to `MAX_FRAMES` annotated return addresses.
