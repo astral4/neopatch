@@ -35,26 +35,24 @@ pub(crate) const PATCHES: &[Patch] = &[
     ),
 ];
 
-/// Stack offset of the `matrix.tz` slot in `fcn.00444240`'s frame.
-const MATRIX_TZ_SLOT: i32 = 0x74;
-/// Offset of the `AnmVm` flags field, read by the displaced `mov ebx, [ebx + ...]`.
-const VM_FLAGS_OFFSET: i32 = 0x35c;
-/// Resume target past the displaced mov at the splice.
-const ANM_MODE57_AFTER_SPLICE: usize = 0x0044_4394;
+/// Location of the `mov ebx, [ebx + 0x35c]` we displace with `e9 disp32`.
+const ANM_MODE57_SPLICE: usize = 0x0044_438e;
+/// Length of the displaced instruction (6 bytes for `8B 9B disp32`).
+const ANM_MODE57_DISPLACED_LEN: usize = 6;
+/// Resume target past the displaced `mov` at the splice.
+static ANM_MODE57_AFTER_SPLICE: usize = ANM_MODE57_SPLICE + ANM_MODE57_DISPLACED_LEN;
 
-/// Adds the missing matrix.tz `fadd` before the Z `fstp` in `fcn.00444240`,
-/// the position helper used by `AnmManager` render modes 5 and 7.
-/// X and Y correctly accumulate their `matrix.t*`, unlike Z.
+/// Adds the missing `matrix.tz` `fadd` before the Z `fstp` in `fcn.00444240`, the position
+/// helper used by `AnmManager` render modes 5 and 7. X and Y correctly accumulate their
+/// `matrix.t*`, unlike Z. `[esp + 0x74]` is the `matrix.tz` slot in the function's frame.
+/// `[ebx + 0x35c]` is the `AnmVm` flags field (replayed from the displaced `mov`).
 #[unsafe(naked)]
-unsafe extern "C" fn anm_mode57_z_trampoline() {
+unsafe extern "C" fn anm_mode57_z_trampoline() -> ! {
     naked_asm!(
-        "fadd dword ptr [esp + {tz_slot}]",
-        "mov  ebx, [ebx + {flags_off}]",
-        "mov  eax, {after_splice}",
-        "jmp  eax",
-        tz_slot      = const MATRIX_TZ_SLOT,
-        flags_off    = const VM_FLAGS_OFFSET,
-        after_splice = const ANM_MODE57_AFTER_SPLICE,
+        "fadd dword ptr [esp + 0x74]",
+        "mov  ebx, [ebx + 0x35c]",
+        "jmp  dword ptr [{slot}]",
+        slot = sym ANM_MODE57_AFTER_SPLICE,
     )
 }
 
@@ -65,7 +63,7 @@ pub(crate) unsafe fn apply_basic() {
 pub(crate) unsafe fn install_anm_matrix_tz_fix() {
     unsafe {
         patch_jmp(
-            0x0044_438e,
+            ANM_MODE57_SPLICE,
             &[0x8b, 0x9b, 0x5c, 0x03, 0x00],
             anm_mode57_z_trampoline as *mut (),
             "AnmManager mode 5/7 z + matrix.tz",

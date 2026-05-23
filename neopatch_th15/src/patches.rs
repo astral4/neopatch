@@ -44,10 +44,8 @@ const FCN_004865F0: usize = 0x0048_65f0;
 const LOADER_CTX_HANDLE_OFFSET: usize = 0x10;
 
 /// Length of the original prologue at `fcn.0044bed0` that the entry-jmp displaces.
-/// The bytes are `55  8b ec  6a ff` (push ebp; mov ebp, esp; push -1);
-/// the trampoline below replays the same instructions.
 const PROLOGUE_LEN: usize = 5;
-const FCN_0044BED0_AFTER_PROLOGUE: usize = FCN_0044BED0 + PROLOGUE_LEN;
+static FCN_0044BED0_AFTER_PROLOGUE: usize = FCN_0044BED0 + PROLOGUE_LEN;
 
 pub(crate) unsafe fn apply_basic() {
     unsafe { Patch::apply_all(PATCHES) };
@@ -61,10 +59,8 @@ unsafe extern "thiscall" fn fcn_0044bed0_trampoline(_this: *mut c_void) -> i32 {
         "push ebp",
         "mov ebp, esp",
         "push -1",
-        // Absolute jmp so the ASLR-relocated trampoline address doesn't matter.
-        "mov eax, {after_prologue}",
-        "jmp eax",
-        after_prologue = const FCN_0044BED0_AFTER_PROLOGUE,
+        "jmp dword ptr [{slot}]",
+        slot = sym FCN_0044BED0_AFTER_PROLOGUE,
     )
 }
 
@@ -133,37 +129,31 @@ pub(crate) unsafe fn install_destructor_hook() {
     }
 }
 
-/// `AnmVm` offset of `matrix.tz` in the scratch matrix at `vm + 0x41c`.
-const MATRIX_TZ_VM_OFFSET: i32 = 0x454;
-/// `fcn.0047fcd0` frame slot holding the per-vertex Z result.
-const Z_FRAME_SLOT: i32 = 0x64;
+/// Location of the `movss dword [ebp-0x64], xmm3` we displace with `e9 disp32`.
+const ANM_MODE57_SPLICE: usize = 0x0047_fed0;
+/// Length of the displaced instruction (5 bytes for `F3 0F 11 5D 9C`).
+const ANM_MODE57_DISPLACED_LEN: usize = 5;
 /// Resume target past the displaced `movss` at the splice.
-const ANM_MODE57_AFTER_SPLICE: usize = 0x0047_fed5;
+static ANM_MODE57_AFTER_SPLICE: usize = ANM_MODE57_SPLICE + ANM_MODE57_DISPLACED_LEN;
 
-/// Adds the missing `addss xmm3, matrix.tz` before the Z `movss` in `fcn.0047fcd0`,
-/// the position helper used by `AnmManager` render modes 5 and 7.
-/// X and Y correctly accumulate their `matrix.t*`, unlike Z.
-///
-/// Returns via `push imm32; ret` rather than `mov eax, K; jmp eax` because EAX is live
-/// across the splice (set at `0x0047feb6`, consumed by `test eax, eax` at `0x0047feda`),
-/// so we can't clobber it.
+/// Adds the missing `addss xmm3, matrix.tz` before the Z `movss` in `fcn.0047fcd0`, the
+/// position helper used by `AnmManager` render modes 5 and 7. X and Y correctly accumulate
+/// their `matrix.t*`, unlike Z. `[esi + 0x454]` is the matrix.tz offset within the scratch
+/// matrix at `vm + 0x41c`. `[ebp - 0x64]` is the Z frame slot the displaced `movss` writes to.
 #[unsafe(naked)]
-unsafe extern "C" fn anm_mode57_z_trampoline() {
+unsafe extern "C" fn anm_mode57_z_trampoline() -> ! {
     naked_asm!(
-        "addss xmm3, dword ptr [esi + {tz_off}]",
-        "movss dword ptr [ebp - {z_slot}], xmm3",
-        "push  {after_splice}",
-        "ret",
-        tz_off       = const MATRIX_TZ_VM_OFFSET,
-        z_slot       = const Z_FRAME_SLOT,
-        after_splice = const ANM_MODE57_AFTER_SPLICE,
+        "addss xmm3, dword ptr [esi + 0x454]",
+        "movss dword ptr [ebp - 0x64], xmm3",
+        "jmp   dword ptr [{slot}]",
+        slot = sym ANM_MODE57_AFTER_SPLICE,
     )
 }
 
 pub(crate) unsafe fn install_anm_matrix_tz_fix() {
     unsafe {
         patch_jmp(
-            0x0047_fed0,
+            ANM_MODE57_SPLICE,
             &[0xf3, 0x0f, 0x11, 0x5d, 0x9c],
             anm_mode57_z_trampoline as *mut (),
             "AnmManager mode 5/7 z + matrix.tz",
