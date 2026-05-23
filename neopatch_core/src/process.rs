@@ -1,5 +1,6 @@
 //! Process-level tunables applied once at `DllMain`.
 
+use crate::MainToken;
 use crate::config::{PriorityClass, ProcessCfg};
 use tracing::info;
 use windows::core::w;
@@ -35,11 +36,10 @@ pub fn apply(cfg: &ProcessCfg) {
             os_error = format_args!("{os_error:#x}"),
         );
     }
-    apply_mmcss();
 }
 
-/// Registers the main thread with the MMCSS "Games" task class.
-fn apply_mmcss() {
+/// Registers the calling thread with the MMCSS "Games" task class.
+pub(crate) fn register_mmcss(_tok: &MainToken) {
     let mut task_idx: u32 = 0;
     let h = unsafe { AvSetMmThreadCharacteristicsW(w!("Games").as_ptr(), &raw mut task_idx) };
     let os_error = last_error_if(h.is_null());

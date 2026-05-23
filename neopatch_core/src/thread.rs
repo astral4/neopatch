@@ -13,6 +13,7 @@
 //! into a `CREATE_SUSPENDED` process before resuming the real initial thread.
 
 use crate::log::flush;
+use crate::process::register_mmcss;
 use std::cell::Cell;
 use std::marker::PhantomData;
 use std::process::abort;
@@ -45,7 +46,9 @@ impl MainToken {
         match MAIN_TID.compare_exchange(0, current, Ordering::AcqRel, Ordering::Acquire) {
             Ok(_) => {
                 info!(kind = "main_thread_claimed");
-                Self(PhantomData)
+                let tok = Self(PhantomData);
+                register_mmcss(&tok);
+                tok
             }
             Err(existing) if existing == current => Self(PhantomData),
             Err(existing) => {
