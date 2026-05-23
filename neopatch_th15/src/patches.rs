@@ -73,11 +73,7 @@ unsafe extern "thiscall" fn hooked_fcn_0044bed0(this: *mut c_void) -> i32 {
         let loader_handle: HANDLE = if this.is_null() {
             null_mut()
         } else {
-            read_unaligned(
-                this.cast::<u8>()
-                    .add(LOADER_CTX_HANDLE_OFFSET)
-                    .cast::<HANDLE>(),
-            )
+            read_unaligned(this.cast::<u8>().add(LOADER_CTX_HANDLE_OFFSET).cast())
         };
 
         info!(
@@ -133,6 +129,44 @@ pub(crate) unsafe fn install_destructor_hook() {
             &[0x55, 0x8b, 0xec, 0x6a, 0xff],
             hooked_fcn_0044bed0 as *mut (),
             "fcn.0044bed0 entry-jmp -> hooked_fcn_0044bed0",
+        );
+    }
+}
+
+/// `AnmVm` offset of `matrix.tz` in the scratch matrix at `vm + 0x41c`.
+const MATRIX_TZ_VM_OFFSET: i32 = 0x454;
+/// `fcn.0047fcd0` frame slot holding the per-vertex Z result.
+const Z_FRAME_SLOT: i32 = 0x64;
+/// Resume target past the displaced `movss` at the splice.
+const ANM_MODE57_AFTER_SPLICE: usize = 0x0047_fed5;
+
+/// Adds the missing `addss xmm3, matrix.tz` before the Z `movss` in `fcn.0047fcd0`,
+/// the position helper used by `AnmManager` render modes 5 and 7.
+/// X and Y correctly accumulate their `matrix.t*`, unlike Z.
+///
+/// Returns via `push imm32; ret` rather than `mov eax, K; jmp eax` because EAX is live
+/// across the splice (set at `0x0047feb6`, consumed by `test eax, eax` at `0x0047feda`),
+/// so we can't clobber it.
+#[unsafe(naked)]
+unsafe extern "C" fn anm_mode57_z_trampoline() {
+    naked_asm!(
+        "addss xmm3, dword ptr [esi + {tz_off}]",
+        "movss dword ptr [ebp - {z_slot}], xmm3",
+        "push  {after_splice}",
+        "ret",
+        tz_off       = const MATRIX_TZ_VM_OFFSET,
+        z_slot       = const Z_FRAME_SLOT,
+        after_splice = const ANM_MODE57_AFTER_SPLICE,
+    )
+}
+
+pub(crate) unsafe fn install_anm_matrix_tz_fix() {
+    unsafe {
+        patch_jmp(
+            0x0047_fed0,
+            &[0xf3, 0x0f, 0x11, 0x5d, 0x9c],
+            anm_mode57_z_trampoline as *mut (),
+            "AnmManager mode 5/7 z + matrix.tz",
         );
     }
 }

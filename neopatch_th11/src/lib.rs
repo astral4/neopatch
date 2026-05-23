@@ -121,5 +121,6 @@ unsafe fn install_hooks() {
         }
 
         patches::apply_basic();
+        patches::install_anm_matrix_tz_fix();
     }
 }

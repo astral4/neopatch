@@ -4,6 +4,10 @@ All notable changes to neopatch will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed rendering bugs in the vanilla games that miscompute the Z (depth) coordinate of certain sprites and transformation matrices.
+
 ## [0.4.1] - 2026-05-23
 
 ### Changed

@@ -1,6 +1,7 @@
 //! Static byte patches for th11.exe v1.00a.
 
-use neopatch_core::patches::Patch;
+use neopatch_core::patches::{Patch, patch_jmp};
+use std::arch::naked_asm;
 
 /// "UpdateFast skip": flips `jne 0x44645e` to `jmp +0x43`, landing past the `Sleep(1)`
 /// at `0x00446458` and the FPU (x87) catch-up loop (`0x0044645e..0x00446497`) inside
@@ -23,6 +24,40 @@ pub(crate) const PATCHES: &[Patch] = &[
     Patch::new(0x0043_6d5f, &[0x74], &[0xeb], "replay speed control skip"),
 ];
 
+/// Stack offset of the `matrix.tz` slot in `fcn.00450e20`'s frame.
+const MATRIX_TZ_SLOT: i32 = 0x78;
+/// Offset of the `AnmVm` flags field, read by the displaced `mov ebx, [ebx + ...]`.
+const VM_FLAGS_OFFSET: i32 = 0x404;
+/// Resume target past the displaced mov at the splice.
+const ANM_MODE57_AFTER_SPLICE: usize = 0x0045_0f89;
+
+/// Adds the missing matrix.tz `fadd` before the Z `fstp` in `fcn.00450e20`,
+/// the position helper used by `AnmManager` render modes 5 and 7.
+/// X and Y correctly accumulate their `matrix.t*`, unlike Z.
+#[unsafe(naked)]
+unsafe extern "C" fn anm_mode57_z_trampoline() {
+    naked_asm!(
+        "fadd dword ptr [esp + {tz_slot}]",
+        "mov  ebx, [ebx + {flags_off}]",
+        "mov  eax, {after_splice}",
+        "jmp  eax",
+        tz_slot      = const MATRIX_TZ_SLOT,
+        flags_off    = const VM_FLAGS_OFFSET,
+        after_splice = const ANM_MODE57_AFTER_SPLICE,
+    )
+}
+
 pub(crate) unsafe fn apply_basic() {
     unsafe { Patch::apply_all(PATCHES) };
+}
+
+pub(crate) unsafe fn install_anm_matrix_tz_fix() {
+    unsafe {
+        patch_jmp(
+            0x0045_0f83,
+            &[0x8b, 0x9b, 0x04, 0x04, 0x00],
+            anm_mode57_z_trampoline as *mut (),
+            "AnmManager mode 5/7 z + matrix.tz",
+        );
+    }
 }
