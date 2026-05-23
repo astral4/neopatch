@@ -1,5 +1,6 @@
 //! Direct reads of game state for th11.exe v1.00a.
 
+use neopatch_core::MainToken;
 use neopatch_core::d3d9::ReplayMode;
 use neopatch_core::game_addr::GameAddr;
 use std::ptr::read_volatile;
@@ -25,7 +26,7 @@ struct CReplayManager {
 
 /// Probe registered with [`neopatch_core::d3d9::set_replay_mode_fn`].
 /// Reads the replay-manager pointer and input bitfield to classify the current pacing intent.
-pub(crate) fn replay_mode() -> ReplayMode {
+pub(crate) fn replay_mode(_tok: &MainToken) -> ReplayMode {
     let mgr = REPLAY_MGR_INSTANCE_PTR.read();
     if mgr.is_null() {
         return ReplayMode::Normal;

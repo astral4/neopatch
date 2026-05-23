@@ -75,18 +75,18 @@ pub enum ReplayMode {
 
 /// Callback registered by game-specific crates via [`set_replay_mode_fn`].
 /// Defaults to `Normal` before `install` or for games without replay-speed control.
-static REPLAY_MODE_FN: OnceLock<fn() -> ReplayMode> = OnceLock::new();
+static REPLAY_MODE_FN: OnceLock<fn(&MainToken) -> ReplayMode> = OnceLock::new();
 
 /// Registers the game-specific replay-mode probe; first caller wins. Call before [`install`].
-pub fn set_replay_mode_fn(f: fn() -> ReplayMode) {
+pub fn set_replay_mode_fn(f: fn(&MainToken) -> ReplayMode) {
     let _ = REPLAY_MODE_FN.set(f);
 }
 
-fn replay_mode() -> ReplayMode {
+fn replay_mode(tok: &MainToken) -> ReplayMode {
     REPLAY_MODE_FN
         .get()
         .copied()
-        .map_or(ReplayMode::Normal, |f| f())
+        .map_or(ReplayMode::Normal, |f| f(tok))
 }
 
 // At most one `IDirect3D9` and one device are alive at a time in the game, so each slot is
@@ -548,7 +548,7 @@ unsafe extern "system" fn hook_present(
     let tok = MainToken::new();
     unsafe {
         let pacer = PACER.get().unwrap();
-        let observed_mode = replay_mode();
+        let observed_mode = replay_mode(&tok);
 
         // Load-then-conditional-store gates the heavier `apply_policy` call
         // behind an actual mode change.
