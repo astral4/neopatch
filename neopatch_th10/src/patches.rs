@@ -14,6 +14,14 @@ use std::arch::naked_asm;
 /// "AnmManager mode 2 y -> z": fixes a typo in `fcn.00443290`. The Y component
 /// of `parentPos` (`0x350`) is used in a sum instead of the Z component (`0x354`).
 /// This bug is reached in render mode 2, and modes 1 and 3 when rotation is exactly 0.
+///
+/// "32-bit color skip force-16-bit branch" and "32-bit color ignore persistent choice":
+/// forces `pp.BackBufferFormat = X8R8G8B8` in `fcn.00439890`'s fullscreen path regardless of
+/// the `custom.exe` color-depth selection. The first flips a `je` to `jmp` so the
+/// `[0x491d78] & 1` "force 16-bit" fallback is bypassed; the second NOPs the `setne cl`
+/// between `xor ecx, ecx` and `add ecx, 0x16`, so the persistent `[0x491d62]` choice
+/// can never push the result from `0x16` (X8R8G8B8) to `0x17` (R5G6B5). Windowed mode pulls
+/// the format from the desktop display mode, so no patches are needed there.
 pub(crate) const PATCHES: &[Patch] = &[
     Patch::new(
         0x0043_93b7,
@@ -32,6 +40,18 @@ pub(crate) const PATCHES: &[Patch] = &[
         &[0xd9, 0x80, 0x50, 0x03, 0x00, 0x00],
         &[0xd9, 0x80, 0x54, 0x03, 0x00, 0x00],
         "AnmManager mode 2 y -> z",
+    ),
+    Patch::new(
+        0x0043_98d4,
+        &[0x74, 0x11],
+        &[0xeb, 0x11],
+        "32-bit color skip force-16-bit branch",
+    ),
+    Patch::new(
+        0x0043_9916,
+        &[0x0f, 0x95, 0xc1],
+        &[0x90, 0x90, 0x90],
+        "32-bit color ignore persistent choice",
     ),
 ];
 

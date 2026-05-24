@@ -758,19 +758,17 @@ unsafe fn prep_present_params(
 /// breaks flip-model presentation on native NVIDIA: window opens; black screen; exit.
 /// DXVK doesn't trip on it because Vulkan has no equivalent concept.
 ///
-/// `BackBufferFormat` is forced to `X8R8G8B8` because 16-bit modes (e.g. `R5G6B5`,
-/// which th10 still offers as an option) are inferior on modern displays and force a needless
-/// adapter-mode constraint. Games that ask for `A8R8G8B8` get the equivalent without-alpha
-/// format, matching the existing `CheckDeviceFormat` substitution one frame later.
+/// In fullscreen, `A8R8G8B8` for `BackBufferFormat` is substituted with `X8R8G8B8`.
+/// `A8R8G8B8` isn't a valid adapter format, so `CreateDeviceEx` would fail.
 fn rewrite_present_params(pp: &mut D3DPRESENT_PARAMETERS) {
     // `cast_unsigned` preserves the bit pattern.
     pp.PresentationInterval = D3DPRESENT_INTERVAL_IMMEDIATE.cast_unsigned();
     pp.Flags &= !D3DPRESENTFLAG_LOCKABLE_BACKBUFFER;
-    let original_format = pp.BackBufferFormat;
-    pp.BackBufferFormat = D3DFMT_X8R8G8B8;
-    if original_format != D3DFMT_X8R8G8B8 {
+    if pp.Windowed.0 == 0 && pp.BackBufferFormat == D3DFMT_A8R8G8B8 {
+        let original_format = pp.BackBufferFormat;
+        pp.BackBufferFormat = D3DFMT_X8R8G8B8;
         info!(
-            kind = "backbuffer_format_normalized",
+            kind = "backbuffer_format_substituted",
             original = format_name(original_format),
             original_n = original_format.0,
             forced = format_name(D3DFMT_X8R8G8B8),
@@ -1030,14 +1028,35 @@ mod tests {
     }
 
     #[test]
-    fn rewrite_present_params_normalizes_backbuffer_format() {
-        for src in [D3DFMT_R5G6B5, D3DFMT_A8R8G8B8, D3DFMT_X1R5G5B5] {
+    fn rewrite_present_params_substitutes_only_fullscreen_a8r8g8b8() {
+        // (BackBufferFormat in, Windowed, expected BackBufferFormat out).
+        let cases: &[(D3DFORMAT, bool, D3DFORMAT)] = &[
+            // A8R8G8B8 is a valid windowed backbuffer (th15's loading screen
+            // relies on this) but an invalid fullscreen adapter format.
+            (D3DFMT_A8R8G8B8, true, D3DFMT_A8R8G8B8),
+            (D3DFMT_A8R8G8B8, false, D3DFMT_X8R8G8B8),
+            // X8R8G8B8 is always passed through.
+            (D3DFMT_X8R8G8B8, true, D3DFMT_X8R8G8B8),
+            (D3DFMT_X8R8G8B8, false, D3DFMT_X8R8G8B8),
+            // 16-bit formats pass through unchanged: upgrading them is
+            // opinion, not correctness, and structurally mirrors the windowed
+            // A8R8G8B8 override that broke th15.
+            (D3DFMT_R5G6B5, true, D3DFMT_R5G6B5),
+            (D3DFMT_R5G6B5, false, D3DFMT_R5G6B5),
+            (D3DFMT_X1R5G5B5, true, D3DFMT_X1R5G5B5),
+            (D3DFMT_A1R5G5B5, false, D3DFMT_A1R5G5B5),
+        ];
+        for &(src, windowed, expected) in cases {
             let mut pp = D3DPRESENT_PARAMETERS {
                 BackBufferFormat: src,
+                Windowed: windowed.into(),
                 ..Default::default()
             };
             rewrite_present_params(&mut pp);
-            assert_eq!(pp.BackBufferFormat, D3DFMT_X8R8G8B8, "src={src:?}");
+            assert_eq!(
+                pp.BackBufferFormat, expected,
+                "src={src:?} windowed={windowed}",
+            );
         }
     }
 
