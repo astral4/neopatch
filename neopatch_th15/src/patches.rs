@@ -11,7 +11,7 @@ use windows_sys::Win32::System::Threading::WaitForSingleObject;
 
 /// "UpdateFast skip": unconditional `jmp +0x4A` past the game's `Sleep`,
 /// spin, and deadline-advance. Without it, the game's own pacer
-/// holds the inter-Present interval at >=33ms in slow replay.
+/// holds the inter-`Present` interval at >=33ms in slow replay.
 ///
 /// "fast input latency #1/#2": flip the cond jumps to `EB`, forcing the input preamble
 /// to "fast" mode. OILP also does this under "Force fast input latency mode."
