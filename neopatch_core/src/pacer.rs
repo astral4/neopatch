@@ -1,12 +1,11 @@
 //! Frame pacer.
 //!
-//! We drive frame timing in software so the game's render cadence is independent of
-//! the display's refresh rate. The deadline is tracked in QPC ticks and advanced by
-//! exactly one period per frame, so transient hitches don't smear into permanent drift.
-//! *Within a constant-rate window*, the long-run frame rate is exactly `target_fps`
-//! regardless of OS scheduler jitter. Across mode transitions, `apply_policy()`
-//! resets the deadline so the next `wait()` resyncs. This is intentional but means
-//! "exact rate" is technically per-window, not per-session.
+//! We drive frame timing in software so the game's render cadence is independent of the display's
+//! refresh rate. The deadline is tracked in QPC ticks and advanced by exactly one period per frame,
+//! so transient hitches don't smear into permanent drift. Within a constant-rate window,
+//! the long-run frame rate is exactly `target_fps` regardless of OS scheduler jitter.
+//! Across mode transitions, `apply_policy()` resets the deadline so the next `wait()` resyncs.
+//! This is intentional but means "exact rate" is technically per-window, not per-session.
 //!
 //! Lead-time is fixed at `period / 2`. The wait fires that much earlier than the stored deadline,
 //! so the next game tick (which reads input) starts that much earlier in wall-clock time.
@@ -14,9 +13,16 @@
 //! Whether the shift applies is encoded in `PacingPolicy`: `LiveInput` enables it,
 //! since that's when input timing matters; `InternalCadence` disables it, since replay-skip/slow
 //! drive the schedule from inside the game and shaving real-time latency is meaningless there.
-//! The `period / 2` choice is the "geometric" maximum allowed by the pacer's
-//! wake-tick-present-wait loop. Any computer made in the last 20 years can probably clear
-//! the `period / 2` threshold, so lower values are unnecessarily conservative.
+//!
+//! `period / 2` isn't a hard ceiling: any `L < period` works since the only correctness constraint
+//! is that per-frame work must fit in one period. It's the largest `L` for which the lead snaps
+//! into place within one frame of a resync, since immediate convergence needs `work < period - L`.
+//! We assume computers running neopatch will comfortably finish per-frame work in under `period / 2`.
+//! The choice of `L` also rests on the prior that an earlier `Present` submission plausibly leaves
+//! more slack against jitter or misalignment in the `Present`-to-display chain. We can't actually
+//! verify whether that slack helps from within the pacer itself. We pick `period / 2` because
+//! it is the largest `L` that captures this prior at no transient cost. Larger `L` also captures
+//! this prior but causes longer post-resync transients.
 //!
 //! For waiting, we use `CreateWaitableTimerExW` with the Windows 10 1803+ `HIGH_RESOLUTION` flag,
 //! closed by a short QPC spin to the exact deadline. We fall back to plain `Sleep(ms-1) + spin`
