@@ -4,6 +4,8 @@ All notable changes to neopatch will be documented in this file.
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-05-23
+
 ### Fixed
 
 - `A8R8G8B8` (with transparency) backbuffer format usage is no longer forcibly converted to `X8R8G8B8` (without transparency). This resolves a regression introduced in version 0.3.0.
