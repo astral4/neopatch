@@ -48,6 +48,14 @@ macro_rules! match_named {
 }
 pub(crate) use match_named;
 
+/// Renders an `HRESULT` as `0xNNNNNNNN`.
+macro_rules! fmt_hr {
+    ($hr:expr) => {
+        ::core::format_args!("{:#010x}", $hr.0.cast_unsigned())
+    };
+}
+pub(crate) use fmt_hr;
+
 // Stub for SJLJ-built mingw-w64 toolchains whose `libgcc_eh.a` doesn't provide `_Unwind_Resume`.
 // Rust's precompiled standard library for `i686-pc-windows-gnu` still references it;
 // we have the linker pull this definition in to satisfy that reference. See `build.rs`

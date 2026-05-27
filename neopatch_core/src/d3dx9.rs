@@ -5,9 +5,9 @@
 //! in our `CreateTexture` vtable hook never fires for the d3dx9 path.
 //! We do the same translation at the d3dx9 entry points themselves.
 
-use crate::d3d9::{fmt_hr, format_name, out_ptr, translate_managed_pool};
-use crate::iat_hook;
+use crate::d3d9::{format_name, out_ptr, translate_managed_pool};
 use crate::log_cap::LogCap;
+use crate::{fmt_hr, iat_hook};
 use std::ffi::c_void;
 use std::num::NonZero;
 use tracing::info;

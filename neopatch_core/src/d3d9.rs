@@ -19,13 +19,12 @@
 //! mechanics, as well as how we handle idempotency and chain-through.
 
 use crate::config::{CONFIG, RefreshRateMode};
-use crate::iat_hook;
 use crate::log_cap::LogCap;
-use crate::match_named;
 use crate::pacer::{PACER, PacingPolicy};
 use crate::patches::patch_call_over_indirect;
 use crate::thread::{MainCell, MainToken};
 use crate::vtable::{capture_slot, install_vtable, vtable_sig, vtable_slot, vtbl_field};
+use crate::{fmt_hr, iat_hook, match_named};
 use std::ffi::c_void;
 use std::num::NonZero;
 use std::ptr::{NonNull, null, null_mut};
@@ -51,14 +50,6 @@ use windows_sys::Win32::Graphics::Gdi::{DEVMODEW, ENUM_CURRENT_SETTINGS, EnumDis
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SetWindowPos,
 };
-
-/// Renders an HRESULT as `0xNNNNNNNN`.
-macro_rules! fmt_hr {
-    ($hr:expr) => {
-        ::core::format_args!("{:#010x}", $hr.0.cast_unsigned())
-    };
-}
-pub(crate) use fmt_hr;
 
 #[allow(clippy::cast_possible_truncation)]
 const D3DDISPLAYMODEEX_SIZE: u32 = size_of::<D3DDISPLAYMODEEX>() as u32;
