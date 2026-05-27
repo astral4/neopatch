@@ -52,7 +52,7 @@ pub(crate) unsafe fn install_anm_matrix_tz_fix() {
     unsafe {
         patch_jmp(
             ANM_MODE57_SPLICE,
-            &[0xd8, 0x83, 0x44, 0x04, 0x00],
+            &[0xd8, 0x83, 0x44, 0x04, 0x00, 0x00],
             anm_mode57_z_trampoline as *mut (),
             "AnmManager mode 5/7 z + matrix.tz",
         );
