@@ -21,7 +21,7 @@
 use crate::config::{CONFIG, RefreshRateMode};
 use crate::log_cap::LogCap;
 use crate::pacer::{PACER, PacingPolicy};
-use crate::patches::patch_call_over_indirect;
+use crate::patches::patch_call;
 use crate::screenshot::{on_post_create_device, on_pre_present, on_pre_reset};
 use crate::thread::{MainCell, MainToken};
 use crate::vtable::{capture_slot, install_vtable, vtable_sig, vtable_slot, vtbl_field};
@@ -237,7 +237,7 @@ pub unsafe fn install(host: HMODULE) {
 /// bytes equal `expected`.
 pub unsafe fn install_call_site_rewrite(addr: usize, expected: &[u8; 6]) {
     unsafe {
-        patch_call_over_indirect(
+        patch_call(
             addr,
             expected,
             hook_direct3dcreate9 as *mut (),

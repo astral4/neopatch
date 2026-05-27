@@ -57,64 +57,71 @@ impl Patch {
     }
 }
 
-/// Writes a 5-byte relative `e9 disp32` jmp at `target` to `hook`.
-/// `expected` is the 5 bytes the site must currently hold for the write to proceed.
+/// Writes a 5-byte relative `e9 disp32` jmp at `target` to `hook`. `expected` is the full
+/// displaced-instruction byte sequence (at least 5 bytes). Verifies every byte of `expected`
+/// matches the current site before the write proceeds. Bytes past offset 4 are NOP-padded.
 ///
 /// # Safety
-/// `target` must be a writable code address.
-pub unsafe fn patch_jmp(target: usize, expected: &[u8; 5], hook: *mut (), name: &str) {
-    unsafe { write_relative_branch(target, expected, hook, 0xe9, name) };
-}
-
-/// Writes a 6-byte `e8 disp32 90` (direct call + NOP) at `target` to `hook`,
-/// overwriting a 6-byte `FF 15 disp32` indirect-call site in place.
-/// `expected` is the 6 bytes the site must currently hold for the write to proceed.
-///
-/// # Safety
-/// `target` must be a writable code address.
-pub(crate) unsafe fn patch_call_over_indirect(
+/// `target` must be a writable code address holding `expected`.
+pub unsafe fn patch_jmp<const N: usize>(
     target: usize,
-    expected: &[u8; 6],
+    expected: &[u8; N],
     hook: *mut (),
     name: &str,
 ) {
-    unsafe { write_relative_branch(target, expected, hook, 0xe8, name) };
+    unsafe { write_relative_branch::<N>(target, expected, hook, 0xe9, name) };
 }
 
-unsafe fn write_relative_branch(
+/// Rewrites a direct-call or indirect-call site so it targets `hook` instead of the original
+/// callee. `expected` is the full displaced-instruction byte sequence: 5 bytes for an
+/// `E8 disp32` direct call, 6 bytes for a `FF 15 disp32` indirect call. Bytes past offset 4
+/// are NOP-padded so the call's return address (`target + 5`) lands on a NOP that
+/// falls through to the original next instruction at `target + N`. The wrapper at `hook`
+/// is responsible for calling the original callee if forwarding is desired.
+///
+/// # Safety
+/// `target` must be a writable code address holding `expected`.
+pub unsafe fn patch_call<const N: usize>(
     target: usize,
-    expected: &[u8],
+    expected: &[u8; N],
+    hook: *mut (),
+    name: &str,
+) {
+    unsafe { write_relative_branch::<N>(target, expected, hook, 0xe8, name) };
+}
+
+unsafe fn write_relative_branch<const N: usize>(
+    target: usize,
+    expected: &[u8; N],
     hook: *mut (),
     opcode: u8,
     name: &str,
 ) {
-    let len = expected.len();
+    const { assert!(N >= 5, "rel32 branch needs at least 5 bytes") };
+    const { assert!(N <= MAX_PATCH_LEN, "patch length exceeds MAX_PATCH_LEN") };
     #[allow(clippy::cast_possible_truncation)]
     let (target_u32, hook_u32) = (target as u32, hook as u32);
 
-    // The displacement is always relative to `target + 5`, the byte after
-    // the 5-byte `e8/e9 disp32`. A trailing NOP at offset 5 (for the 6-byte form)
-    // is padding, not part of the next instruction's address.
+    // The displacement is relative to `target + 5`, the byte after the 5-byte `e8/e9 disp32`.
+    // Bytes at offsets 5..N are NOP-padded so a returning CALL lands on a NOP
+    // that falls through to the original next instruction.
     let disp = hook_u32.wrapping_sub(target_u32.wrapping_add(5));
-    let mut bytes = [0u8; 6];
+    let mut bytes = [0x90u8; MAX_PATCH_LEN];
     bytes[0] = opcode;
     bytes[1..5].copy_from_slice(&disp.to_le_bytes());
-    if len == 6 {
-        bytes[5] = 0x90;
-    }
 
     unsafe {
         if !pre_check(target, expected, name) {
             return;
         }
-        patch_bytes(target, &bytes[..len]);
+        patch_bytes(target, &bytes[..N]);
 
-        let buf = read_at(target, len);
-        let actual = &buf[..len];
+        let buf = read_at(target, N);
+        let actual = &buf[..N];
         let read_disp = i32::from_le_bytes([actual[1], actual[2], actual[3], actual[4]]);
         let resolved = target_u32.wrapping_add(5).wrapping_add_signed(read_disp);
-        // Resolve the branch target as well as checking byte equality, so a downstream
-        // displacement rewrite that keeps the opcode is still caught.
+        // We resolve the branch target as well as checking byte equality,
+        // so a downstream displacement rewrite that keeps the opcode is still caught.
         let ok = actual[0] == opcode && resolved == hook_u32;
         let status = if ok { "OK" } else { "MISMATCH" };
         if ok {
@@ -122,7 +129,7 @@ unsafe fn write_relative_branch(
                 kind = "patch_verify",
                 addr = format_args!("{target:#010x}"),
                 name,
-                expected = %bytes_hex(&bytes[..len]),
+                expected = %bytes_hex(&bytes[..N]),
                 actual = %bytes_hex(actual),
                 resolved_target = format_args!("{resolved:#010x}"),
                 expected_target = format_args!("{hook_u32:#010x}"),
@@ -133,7 +140,7 @@ unsafe fn write_relative_branch(
                 kind = "patch_verify",
                 addr = format_args!("{target:#010x}"),
                 name,
-                expected = %bytes_hex(&bytes[..len]),
+                expected = %bytes_hex(&bytes[..N]),
                 actual = %bytes_hex(actual),
                 resolved_target = format_args!("{resolved:#010x}"),
                 expected_target = format_args!("{hook_u32:#010x}"),
