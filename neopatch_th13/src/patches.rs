@@ -157,11 +157,13 @@ extern "system" fn updatefast_wrapper(arg: *mut c_void) -> i32 {
 }
 
 fn drain_loaders() {
-    // If the trampoline already wrote `2`, we preserve it. Losing that abort would leave
-    // BGM-init busy-waiting on a NULL slot and deadlock the wait. Handle closure is left to
-    // the game's scene-transition teardown (`fcn.0045fdb0`/`fcn.00460a60`);
-    // both no-op on an exited thread.
+    // We use CAS to preserve a trampoline-written `2`; overwriting this would leave BGM-init
+    // busy-waiting on a NULL slot. Handle closure is left to the game's scene-transition
+    // teardown functions (`fcn.0045fdb0`/`fcn.00460a60`) which both no-op on an exited thread.
     unsafe {
+        // Atomics are technically wrong because the game's BGM and I/O threads write the slot
+        // via a plain `mov`. We rely on x86 TSO for aligned dword stores. `compare_exchange`
+        // lowers to `lock cmpxchg`, just like MSVC's `_InterlockedCompareExchange` intrinsic.
         let signal = AtomicU32::from_ptr(with_exposed_provenance_mut(LOADER_SIGNAL));
         let _ = signal.compare_exchange(
             0,
