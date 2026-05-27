@@ -614,10 +614,9 @@ unsafe extern "system" fn hook_create_device(
                     adapter,
                 }),
             );
-            on_post_create_device(&tok, dev.as_ptr());
 
             install_device_hooks(dev);
-            apply_device_ex_tunables(dev);
+            post_device_alive(&tok, dev);
 
             if let Some(before) = desktop_before {
                 warn_if_exclusive_degraded(this, adapter, before, &prep);
@@ -835,6 +834,14 @@ unsafe fn apply_device_ex_tunables(dev: NonNull<c_void>) {
     }
 }
 
+/// Re-applies the device tunables, since D3D9Ex preserves them across `Reset` but a
+/// translation layer might not. Also refreshes `ACTIVE_DEVICE`.
+/// Fires after both successful `CreateDeviceEx` and successful `Reset(Ex)`.
+unsafe fn post_device_alive(tok: &MainToken, dev: NonNull<c_void>) {
+    unsafe { apply_device_ex_tunables(dev) };
+    on_post_create_device(tok, dev.as_ptr());
+}
+
 unsafe extern "system" fn hook_present(
     this: *mut c_void,
     src_rect: *const RECT,
@@ -884,14 +891,10 @@ unsafe extern "system" fn hook_present(
     }
 }
 
-// `Reset`/`ResetEx` deliberately does not re-apply the device tunables
-// (`SetMaximumFrameLatency`, `SetGPUThreadPriority`) or the `SetWindowPos
-// SWP_SHOWWINDOW` style fix from `hook_create_device`. The tunables are
-// device-wide and survive `Reset`'s swap-chain re-init; the style breakage
-// is specific to `CreateDeviceEx` re-associating the focus window.
-//
-// `pick_refresh_rate` is re-applied so runtime refresh-rate toggles
-// take effect at the next `Reset`.
+// `post_device_alive` reapplies device tunables on success. The fix involving `SetWindowPos`
+// with `SWP_SHOWWINDOW` style stays in `hook_create_device` because focus-window reassociation
+// is specific to `CreateDeviceEx`. `pick_refresh_rate` is reapplied so runtime refresh-rate
+// toggles take effect at the next `Reset`.
 unsafe extern "system" fn hook_reset(this: *mut c_void, pp: *mut D3DPRESENT_PARAMETERS) -> HRESULT {
     let tok = MainToken::new();
     on_pre_reset(&tok);
@@ -925,10 +928,14 @@ unsafe extern "system" fn hook_reset(this: *mut c_void, pp: *mut D3DPRESENT_PARA
         };
 
         info!(kind = "reset_result", hr = fmt_hr!(hr));
-        if hr.is_ok()
-            && let Some(before) = desktop_before
-        {
-            warn_if_exclusive_degraded(ctx.d3d9, ctx.adapter, before, &prep);
+        if hr.is_ok() {
+            // SAFETY: `this` was already dereferenced by
+            // `call_real_reset`/`call_real_reset_ex` above.
+            let dev = NonNull::new_unchecked(this);
+            post_device_alive(&tok, dev);
+            if let Some(before) = desktop_before {
+                warn_if_exclusive_degraded(ctx.d3d9, ctx.adapter, before, &prep);
+            }
         }
         hr
     }

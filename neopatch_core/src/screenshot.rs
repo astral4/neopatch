@@ -41,45 +41,55 @@ use windows_sys::Win32::Storage::FileSystem::{
 /// so the vtable pointer stays dereferenceable across the game's `Release` calls.
 static ACTIVE_DEVICE: MainCell<*mut c_void> = MainCell::new(null_mut());
 
-/// A captured screenshot filename.
+/// Captured screenshot filename.
 #[derive(Clone, Copy)]
-pub struct PendingPath {
+struct PendingPath {
     buf: [u8; MAX_PATH as usize],
     // The number of valid bytes, excluding the NUL terminator.
     len: usize,
 }
 
 impl PendingPath {
-    /// Returns the valid path bytes without a NUL terminator.
-    #[must_use]
-    pub fn as_slice(&self) -> &[u8] {
+    fn as_slice(&self) -> &[u8] {
         &self.buf[..self.len]
     }
 }
 
-/// A th10-style screenshot filename to be written to disk.
+/// Pending th10-style screenshot.
+#[derive(Clone, Copy)]
+struct PendingCapture {
+    device: *mut c_void,
+    path: PendingPath,
+}
+
 /// th10's screenshot save runs after `Present`, where the live back buffer is undefined
-/// under D3D9Ex flip-model. We stash the filename here and capture one frame later
-/// from `hook_present` (via `on_pre_present`).
-static PENDING_CACHED_SAVE: MainCell<Option<PendingPath>> = MainCell::new(None);
+/// under D3D9Ex flip-model. We stash here and capture one frame later from `on_pre_present`.
+static PENDING_CAPTURE: MainCell<Option<PendingCapture>> = MainCell::new(None);
 
-/// Stashes a th10-style screenshot filename for capture on the next `hook_present`.
-/// This should be invoked by game-specific crates whose screenshot save runs after `Present`.
-/// This function must be invoked from the render thread.
-pub fn set_pending_cached_save(path: PendingPath) {
-    let tok = MainToken::new();
-    PENDING_CACHED_SAVE.set(&tok, Some(path));
-}
-
-fn take_pending_cached_save(tok: &MainToken) -> Option<PendingPath> {
-    PENDING_CACHED_SAVE.take(tok)
-}
-
-/// Returns the active device pointer set at the most recent successful `CreateDeviceEx` call.
-fn active_device() -> Option<*mut c_void> {
-    let tok = MainToken::new();
-    let dev = ACTIVE_DEVICE.get(&tok);
-    if dev.is_null() { None } else { Some(dev) }
+/// Stashes a filename for capture on the next `hook_present`.
+/// Still-pending stashes are overwritten. Stashing is refused if the device is missing.
+fn set_pending_cached_save(tok: &MainToken, path: &PendingPath) {
+    let device = ACTIVE_DEVICE.get(tok);
+    if device.is_null() {
+        warn!(
+            kind = "screenshot_dropped_no_device",
+            path = %String::from_utf8_lossy(path.as_slice()),
+        );
+        return;
+    }
+    if let Some(stale) = PENDING_CAPTURE.take(tok) {
+        warn!(
+            kind = "screenshot_dropped_overwrite",
+            path = %String::from_utf8_lossy(stale.path.as_slice()),
+        );
+    }
+    PENDING_CAPTURE.set(
+        tok,
+        Some(PendingCapture {
+            device,
+            path: *path,
+        }),
+    );
 }
 
 /// Updates `ACTIVE_DEVICE` to `new_dev`, calling `AddRef` on the new device
@@ -118,26 +128,34 @@ unsafe fn set_active_device(tok: &MainToken, new_dev: *mut c_void) {
     }
 }
 
-// Called from `d3d9::hook_create_device` after a successful `CreateDeviceEx`.
-// Tracks the device so the live-capture path can access it.
+// Idempotent when the device pointer is unchanged; `Reset` preserves the device instance.
 pub(crate) fn on_post_create_device(tok: &MainToken, dev: *mut c_void) {
     unsafe { set_active_device(tok, dev) };
 }
 
-// Called from `d3d9::hook_present` before the real `Present` call.
 pub(crate) fn on_pre_present(tok: &MainToken) {
-    if let Some(path) = take_pending_cached_save(tok) {
-        let dev = active_device().unwrap();
-        unsafe { save_pending_cached(dev, path.as_slice()) };
+    let Some(pending) = PENDING_CAPTURE.take(tok) else {
+        return;
+    };
+    let active = ACTIVE_DEVICE.get(tok);
+    if pending.device != active {
+        warn!(
+            kind = "screenshot_dropped_stale_device",
+            path = %String::from_utf8_lossy(pending.path.as_slice()),
+        );
+        return;
     }
+    // SAFETY: `active` matches the stash-time device and is non-null.
+    // Otherwise, `set_pending_cached_save` would have refused the stash.
+    unsafe { save_pending_cached(active, pending.path.as_slice()) };
 }
 
 // Called from `d3d9::hook_reset` at entry.
 pub(crate) fn on_pre_reset(tok: &MainToken) {
-    if let Some(stale) = take_pending_cached_save(tok) {
+    if let Some(stale) = PENDING_CAPTURE.take(tok) {
         warn!(
             kind = "screenshot_dropped_on_reset",
-            path = %String::from_utf8_lossy(stale.as_slice()),
+            path = %String::from_utf8_lossy(stale.path.as_slice()),
         );
     }
 }
@@ -158,7 +176,7 @@ unsafe fn save_pending_cached(device: *mut c_void, path: &[u8]) {
 
 /// Reads a NUL-terminated ASCII/ANSI filename from a caller-controlled pointer.
 /// Null pointers, empty paths, and non-terminating NULs are rejected.
-pub fn sanitize_filename(filename_ptr: *const u8) -> Option<PendingPath> {
+fn sanitize_filename(filename_ptr: *const u8) -> Option<PendingPath> {
     let untrusted = Untrusted::from_raw(filename_ptr);
     let mut buf = [0u8; MAX_PATH as usize];
     let n = untrusted.safe_read(&mut buf);
@@ -181,8 +199,7 @@ pub fn sanitize_filename(filename_ptr: *const u8) -> Option<PendingPath> {
     Some(PendingPath { buf, len: nul_pos })
 }
 
-/// Emits a structured `screenshot_saved` log line.
-pub fn log_saved(path: &[u8], w: u32, h: u32, source: &'static str) {
+fn log_saved(path: &[u8], w: u32, h: u32, source: &'static str) {
     info!(
         kind = "screenshot_saved",
         path = %String::from_utf8_lossy(path),
@@ -192,8 +209,7 @@ pub fn log_saved(path: &[u8], w: u32, h: u32, source: &'static str) {
     );
 }
 
-/// Emits a structured `screenshot_failed` log line.
-pub fn log_failed(path: &[u8], error: &str) {
+fn log_failed(path: &[u8], error: &str) {
     warn!(
         kind = "screenshot_failed",
         path = %String::from_utf8_lossy(path),
@@ -201,16 +217,55 @@ pub fn log_failed(path: &[u8], error: &str) {
     );
 }
 
-/// Capture the live back buffer to `path` as a BMP. Called by game-specific crates
-/// whose screenshot save runs before `Present` (so the back buffer is still fresh).
-/// Returns `(width, height)` on success. Returns a string describing the first
-/// failing step on failure.
+/// Synchronously saves a screenshot. Use this for games whose save function trampoline
+/// runs before `Present` (th11/th12/th13/th15). Returns 0 on success, 1 on failure.
+/// Callers must be on the render thread.
 ///
-/// # Errors
-/// Returns an error if called before any successful `CreateDeviceEx` call
-/// or if a Windows API call fails.
-pub fn save_live(path: &[u8]) -> Result<(u32, u32), String> {
-    let device = active_device().ok_or_else(|| "no active device".to_string())?;
+/// # Safety
+/// `filename_ptr` must be valid.
+#[must_use]
+pub unsafe extern "C" fn save_screenshot_live(filename_ptr: *const u8) -> u32 {
+    let Some(path) = sanitize_filename(filename_ptr) else {
+        return 1;
+    };
+    let tok = MainToken::new();
+    let bytes = path.as_slice();
+    match save_live(&tok, bytes) {
+        Ok((w, h)) => {
+            log_saved(bytes, w, h, "live");
+            0
+        }
+        Err(e) => {
+            log_failed(bytes, &e);
+            1
+        }
+    }
+}
+
+/// Saves a screenshot, deferring capture to when `on_pre_present` is called next.
+/// Use this for games whose save function trampoline runs after `Present` (th10).
+/// Returns 0 on successful stash, 1 on failure. Callers must be on the render thread.
+///
+/// # Safety
+/// `filename_ptr` must be valid.
+#[must_use]
+pub unsafe extern "C" fn save_screenshot_deferred(filename_ptr: *const u8) -> u32 {
+    let Some(path) = sanitize_filename(filename_ptr) else {
+        return 1;
+    };
+    let tok = MainToken::new();
+    info!(kind = "screenshot_deferred", path = %String::from_utf8_lossy(path.as_slice()));
+    set_pending_cached_save(&tok, &path);
+    0
+}
+
+/// Captures the live back buffer to `path` as a BMP. Returns `(width, height)` on success,
+/// or an error string if no `CreateDeviceEx` has succeeded yet or a Windows API call fails.
+fn save_live(tok: &MainToken, path: &[u8]) -> Result<(u32, u32), String> {
+    let device = ACTIVE_DEVICE.get(tok);
+    if device.is_null() {
+        return Err("no active device".to_string());
+    }
     ensure_parent(path);
     unsafe { capture_live_and_write(device, path) }
 }
