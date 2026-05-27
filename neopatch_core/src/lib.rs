@@ -26,6 +26,7 @@ pub mod patches;
 pub mod process;
 pub mod protect;
 pub mod replay;
+pub mod screenshot;
 mod thread;
 pub mod timer_period;
 pub mod untrusted;

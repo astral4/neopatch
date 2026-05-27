@@ -8,6 +8,10 @@ All notable changes to neopatch will be documented in this file.
 
 - Session log writing now accounts for UAC virtualization. neopatch first tries `<install>\neopatch_logs\`, then `%LOCALAPPDATA%\neopatch_logs\`, and finally `%TEMP%\neopatch_logs\`.
 
+### Fixed
+
+- Screenshot functionality is fixed across all games. This resolves a regression introduced in version 0.1.0.
+
 ## [0.5.1] - 2026-05-23
 
 ### Fixed

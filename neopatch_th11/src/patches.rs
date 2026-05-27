@@ -1,6 +1,7 @@
-//! Static byte patches for th11.exe v1.00a.
+//! Patches and hooks for th11.exe v1.00a.
 
 use neopatch_core::patches::{Patch, patch_jmp};
+use neopatch_core::screenshot::{log_failed, log_saved, sanitize_filename, save_live};
 use std::arch::naked_asm;
 
 /// "UpdateFast skip": flips `jne 0x44645e` to `jmp +0x43`, landing past the `Sleep(1)`
@@ -56,6 +57,49 @@ pub(crate) unsafe fn install_anm_matrix_tz_fix() {
             &[0x8b, 0x9b, 0x04, 0x04, 0x00],
             anm_mode57_z_trampoline as *mut (),
             "AnmManager mode 5/7 z + matrix.tz",
+        );
+    }
+}
+
+/// `fcn.00429ca0`: th11 screenshot save.
+const SCREENSHOT_SAVE_FN: usize = 0x0042_9ca0;
+const SCREENSHOT_SAVE_FN_PROLOGUE: [u8; 5] = [0x83, 0xec, 0x10, 0x83, 0x3d];
+
+#[unsafe(naked)]
+unsafe extern "C" fn screenshot_trampoline() -> u32 {
+    naked_asm!(
+        "push eax",
+        "call {save}",
+        "add esp, 4",
+        "ret",
+        save = sym save_screenshot,
+    );
+}
+
+unsafe extern "C" fn save_screenshot(filename_ptr: *const u8) -> u32 {
+    let Some(path) = sanitize_filename(filename_ptr) else {
+        return 1;
+    };
+    let bytes = path.as_slice();
+    match save_live(bytes) {
+        Ok((w, h)) => {
+            log_saved(bytes, w, h, "live");
+            0
+        }
+        Err(e) => {
+            log_failed(bytes, &e);
+            1
+        }
+    }
+}
+
+pub(crate) unsafe fn install_screenshot_hook() {
+    unsafe {
+        patch_jmp(
+            SCREENSHOT_SAVE_FN,
+            &SCREENSHOT_SAVE_FN_PROLOGUE,
+            screenshot_trampoline as *mut (),
+            "screenshot save (fcn.00429ca0)",
         );
     }
 }

@@ -93,3 +93,10 @@ impl<T: Copy> MainCell<T> {
         self.0.set(v);
     }
 }
+
+impl<T: Copy + Default> MainCell<T> {
+    #[inline]
+    pub(crate) fn take(&self, _tok: &MainToken) -> T {
+        self.0.take()
+    }
+}

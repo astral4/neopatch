@@ -22,6 +22,7 @@ use crate::config::{CONFIG, RefreshRateMode};
 use crate::log_cap::LogCap;
 use crate::pacer::{PACER, PacingPolicy};
 use crate::patches::patch_call_over_indirect;
+use crate::screenshot::{on_post_create_device, on_pre_present, on_pre_reset};
 use crate::thread::{MainCell, MainToken};
 use crate::vtable::{capture_slot, install_vtable, vtable_sig, vtable_slot, vtbl_field};
 use crate::{fmt_hr, iat_hook, match_named};
@@ -200,11 +201,12 @@ static PRESENT_COUNT: AtomicU32 = AtomicU32::new(0);
 // `Pacer::apply_policy` resets the deadline, so call it only on mode change.
 static MODE: MainCell<ReplayMode> = MainCell::new(ReplayMode::Normal);
 
-/// `IDirect3D9Ex*` and `adapter` from the most recent successful `CreateDeviceEx`.
-/// The pointer is a raw borrow of the COM object the game holds. It is valid
-/// for the device's lifetime by D3D9's contract; the device implicitly refs its parent.
+/// Contains `IDirect3D9Ex*` and `adapter` from the most recent successful
+/// `CreateDeviceEx` call; needed to re-derive the `D3DDISPLAYMODEEX` arg at `ResetEx` time.
 #[derive(Clone, Copy)]
 struct ResetCtx {
+    // A raw borrow of the object held by the game; valid for the device's lifetime
+    // by D3D9's contract since the device implicitly refs its parent.
     d3d9: *mut c_void,
     adapter: u32,
 }
@@ -311,6 +313,232 @@ unsafe fn install_d3d9_hooks(d3d9_ex: NonNull<c_void>) {
     }
 }
 
+struct PresentParams {
+    before: Option<D3DPRESENT_PARAMETERS>,
+    after: Option<D3DPRESENT_PARAMETERS>,
+    display_mode: Option<D3DDISPLAYMODEEX>,
+}
+
+/// Snapshots, rewrites, and (if exclusive fullscreen) populates a `D3DDISPLAYMODEEX`
+/// for the present-params block needed by both `CreateDeviceEx` and `ResetEx`.
+unsafe fn prep_present_params(
+    pp: *mut D3DPRESENT_PARAMETERS,
+    d3d9: *mut c_void,
+    adapter: u32,
+) -> PresentParams {
+    unsafe {
+        let Some(p) = pp.as_mut() else {
+            return PresentParams {
+                before: None,
+                after: None,
+                display_mode: None,
+            };
+        };
+        let before = *p;
+        rewrite_present_params(p);
+        let display_mode = if p.Windowed.0 == 0 {
+            let cfg = CONFIG.get().unwrap();
+            apply_refresh_override(p, d3d9, adapter, cfg.display.refresh_rate);
+            Some(build_display_mode_ex(p, p.FullScreen_RefreshRateInHz))
+        } else {
+            None
+        };
+        PresentParams {
+            before: Some(before),
+            after: Some(*p),
+            display_mode,
+        }
+    }
+}
+
+// On D3D9Ex with `SWAPEFFECT_DISCARD`, `D3DPRESENTFLAG_LOCKABLE_BACKBUFFER`
+// breaks flip-model presentation on native NVIDIA: window opens; black screen; exit.
+// DXVK doesn't trip on it because Vulkan has no equivalent concept.
+//
+// In fullscreen, `A8R8G8B8` for `BackBufferFormat` is substituted with `X8R8G8B8`.
+// `A8R8G8B8` isn't a valid adapter format, so `CreateDeviceEx` would fail.
+fn rewrite_present_params(pp: &mut D3DPRESENT_PARAMETERS) {
+    // `cast_unsigned` preserves the bit pattern.
+    pp.PresentationInterval = D3DPRESENT_INTERVAL_IMMEDIATE.cast_unsigned();
+    pp.Flags &= !D3DPRESENTFLAG_LOCKABLE_BACKBUFFER;
+    if pp.Windowed.0 == 0 && pp.BackBufferFormat == D3DFMT_A8R8G8B8 {
+        let original_format = pp.BackBufferFormat;
+        pp.BackBufferFormat = D3DFMT_X8R8G8B8;
+        info!(
+            kind = "back_buffer_format_substituted",
+            original = format_name(original_format),
+            original_n = original_format.0,
+            forced = format_name(D3DFMT_X8R8G8B8),
+            forced_n = D3DFMT_X8R8G8B8.0,
+        );
+    }
+}
+
+/// Override the game's hard-coded 60 Hz in `pp.FullScreen_RefreshRateInHz`
+/// with the result of `pick_refresh_rate`.
+unsafe fn apply_refresh_override(
+    pp: &mut D3DPRESENT_PARAMETERS,
+    d3d9: *mut c_void,
+    adapter: u32,
+    mode: RefreshRateMode,
+) {
+    pp.FullScreen_RefreshRateInHz = unsafe { pick_refresh_rate(d3d9, adapter, mode) };
+}
+
+/// Reads the current desktop mode via `GetAdapterDisplayModeEx` and applies the user's policy.
+///
+/// We deliberately do not enumerate display modes because both `EnumAdapterModes`
+/// and `EnumAdapterModesEx` hard-faulted on an NVIDIA driver, and we can't recover from a fault.
+/// Unfortunately, this means we can't discover refresh rates above the current desktop's
+/// under the `NativeMultiple` setting. Users who need that can use `Fixed(N)`.
+///
+/// On `GetAdapterDisplayModeEx` failure we try `EnumDisplaySettingsExW`
+/// (Win32 GDI path; doesn't touch d3d9), then fall back to 60 Hz if both fail.
+unsafe fn pick_refresh_rate(this: *mut c_void, adapter: u32, mode: RefreshRateMode) -> u32 {
+    unsafe {
+        let mut current = D3DDISPLAYMODEEX {
+            Size: D3DDISPLAYMODEEX_SIZE,
+            ..D3DDISPLAYMODEEX::default()
+        };
+        let hr = call_real_get_adapter_display_mode_ex(this, adapter, &raw mut current, null_mut());
+        let current_rate = if hr.is_ok() {
+            current.RefreshRate
+        } else {
+            let win32_rate = win32_current_refresh_rate();
+            let fallback = win32_rate.unwrap_or(60);
+            warn!(
+                kind = "pick_refresh_rate_fallback",
+                d3d9_hr = fmt_hr!(hr),
+                win32_rate = ?win32_rate,
+                fallback,
+            );
+            fallback
+        };
+        let chosen = compute_refresh_rate(mode, current_rate);
+        info!(
+            kind = "refresh_rate_decision",
+            desktop_rate_hz = current_rate,
+            chosen_hz = chosen,
+        );
+        if let RefreshRateMode::Fixed(target) = mode {
+            info!(
+                kind = "refresh_rate_fixed_unvalidated",
+                target_hz = target.get(),
+            );
+        }
+        chosen
+    }
+}
+
+/// `NativeMultiple` floors to a multiple of 60 capped at `current_rate`.
+/// On sub-60 Hz desktops, it falls back to 60 Hz rather than picking 0.
+/// `Fixed` passes through.
+fn compute_refresh_rate(mode: RefreshRateMode, current_rate: u32) -> u32 {
+    match mode {
+        RefreshRateMode::Native => current_rate,
+        RefreshRateMode::NativeMultiple => {
+            if current_rate >= 60 {
+                (current_rate / 60) * 60
+            } else {
+                60
+            }
+        }
+        RefreshRateMode::Fixed(target) => target.get(),
+    }
+}
+
+/// Win32 fallback for refresh-rate query. Returns the current desktop's refresh rate
+/// via `EnumDisplaySettingsExW`. Returns `None` if the call fails, or if `dmDisplayFrequency`
+/// is 0 or 1 (magic values that mean "hardware default rate," not a real refresh rate).
+fn win32_current_refresh_rate() -> Option<u32> {
+    // Caller-set `dmSize` tells Win32 which `DEVMODE` fields are valid.
+    // `dmDisplayFrequency` is well within the size we report.
+    // `DEVMODEW` is smaller than `u16::MAX` bytes.
+    let mut dm = DEVMODEW {
+        dmSize: u16::try_from(size_of::<DEVMODEW>()).unwrap_or(0),
+        ..DEVMODEW::default()
+    };
+    let ok = unsafe { EnumDisplaySettingsExW(null(), ENUM_CURRENT_SETTINGS, &raw mut dm, 0) };
+    if ok == 0 {
+        return None;
+    }
+    match dm.dmDisplayFrequency {
+        0 | 1 => None,
+        n => Some(n),
+    }
+}
+
+/// Populates a `D3DDISPLAYMODEEX` from the present-params back buffer
+/// plus an explicit refresh rate. The Ex `CreateDevice` and `Reset` signatures
+/// require a fully-filled struct for exclusive fullscreen and ignore it for windowed.
+fn build_display_mode_ex(pp: &D3DPRESENT_PARAMETERS, refresh: u32) -> D3DDISPLAYMODEEX {
+    D3DDISPLAYMODEEX {
+        Size: D3DDISPLAYMODEEX_SIZE,
+        Width: pp.BackBufferWidth,
+        Height: pp.BackBufferHeight,
+        RefreshRate: refresh,
+        Format: pp.BackBufferFormat,
+        ScanLineOrdering: D3DSCANLINEORDERING_PROGRESSIVE,
+    }
+}
+
+/// D3D9Ex rejects `D3DPOOL_MANAGED` with `INVALIDCALL`, so we substitute
+/// the closest valid pair on every `Create*Texture` and `CreateVertexBuffer` path
+/// where the game or d3dx9 hands us `MANAGED`. Returns whether a translation happened.
+/// OILP also does this substitution.
+pub(crate) fn translate_managed_pool(pool: &mut D3DPOOL, usage: &mut u32) -> bool {
+    if *pool == D3DPOOL_MANAGED {
+        *pool = D3DPOOL_DEFAULT;
+        *usage |= D3DUSAGE_DYNAMIC.cast_unsigned();
+        true
+    } else {
+        false
+    }
+}
+
+/// Reads the object pointer from a `Create*`-style `*mut *mut c_void` out param,
+/// returning null when the out param itself is null.
+pub(crate) unsafe fn out_ptr(pp: *mut *mut c_void) -> *const c_void {
+    if pp.is_null() {
+        null()
+    } else {
+        unsafe { (*pp).cast_const() }
+    }
+}
+
+pub(crate) fn format_name(f: D3DFORMAT) -> &'static str {
+    match_named!(
+        f,
+        D3DFMT_UNKNOWN,
+        D3DFMT_R8G8B8,
+        D3DFMT_A8R8G8B8,
+        D3DFMT_X8R8G8B8,
+        D3DFMT_R5G6B5,
+        D3DFMT_X1R5G5B5,
+        D3DFMT_A1R5G5B5,
+        D3DFMT_A4R4G4B4,
+        D3DFMT_R3G3B2,
+        D3DFMT_A8,
+        D3DFMT_A8R3G3B2,
+        D3DFMT_X4R4G4B4,
+        D3DFMT_A2B10G10R10,
+        D3DFMT_A8B8G8R8,
+        D3DFMT_X8B8G8R8,
+        D3DFMT_G16R16,
+        D3DFMT_A2R10G10B10,
+        D3DFMT_A16B16G16R16,
+        D3DFMT_D16_LOCKABLE,
+        D3DFMT_D32,
+        D3DFMT_D15S1,
+        D3DFMT_D24S8,
+        D3DFMT_D24X8,
+        D3DFMT_D24X4S4,
+        D3DFMT_D16,
+        D3DFMT_D32F_LOCKABLE,
+        D3DFMT_D24FS8,
+    )
+}
+
 unsafe extern "system" fn hook_create_device(
     this: *mut c_void,
     adapter: u32,
@@ -322,6 +550,8 @@ unsafe extern "system" fn hook_create_device(
 ) -> HRESULT {
     let tok = MainToken::new();
     unsafe {
+        let desktop_before = sample_for_degradation_check(this, adapter, pp);
+
         // Exclusive fullscreen needs a populated `D3DDISPLAYMODEEX`; windowed needs `NULL`.
         let mut prep = prep_present_params(pp, this, adapter);
         let display_mode_ptr: *mut D3DDISPLAYMODEEX = prep
@@ -384,11 +614,87 @@ unsafe extern "system" fn hook_create_device(
                     adapter,
                 }),
             );
+            on_post_create_device(&tok, dev.as_ptr());
 
             install_device_hooks(dev);
             apply_device_ex_tunables(dev);
+
+            if let Some(before) = desktop_before {
+                warn_if_exclusive_degraded(this, adapter, before, &prep);
+            }
         }
         hr
+    }
+}
+
+/// Reads the adapter-0 display mode. Returns `None` on failure.
+unsafe fn sample_adapter_display_mode(d3d9: *mut c_void, adapter: u32) -> Option<D3DDISPLAYMODEEX> {
+    unsafe {
+        let mut current = D3DDISPLAYMODEEX {
+            Size: D3DDISPLAYMODEEX_SIZE,
+            ..D3DDISPLAYMODEEX::default()
+        };
+        let hr = call_real_get_adapter_display_mode_ex(d3d9, adapter, &raw mut current, null_mut());
+        if hr.is_ok() { Some(current) } else { None }
+    }
+}
+
+/// Captures the adapter mode before a `CreateDevice`/`Reset` call,
+/// but only when exclusive fullscreen is requested (`pp.Windowed == FALSE`).
+/// Returns `None` if no sample is needed or the read failed.
+unsafe fn sample_for_degradation_check(
+    d3d9: *mut c_void,
+    adapter: u32,
+    pp: *mut D3DPRESENT_PARAMETERS,
+) -> Option<D3DDISPLAYMODEEX> {
+    let pp = unsafe { pp.as_ref()? };
+    if pp.Windowed.0 != 0 {
+        return None;
+    }
+    unsafe { sample_adapter_display_mode(d3d9, adapter) }
+}
+
+/// Heuristic warning for situations where exclusive-fullscreen is silently degraded to
+/// windowed presentation. It's possible for an adapter to not actually move to the requested
+/// mode even if `CreateDeviceEx` returns `S_OK`. We check by comparing the desktop mode
+/// before and after device creation.
+///
+/// The check is skipped when the requested presentation parameters matches the desktop mode:
+/// no mode switch was needed, and exclusive vs. windowed are indistinguishable in this case.
+unsafe fn warn_if_exclusive_degraded(
+    d3d9: *mut c_void,
+    adapter: u32,
+    before: D3DDISPLAYMODEEX,
+    prep: &PresentParams,
+) {
+    let Some(after_pp) = prep.after else { return };
+    let req_w = after_pp.BackBufferWidth;
+    let req_h = after_pp.BackBufferHeight;
+    let req_hz = after_pp.FullScreen_RefreshRateInHz;
+    let requested_matches_desktop = req_w == before.Width
+        && req_h == before.Height
+        && (req_hz == before.RefreshRate || req_hz == 0);
+    if requested_matches_desktop {
+        return;
+    }
+    let Some(after) = (unsafe { sample_adapter_display_mode(d3d9, adapter) }) else {
+        return;
+    };
+    let adapter_unchanged = after.Width == before.Width
+        && after.Height == before.Height
+        && after.RefreshRate == before.RefreshRate;
+    if adapter_unchanged {
+        warn!(
+            kind = "exclusive_fullscreen_suspect_degraded",
+            requested_width = req_w,
+            requested_height = req_h,
+            requested_hz = req_hz,
+            desktop_width = before.Width,
+            desktop_height = before.Height,
+            desktop_hz = before.RefreshRate,
+            hint = "CreateDeviceEx returned OK but the adapter mode didn't change. \
+                    If the session looked broken, please file an issue including this log!",
+        );
     }
 }
 
@@ -567,6 +873,8 @@ unsafe extern "system" fn hook_present(
         }
         pacer.wait(&tok);
 
+        on_pre_present(&tok);
+
         // We increment before `Present` so `PRESENT_COUNT` names the in-flight frame.
         // This way, a crash inside `Present` leaves the count at the attempted frame,
         // not the last completed.
@@ -586,10 +894,12 @@ unsafe extern "system" fn hook_present(
 // take effect at the next `Reset`.
 unsafe extern "system" fn hook_reset(this: *mut c_void, pp: *mut D3DPRESENT_PARAMETERS) -> HRESULT {
     let tok = MainToken::new();
+    on_pre_reset(&tok);
     unsafe {
         let ctx = RESET_CTX
             .get(&tok)
             .expect("hook_reset fired before hook_create_device populated RESET_CTX");
+        let desktop_before = sample_for_degradation_check(ctx.d3d9, ctx.adapter, pp);
         let mut prep = prep_present_params(pp, ctx.d3d9, ctx.adapter);
         let display_mode_ptr: *mut D3DDISPLAYMODEEX = prep
             .display_mode
@@ -615,6 +925,11 @@ unsafe extern "system" fn hook_reset(this: *mut c_void, pp: *mut D3DPRESENT_PARA
         };
 
         info!(kind = "reset_result", hr = fmt_hr!(hr));
+        if hr.is_ok()
+            && let Some(before) = desktop_before
+        {
+            warn_if_exclusive_degraded(ctx.d3d9, ctx.adapter, before, &prep);
+        }
         hr
     }
 }
@@ -707,232 +1022,6 @@ unsafe extern "system" fn hook_create_vertex_buffer(
     }
 }
 
-struct PresentParams {
-    before: Option<D3DPRESENT_PARAMETERS>,
-    after: Option<D3DPRESENT_PARAMETERS>,
-    display_mode: Option<D3DDISPLAYMODEEX>,
-}
-
-/// Snapshot, rewrite, and (if exclusive fullscreen) populate a `D3DDISPLAYMODEEX`
-/// for the present-params block both `CreateDeviceEx` and `ResetEx` need.
-unsafe fn prep_present_params(
-    pp: *mut D3DPRESENT_PARAMETERS,
-    d3d9: *mut c_void,
-    adapter: u32,
-) -> PresentParams {
-    unsafe {
-        let Some(p) = pp.as_mut() else {
-            return PresentParams {
-                before: None,
-                after: None,
-                display_mode: None,
-            };
-        };
-        let before = *p;
-        rewrite_present_params(p);
-        let display_mode = if p.Windowed.0 == 0 {
-            let cfg = CONFIG.get().unwrap();
-            apply_refresh_override(p, d3d9, adapter, cfg.display.refresh_rate);
-            Some(build_display_mode_ex(p, p.FullScreen_RefreshRateInHz))
-        } else {
-            None
-        };
-        PresentParams {
-            before: Some(before),
-            after: Some(*p),
-            display_mode,
-        }
-    }
-}
-
-/// On D3D9Ex with `SWAPEFFECT_DISCARD`, `D3DPRESENTFLAG_LOCKABLE_BACKBUFFER`
-/// breaks flip-model presentation on native NVIDIA: window opens; black screen; exit.
-/// DXVK doesn't trip on it because Vulkan has no equivalent concept.
-///
-/// In fullscreen, `A8R8G8B8` for `BackBufferFormat` is substituted with `X8R8G8B8`.
-/// `A8R8G8B8` isn't a valid adapter format, so `CreateDeviceEx` would fail.
-fn rewrite_present_params(pp: &mut D3DPRESENT_PARAMETERS) {
-    // `cast_unsigned` preserves the bit pattern.
-    pp.PresentationInterval = D3DPRESENT_INTERVAL_IMMEDIATE.cast_unsigned();
-    pp.Flags &= !D3DPRESENTFLAG_LOCKABLE_BACKBUFFER;
-    if pp.Windowed.0 == 0 && pp.BackBufferFormat == D3DFMT_A8R8G8B8 {
-        let original_format = pp.BackBufferFormat;
-        pp.BackBufferFormat = D3DFMT_X8R8G8B8;
-        info!(
-            kind = "backbuffer_format_substituted",
-            original = format_name(original_format),
-            original_n = original_format.0,
-            forced = format_name(D3DFMT_X8R8G8B8),
-            forced_n = D3DFMT_X8R8G8B8.0,
-        );
-    }
-}
-
-/// Override the game's hard-coded 60 Hz in `pp.FullScreen_RefreshRateInHz`
-/// with the result of `pick_refresh_rate`.
-unsafe fn apply_refresh_override(
-    pp: &mut D3DPRESENT_PARAMETERS,
-    d3d9: *mut c_void,
-    adapter: u32,
-    mode: RefreshRateMode,
-) {
-    pp.FullScreen_RefreshRateInHz = unsafe { pick_refresh_rate(d3d9, adapter, mode) };
-}
-
-/// Reads the current desktop mode via `GetAdapterDisplayModeEx` and applies the user's policy.
-///
-/// We deliberately do not enumerate display modes because both `EnumAdapterModes`
-/// and `EnumAdapterModesEx` hard-faulted on an NVIDIA driver, and we can't recover from a fault.
-/// Unfortunately, this means we can't discover refresh rates above the current desktop's
-/// under the `NativeMultiple` setting. Users who need that can use `Fixed(N)`.
-///
-/// On `GetAdapterDisplayModeEx` failure we try `EnumDisplaySettingsExW`
-/// (Win32 GDI path; doesn't touch d3d9), then fall back to 60 Hz if both fail.
-unsafe fn pick_refresh_rate(this: *mut c_void, adapter: u32, mode: RefreshRateMode) -> u32 {
-    unsafe {
-        let mut current = D3DDISPLAYMODEEX {
-            Size: D3DDISPLAYMODEEX_SIZE,
-            ..D3DDISPLAYMODEEX::default()
-        };
-        let hr = call_real_get_adapter_display_mode_ex(this, adapter, &raw mut current, null_mut());
-        let current_rate = if hr.is_ok() {
-            current.RefreshRate
-        } else {
-            let win32_rate = win32_current_refresh_rate();
-            let fallback = win32_rate.unwrap_or(60);
-            warn!(
-                kind = "pick_refresh_rate_fallback",
-                d3d9_hr = fmt_hr!(hr),
-                win32_rate = ?win32_rate,
-                fallback,
-            );
-            fallback
-        };
-        let chosen = compute_refresh_rate(mode, current_rate);
-        info!(
-            kind = "refresh_rate_decision",
-            desktop_rate_hz = current_rate,
-            chosen_hz = chosen,
-        );
-        if let RefreshRateMode::Fixed(target) = mode {
-            info!(
-                kind = "refresh_rate_fixed_unvalidated",
-                target_hz = target.get(),
-            );
-        }
-        chosen
-    }
-}
-
-/// `NativeMultiple` floors to a multiple of 60 capped at `current_rate`.
-/// On sub-60-Hz desktops, it falls back to 60 Hz rather than picking 0.
-/// `Fixed` passes through.
-fn compute_refresh_rate(mode: RefreshRateMode, current_rate: u32) -> u32 {
-    match mode {
-        RefreshRateMode::Native => current_rate,
-        RefreshRateMode::NativeMultiple => {
-            if current_rate >= 60 {
-                (current_rate / 60) * 60
-            } else {
-                60
-            }
-        }
-        RefreshRateMode::Fixed(target) => target.get(),
-    }
-}
-
-/// Win32 fallback for refresh-rate query. Returns the current desktop's refresh rate
-/// via `EnumDisplaySettingsExW`. Returns `None` if the call fails, or if `dmDisplayFrequency`
-/// is 0 or 1 (magic values that mean "hardware default rate," not a real refresh rate).
-fn win32_current_refresh_rate() -> Option<u32> {
-    // Caller-set `dmSize` tells Win32 which `DEVMODE` fields are valid.
-    // `dmDisplayFrequency` lives well within the size we report.
-    // `DEVMODEW` is smaller than `u16::MAX` bytes.
-    let mut dm = DEVMODEW {
-        dmSize: u16::try_from(size_of::<DEVMODEW>()).unwrap_or(0),
-        ..DEVMODEW::default()
-    };
-    let ok = unsafe { EnumDisplaySettingsExW(null(), ENUM_CURRENT_SETTINGS, &raw mut dm, 0) };
-    if ok == 0 {
-        return None;
-    }
-    match dm.dmDisplayFrequency {
-        0 | 1 => None,
-        n => Some(n),
-    }
-}
-
-/// Populates a `D3DDISPLAYMODEEX` from the present-params back buffer
-/// plus an explicit refresh rate. The Ex `CreateDevice` and `Reset` signatures
-/// require a fully-filled struct for exclusive fullscreen and ignore it for windowed.
-fn build_display_mode_ex(pp: &D3DPRESENT_PARAMETERS, refresh: u32) -> D3DDISPLAYMODEEX {
-    D3DDISPLAYMODEEX {
-        Size: D3DDISPLAYMODEEX_SIZE,
-        Width: pp.BackBufferWidth,
-        Height: pp.BackBufferHeight,
-        RefreshRate: refresh,
-        Format: pp.BackBufferFormat,
-        ScanLineOrdering: D3DSCANLINEORDERING_PROGRESSIVE,
-    }
-}
-
-/// D3D9Ex rejects `D3DPOOL_MANAGED` with `INVALIDCALL`, so we substitute
-/// the closest valid pair on every `Create*Texture` and `CreateVertexBuffer` path
-/// where the game or d3dx9 hands us `MANAGED`. Returns whether a translation happened.
-/// OILP also does this substitution.
-pub(crate) fn translate_managed_pool(pool: &mut D3DPOOL, usage: &mut u32) -> bool {
-    if *pool == D3DPOOL_MANAGED {
-        *pool = D3DPOOL_DEFAULT;
-        *usage |= D3DUSAGE_DYNAMIC.cast_unsigned();
-        true
-    } else {
-        false
-    }
-}
-
-/// Reads the object pointer from a `Create*`-style `*mut *mut c_void` out param,
-/// returning null when the out param itself is null.
-pub(crate) unsafe fn out_ptr(pp: *mut *mut c_void) -> *const c_void {
-    if pp.is_null() {
-        null()
-    } else {
-        unsafe { (*pp).cast_const() }
-    }
-}
-
-pub(crate) fn format_name(f: D3DFORMAT) -> &'static str {
-    match_named!(
-        f,
-        D3DFMT_UNKNOWN,
-        D3DFMT_R8G8B8,
-        D3DFMT_A8R8G8B8,
-        D3DFMT_X8R8G8B8,
-        D3DFMT_R5G6B5,
-        D3DFMT_X1R5G5B5,
-        D3DFMT_A1R5G5B5,
-        D3DFMT_A4R4G4B4,
-        D3DFMT_R3G3B2,
-        D3DFMT_A8,
-        D3DFMT_A8R3G3B2,
-        D3DFMT_X4R4G4B4,
-        D3DFMT_A2B10G10R10,
-        D3DFMT_A8B8G8R8,
-        D3DFMT_X8B8G8R8,
-        D3DFMT_G16R16,
-        D3DFMT_A2R10G10B10,
-        D3DFMT_A16B16G16R16,
-        D3DFMT_D16_LOCKABLE,
-        D3DFMT_D32,
-        D3DFMT_D15S1,
-        D3DFMT_D24S8,
-        D3DFMT_D24X8,
-        D3DFMT_D24X4S4,
-        D3DFMT_D16,
-        D3DFMT_D32F_LOCKABLE,
-        D3DFMT_D24FS8,
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -967,7 +1056,7 @@ mod tests {
     }
 
     #[test]
-    fn rewrite_present_params_strips_lockable_backbuffer() {
+    fn rewrite_present_params_strips_lockable_back_buffer() {
         let mut pp = D3DPRESENT_PARAMETERS {
             Flags: D3DPRESENTFLAG_LOCKABLE_BACKBUFFER,
             ..Default::default()
@@ -986,7 +1075,7 @@ mod tests {
     #[test]
     fn rewrite_present_params_preserves_other_fields() {
         // Locks in the current contract of only touching interval,
-        // lockable flag, and backbuffer format.
+        // lockable flag, and back buffer format.
         //
         // TODO: The FLIPEX-direct backlog item will modify `SwapEffect`
         // and `BackBufferCount` here, so this test should be updated.
@@ -1022,8 +1111,8 @@ mod tests {
     fn rewrite_present_params_substitutes_only_fullscreen_a8r8g8b8() {
         // (BackBufferFormat in, Windowed, expected BackBufferFormat out).
         let cases: &[(D3DFORMAT, bool, D3DFORMAT)] = &[
-            // A8R8G8B8 is a valid windowed backbuffer (th15's loading screen
-            // relies on this) but an invalid fullscreen adapter format.
+            // A8R8G8B8 is a valid windowed back buffer (th15's loading screen relies on this)
+            // but an invalid fullscreen adapter format.
             (D3DFMT_A8R8G8B8, true, D3DFMT_A8R8G8B8),
             (D3DFMT_A8R8G8B8, false, D3DFMT_X8R8G8B8),
             // X8R8G8B8 is always passed through.

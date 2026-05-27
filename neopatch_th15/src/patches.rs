@@ -1,6 +1,7 @@
-//! Static byte patches and hooks for th15.exe v1.00b.
+//! Patches and hooks for th15.exe v1.00b.
 
 use neopatch_core::patches::{Patch, patch_jmp};
+use neopatch_core::screenshot::{log_failed, log_saved, sanitize_filename, save_live};
 use neopatch_core::vtable::parse_fn_ptr;
 use std::arch::naked_asm;
 use std::ffi::c_void;
@@ -157,6 +158,49 @@ pub(crate) unsafe fn install_anm_matrix_tz_fix() {
             &[0xf3, 0x0f, 0x11, 0x5d, 0x9c],
             anm_mode57_z_trampoline as *mut (),
             "AnmManager mode 5/7 z + matrix.tz",
+        );
+    }
+}
+
+/// `fcn.0044cbf0`: th15 screenshot save.
+const SCREENSHOT_SAVE_FN: usize = 0x0044_cbf0;
+const SCREENSHOT_SAVE_FN_PROLOGUE: [u8; 5] = [0x55, 0x8b, 0xec, 0x83, 0xec];
+
+#[unsafe(naked)]
+unsafe extern "C" fn screenshot_trampoline() -> u32 {
+    naked_asm!(
+        "push dword ptr [esp + 4]",
+        "call {save}",
+        "add esp, 4",
+        "ret 4",
+        save = sym save_screenshot,
+    );
+}
+
+unsafe extern "C" fn save_screenshot(filename_ptr: *const u8) -> u32 {
+    let Some(path) = sanitize_filename(filename_ptr) else {
+        return 1;
+    };
+    let bytes = path.as_slice();
+    match save_live(bytes) {
+        Ok((w, h)) => {
+            log_saved(bytes, w, h, "live");
+            0
+        }
+        Err(e) => {
+            log_failed(bytes, &e);
+            1
+        }
+    }
+}
+
+pub(crate) unsafe fn install_screenshot_hook() {
+    unsafe {
+        patch_jmp(
+            SCREENSHOT_SAVE_FN,
+            &SCREENSHOT_SAVE_FN_PROLOGUE,
+            screenshot_trampoline as *mut (),
+            "screenshot save (fcn.0044cbf0)",
         );
     }
 }

@@ -219,6 +219,18 @@ impl<V, F> SlotProjection<V, F> {
     }
 }
 
+impl<V, F: Copy> SlotProjection<V, F> {
+    /// Reads the function pointer at this slot from `vtbl`.
+    ///
+    /// # Safety
+    /// `vtbl` must point to an initialized `V` whose allocation covers
+    /// `size_of::<V>()` bytes. The slot at `self.offset` must hold
+    /// a valid function pointer with `F`'s ABI and signature.
+    pub(crate) unsafe fn read(self, vtbl: *mut V) -> F {
+        unsafe { *self.slot_ptr(vtbl) }
+    }
+}
+
 /// Reads a vtable slot we trampoline through but don't patch
 /// (e.g. `CreateDeviceEx`, `ResetEx`) and publishes the function pointer into `dst`.
 /// Logs `capture_slot_null` and skips the publish if the slot is null (malformed vtable).

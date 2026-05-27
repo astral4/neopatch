@@ -133,9 +133,9 @@ unsafe fn install_hooks() {
         if core_cfg.input.dpad {
             input::install();
         }
-
         patches::apply_basic();
         patches::install_destructor_hook();
         patches::install_anm_matrix_tz_fix();
+        patches::install_screenshot_hook();
     }
 }

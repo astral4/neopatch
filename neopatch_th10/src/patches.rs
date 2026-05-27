@@ -1,7 +1,9 @@
-//! Static byte patches for th10.exe v1.00a.
+//! Patches and hooks for th10.exe v1.00a.
 
 use neopatch_core::patches::{Patch, patch_jmp};
+use neopatch_core::screenshot::{sanitize_filename, set_pending_cached_save};
 use std::arch::naked_asm;
+use tracing::info;
 
 /// "Sleep-path branch nop": NOPs the `jne 0x439527` inside `fcn.00439390`
 /// (`CWindowManager::Update`). The branch target contains the game's `Sleep`
@@ -87,6 +89,41 @@ pub(crate) unsafe fn install_anm_matrix_tz_fix() {
             &[0x8b, 0x9b, 0x5c, 0x03, 0x00],
             anm_mode57_z_trampoline as *mut (),
             "AnmManager mode 5/7 z + matrix.tz",
+        );
+    }
+}
+
+/// `fcn.00420670`: th10 screenshot save.
+const SCREENSHOT_SAVE_FN: usize = 0x0042_0670;
+const SCREENSHOT_SAVE_FN_PROLOGUE: [u8; 5] = [0x83, 0xec, 0x0c, 0x53, 0x55];
+
+#[unsafe(naked)]
+unsafe extern "C" fn screenshot_trampoline() -> u32 {
+    naked_asm!(
+        "push eax",
+        "call {stash}",
+        "add esp, 4",
+        "ret",
+        stash = sym stash_save,
+    );
+}
+
+unsafe extern "C" fn stash_save(filename_ptr: *const u8) -> u32 {
+    let Some(path) = sanitize_filename(filename_ptr) else {
+        return 1;
+    };
+    info!(kind = "screenshot_deferred", path = %String::from_utf8_lossy(path.as_slice()));
+    set_pending_cached_save(path);
+    0
+}
+
+pub(crate) unsafe fn install_screenshot_hook() {
+    unsafe {
+        patch_jmp(
+            SCREENSHOT_SAVE_FN,
+            &SCREENSHOT_SAVE_FN_PROLOGUE,
+            screenshot_trampoline as *mut (),
+            "screenshot save (fcn.00420670)",
         );
     }
 }
