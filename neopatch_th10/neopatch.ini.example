@@ -6,6 +6,7 @@
 ; Comments start with ";" or "#" and cause everything after them
 ; on the same line to be ignored. Values can be wrapped in
 ; matching double quotes ("...") or single quotes ('...').
+; When using neopatch, the game follows this file instead of th10.cfg.
 
 
 ; Frame/tick rate caps. Higher rates speed everything up.
