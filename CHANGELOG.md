@@ -4,6 +4,17 @@ All notable changes to neopatch will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- D3D9 hooks now defend against downstream IAT hijacks of `Direct3DCreate9` for Touhou 10, 11, and 12. Previously, only Touhou 13 and 15 had this protection.
+- D3D9 device tunables (frame latency cap, GPU thread priority) are now reapplied after a successful `Reset`/`ResetEx` invocation. Previously, they were assumed to persist across swap chain reinitialization, which holds for D3D9Ex but isn't guaranteed across translation layers.
+
+### Fixed
+
+- Replay speed control now works for Touhou 12.
+- Touhou 10 screenshot capture no longer silently drops a still-pending screenshot if the screenshot key fires twice in quick succession.
+- Touhou 10 screenshot capture no longer captures the wrong frame if the D3D9 device is recreated between the trigger and the next `Present` invocation.
+
 ## [0.6.0] - 2026-05-27
 
 ### Added
