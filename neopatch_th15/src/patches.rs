@@ -1,15 +1,16 @@
 //! Patches and hooks for th15.exe v1.00b.
 
 use neopatch_core::d3d9::install_call_site_rewrite;
-use neopatch_core::patches::{Patch, patch_jmp};
+use neopatch_core::patches::{Patch, patch_call, patch_jmp};
 use neopatch_core::screenshot::save_screenshot_live;
 use neopatch_core::vtable::parse_fn_ptr;
 use std::arch::naked_asm;
 use std::ffi::c_void;
-use std::ptr::{null_mut, read_unaligned, with_exposed_provenance_mut};
+use std::ptr::{null_mut, read_unaligned, with_exposed_provenance, with_exposed_provenance_mut};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use tracing::{info, warn};
 use windows_sys::Win32::Foundation::{HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT};
-use windows_sys::Win32::System::Threading::WaitForSingleObject;
+use windows_sys::Win32::System::Threading::{INFINITE, WaitForSingleObject};
 
 /// Live `Direct3DCreate9` call site, rewritten to defend against downstream IAT hijacks.
 /// There is a second site at `0x00472e72` that seems to be dead error-recovery code.
@@ -217,6 +218,131 @@ pub(crate) unsafe fn install_destructor_hook() {
             &[0x55, 0x8b, 0xec, 0x6a, 0xff],
             hooked_fcn_0044bed0 as *mut (),
             "fcn.0044bed0 entry-jmp -> hooked_fcn_0044bed0",
+        );
+    }
+}
+
+/// Fixes a race between the main thread and a BGM-init thread.
+///
+/// Hook 1 (`updatefast_wrapper`): call-site rewrite at `0x471ab7` so the first
+/// `UpdateFast` call (just past main's pre-loop init) drains both loaders before forwarding.
+/// By construction, no sound consumer fires until the game-loop body runs.
+///
+/// Hook 2 (`io_error_abort_trampoline`): splices `signal = 2` into the I/O thread's
+/// error-exit path so a missing-asset install force-aborts BGM-init
+/// instead of leaving it busy-waiting on a NULL slot.
+const UPDATEFAST_CALL_SITE: usize = 0x0047_1ab7;
+const REAL_UPDATEFAST: usize = 0x0047_2790;
+const BGM_HANDLE_SLOT: usize = 0x0052_1338;
+const IO_HANDLE_SLOT: usize = 0x0052_133c;
+/// Loader-control flag. `0` initial; non-zero releases the post-load `Sleep(1)` busy-wait
+/// at the tail of both loader thread procs; `2` is also the only escape from the inner
+/// `cmp [signal], 2` exit at the top of the I/O loop at `0x475970`, and is written by
+/// `io_error_abort_trampoline`.
+const LOADER_SIGNAL: usize = 0x0052_1344;
+const LOADER_SIGNAL_EXIT_CLEAN: u32 = 1;
+const LOADER_SIGNAL_ABORT: u32 = 2;
+
+const UPDATEFAST_CALL_BYTES: [u8; 5] = [0xe8, 0xd4, 0x0c, 0x00, 0x00];
+
+static LOADERS_DRAINED: AtomicBool = AtomicBool::new(false);
+
+type UpdateFastFn = unsafe extern "system" fn(*mut c_void) -> i32;
+
+extern "system" fn updatefast_wrapper(arg: *mut c_void) -> i32 {
+    if LOADERS_DRAINED
+        .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+        .is_ok()
+    {
+        drain_loaders();
+    }
+    let real: UpdateFastFn = parse_fn_ptr(with_exposed_provenance_mut(REAL_UPDATEFAST))
+        .expect("REAL_UPDATEFAST is a non-zero constant");
+    unsafe { real(arg) }
+}
+
+fn drain_loaders() {
+    // We use CAS to preserve a trampoline-written `2`; overwriting this would leave BGM-init
+    // busy-waiting on a NULL slot. Handle closure is left to the game's scene-transition
+    // teardown which no-ops on an exited thread.
+    unsafe {
+        // Atomics are technically wrong because the game's BGM and I/O threads write the slot
+        // via a plain `mov`. We rely on x86 TSO for aligned dword stores. `compare_exchange`
+        // lowers to `lock cmpxchg`, just like MSVC's `_InterlockedCompareExchange` intrinsic.
+        let signal = AtomicU32::from_ptr(with_exposed_provenance_mut(LOADER_SIGNAL));
+        let _ = signal.compare_exchange(
+            0,
+            LOADER_SIGNAL_EXIT_CLEAN,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+        let bgm = with_exposed_provenance::<HANDLE>(BGM_HANDLE_SLOT).read_volatile();
+        let io = with_exposed_provenance::<HANDLE>(IO_HANDLE_SLOT).read_volatile();
+        info!(
+            kind = "loader_sync_begin",
+            bgm = format_args!("{bgm:p}"),
+            io = format_args!("{io:p}"),
+            signal = signal.load(Ordering::Acquire),
+        );
+        if !bgm.is_null() {
+            WaitForSingleObject(bgm, INFINITE);
+        }
+        if !io.is_null() {
+            WaitForSingleObject(io, INFINITE);
+        }
+        info!(kind = "loader_sync_end");
+    }
+}
+
+/// Splices into the I/O thread's error-exit path at `0x475970+0x4f`. The displaced 7-byte
+/// `push dword [esi*4 + 0x4cb3c0]` (the filename for the "error : Sound %s" printf) is
+/// replayed; the inserted `signal = 2` hits BGM-init's only escape from its NULL-slot
+/// busy-wait. Note the displaced shape is `push` rather than TH10/11/12/13's `mov eax`;
+/// the trampoline preserves the same single-push side effect on ESP.
+const IO_ERROR_SPLICE: usize = 0x0047_59bf;
+const IO_ERROR_DISPLACED_LEN: usize = 7;
+static IO_ERROR_AFTER_SPLICE: usize = IO_ERROR_SPLICE + IO_ERROR_DISPLACED_LEN;
+
+#[unsafe(naked)]
+unsafe extern "C" fn io_error_abort_trampoline() -> ! {
+    naked_asm!(
+        "mov dword ptr [{signal}], {abort}",
+        "push dword ptr [esi*4 + 0x4cb3c0]",
+        "jmp dword ptr [{slot}]",
+        signal = const LOADER_SIGNAL,
+        abort = const LOADER_SIGNAL_ABORT,
+        slot = sym IO_ERROR_AFTER_SPLICE,
+    )
+}
+
+/// JMP opcode at `IO_ERROR_SPLICE` means our `patch_jmp` landed;
+/// the original `push`'s `0xff` means the patch was rejected.
+const HOOK2_INSTALLED_OPCODE: u8 = 0xe9;
+
+pub(crate) unsafe fn install_loader_sync_hooks() {
+    unsafe {
+        patch_jmp(
+            IO_ERROR_SPLICE,
+            &[0xff, 0x34, 0xb5, 0xc0, 0xb3, 0x4c, 0x00],
+            io_error_abort_trampoline as *mut (),
+            "I/O error -> BGM-init abort",
+        );
+        let hook2_byte = with_exposed_provenance::<u8>(IO_ERROR_SPLICE).read_volatile();
+        if hook2_byte != HOOK2_INSTALLED_OPCODE {
+            // Without Hook 2, the drain barrier could deadlock
+            // on a missing-asset install, so we skip Hook 1.
+            warn!(
+                kind = "loader_sync_aborted",
+                addr = format_args!("{IO_ERROR_SPLICE:#010x}"),
+                opcode = format_args!("{hook2_byte:#04x}"),
+            );
+            return;
+        }
+        patch_call(
+            UPDATEFAST_CALL_SITE,
+            &UPDATEFAST_CALL_BYTES,
+            updatefast_wrapper as *mut (),
+            "loader sync barrier (main -> UpdateFast)",
         );
     }
 }

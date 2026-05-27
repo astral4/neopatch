@@ -14,7 +14,7 @@ All notable changes to neopatch will be documented in this file.
 - Replay speed control now works for Touhou 12.
 - Touhou 10 screenshot capture no longer silently drops a still-pending screenshot if the screenshot key fires twice in quick succession.
 - Touhou 10 screenshot capture no longer captures the wrong frame if the D3D9 device is recreated between the trigger and the next `Present` invocation.
-- Touhou 10, Touhou 11, and Touhou 12 no longer race their BGM-init and I/O loader threads at startup. Touhou 13 already had this fix.
+- Touhou 10, Touhou 11, Touhou 12, and Touhou 15 no longer race their BGM-init and I/O loader threads at startup. Touhou 13 already had this fix.
 
 ## [0.6.0] - 2026-05-27
 
