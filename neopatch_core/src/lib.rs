@@ -24,6 +24,7 @@ pub mod pacer;
 pub mod patches;
 pub mod process;
 pub mod protect;
+pub mod replay;
 mod thread;
 pub mod timer_period;
 pub mod untrusted;
