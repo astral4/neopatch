@@ -36,6 +36,15 @@ pub struct DisplayCfg {
     pub refresh_rate: RefreshRateMode,
 }
 
+impl Default for DisplayCfg {
+    fn default() -> Self {
+        Self {
+            refresh_rate: RefreshRateMode::NativeMultiple,
+            mode: DisplayMode::Windowed,
+        }
+    }
+}
+
 // Window dimensions and chrome default to game-derived values supplied at install time
 // (matching framebuffer dimensions; `Borderless` in fullscreen, `Frameless` in windowed).
 // Set explicitly to override.
@@ -59,6 +68,16 @@ pub struct FramerateCfg {
     pub replay_slow_fps: u32,
 }
 
+impl Default for FramerateCfg {
+    fn default() -> Self {
+        Self {
+            game_fps: DEFAULT_GAME_FPS,
+            replay_skip_fps: DEFAULT_REPLAY_SKIP_FPS,
+            replay_slow_fps: DEFAULT_REPLAY_SLOW_FPS,
+        }
+    }
+}
+
 pub struct InputCfg {
     /// Fold joystick POV hat / D-pad inputs into directions read by the game.
     pub dpad: bool,
@@ -75,6 +94,15 @@ pub struct ProcessCfg {
     // `u32` because i686 processes can't address cores beyond bit 31 (WoW64 limit).
     // `None` means `SetProcessAffinityMask` is not called, so the OS keeps its scheduler default.
     pub affinity_mask: Option<NonZero<u32>>,
+}
+
+impl Default for ProcessCfg {
+    fn default() -> Self {
+        Self {
+            priority: PriorityClass::Unchanged,
+            affinity_mask: None,
+        }
+    }
 }
 
 pub struct LogCfg {
@@ -178,34 +206,6 @@ impl Display for PriorityClass {
             Self::AboveNormal => "AboveNormal",
             Self::High => "High",
         })
-    }
-}
-
-impl Default for DisplayCfg {
-    fn default() -> Self {
-        Self {
-            refresh_rate: RefreshRateMode::NativeMultiple,
-            mode: DisplayMode::Windowed,
-        }
-    }
-}
-
-impl Default for FramerateCfg {
-    fn default() -> Self {
-        Self {
-            game_fps: DEFAULT_GAME_FPS,
-            replay_skip_fps: DEFAULT_REPLAY_SKIP_FPS,
-            replay_slow_fps: DEFAULT_REPLAY_SLOW_FPS,
-        }
-    }
-}
-
-impl Default for ProcessCfg {
-    fn default() -> Self {
-        Self {
-            priority: PriorityClass::Unchanged,
-            affinity_mask: None,
-        }
     }
 }
 
@@ -457,6 +457,27 @@ pub(crate) fn parse_bitmask(v: &str) -> Option<u32> {
 pub fn decode_text(bytes: &[u8]) -> String {
     let body = bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(bytes);
     String::from_utf8_lossy(body).into_owned()
+}
+
+/// Parses INI text into a `CoreConfig` using only the shared section dispatcher.
+/// Per-game crates that don't define their own config keys call this directly from
+/// `install_hooks`. Crates with their own sections (e.g. th15's `[display] resolution`)
+/// supply their own parse function.
+#[must_use]
+pub fn parse_core_only(text: &str) -> CoreConfig {
+    let mut core = CoreConfig::default();
+    for_each_setting(text, |section, k, v| {
+        match section.to_ascii_lowercase().as_str() {
+            "display" => apply_display(&mut core.display, k, v),
+            "window" => apply_window(&mut core.window, k, v),
+            "framerate" => apply_framerate(&mut core.framerate, k, v),
+            "input" => apply_input(&mut core.input, k, v),
+            "process" => apply_process(&mut core.process, k, v),
+            "log" => apply_log(&mut core.log, k, v),
+            _ => {}
+        }
+    });
+    core
 }
 
 /// Writes the game-agnostic manifest lines after the log preamble.
@@ -729,5 +750,59 @@ mod tests {
         // Unknown keys are ignored.
         apply_input(&mut cfg, "other_key", "off");
         assert!(cfg.dpad);
+    }
+
+    #[test]
+    fn parse_core_only_empty_matches_defaults() {
+        let cfg = parse_core_only("");
+        assert_eq!(cfg.display.mode, DisplayMode::Windowed);
+        assert_eq!(cfg.display.refresh_rate, RefreshRateMode::NativeMultiple);
+        assert_eq!(cfg.framerate.game_fps, DEFAULT_GAME_FPS);
+    }
+
+    #[test]
+    fn parse_core_only_applies_known_keys_across_sections() {
+        let text = "
+            [framerate]
+            game_fps = 120
+            replay_skip_fps = 480
+
+            [process]
+            priority = High
+            affinity_mask = 0xFF
+
+            [display]
+            mode = fullscreen
+        ";
+        let cfg = parse_core_only(text);
+        assert_eq!(cfg.framerate.game_fps, 120);
+        assert_eq!(cfg.framerate.replay_skip_fps, 480);
+        assert_eq!(cfg.process.priority, PriorityClass::High);
+        assert_eq!(cfg.process.affinity_mask, Some(nz(0xFF)));
+        assert_eq!(cfg.display.mode, DisplayMode::Fullscreen);
+    }
+
+    #[test]
+    fn parse_core_only_silently_ignores_unknown_sections_and_keys() {
+        let text = "
+            [does_not_exist]
+            x = 1
+
+            [framerate]
+            unknown_key = whatever
+            game_fps = NotANumber
+
+            no_equals_sign
+            ; comment line
+            # also a comment
+        ";
+        let cfg = parse_core_only(text);
+        assert_eq!(cfg.framerate.game_fps, DEFAULT_GAME_FPS);
+    }
+
+    #[test]
+    fn parse_core_only_handles_quoted_values_and_trailing_comments() {
+        let cfg = parse_core_only("[display]\nmode = \"fullscreen\" ; trailing comment");
+        assert_eq!(cfg.display.mode, DisplayMode::Fullscreen);
     }
 }

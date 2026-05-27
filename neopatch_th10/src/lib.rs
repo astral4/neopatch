@@ -5,7 +5,6 @@
 #[cfg(all(not(panic = "abort"), not(test), not(doc)))]
 compile_error!("neopatch_th10 requires `panic = \"abort\"`");
 
-mod config;
 mod dialog_dismiss;
 mod patches;
 mod state;
@@ -65,7 +64,7 @@ unsafe fn install_hooks() {
         let core_cfg: CoreConfig = exe_dir
             .and_then(|d| read(d.join("neopatch.ini")).ok())
             .map_or_else(CoreConfig::default, |b| {
-                config::parse(&core_config::decode_text(&b))
+                core_config::parse_core_only(&core_config::decode_text(&b))
             });
         drop(core_config::CONFIG.set(core_cfg));
         let core_cfg = core_config::CONFIG.get().unwrap();
