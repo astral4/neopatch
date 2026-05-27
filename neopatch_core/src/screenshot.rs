@@ -7,7 +7,7 @@
 //! offscreen surface, which is lockable regardless of presentation flags.
 //!
 //! A game's screenshot save function runs either before or after `Present`:
-//! - th11/th12/th15: before `Present`. The back buffer is still fresh; the game's trampoline
+//! - th11/th12/th13/th15: before `Present`. The back buffer is still fresh; the game's trampoline
 //!   calls `save_live` directly and we capture synchronously, matching vanilla frame timing.
 //! - th10: after `Present`. The back buffer is undefined under D3D9Ex flip-model. The game's
 //!   trampoline calls `set_pending_cached_save`, and the next `on_pre_present` captures

@@ -4,6 +4,10 @@ All notable changes to neopatch will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- Support for Touhou 13 ~ Ten Desires (`th13.exe v1.00c`).
+
 ### Changed
 
 - Session log writing now accounts for UAC virtualization. neopatch first tries `<install>\neopatch_logs\`, then `%LOCALAPPDATA%\neopatch_logs\`, and finally `%TEMP%\neopatch_logs\`.
