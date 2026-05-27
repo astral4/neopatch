@@ -76,7 +76,7 @@ fn take_pending_cached_save(tok: &MainToken) -> Option<PendingPath> {
 }
 
 /// Returns the active device pointer set at the most recent successful `CreateDeviceEx` call.
-pub(crate) fn active_device() -> Option<*mut c_void> {
+fn active_device() -> Option<*mut c_void> {
     let tok = MainToken::new();
     let dev = ACTIVE_DEVICE.get(&tok);
     if dev.is_null() { None } else { Some(dev) }

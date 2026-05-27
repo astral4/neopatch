@@ -158,7 +158,7 @@ pub(crate) fn dump_dir() -> Option<&'static Path> {
 
 /// Returns the number of seconds since `init`.
 /// Returns `0.0` before `init`.
-pub(crate) fn elapsed_secs() -> f64 {
+fn elapsed_secs() -> f64 {
     START.get().map_or(0.0, |s| s.elapsed().as_secs_f64())
 }
 
@@ -364,7 +364,7 @@ where
     Ok(())
 }
 
-pub(crate) struct NeopatchLayer {
+struct NeopatchLayer {
     level: Level,
 }
 

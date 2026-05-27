@@ -19,7 +19,7 @@ use windows_sys::Win32::System::Threading::WaitForSingleObject;
 ///
 /// "replay speed control skip": skip the game's own replay-speed control
 /// so it doesn't fight our pacer.
-pub(crate) const PATCHES: &[Patch] = &[
+const PATCHES: &[Patch] = &[
     Patch::new(0x0047_27de, &[0x72, 0x08], &[0xeb, 0x4a], "UpdateFast skip"),
     Patch::new(0x0047_1a86, &[0x74], &[0xeb], "fast input latency #1"),
     Patch::new(0x0047_1a9b, &[0x75], &[0xeb], "fast input latency #2"),

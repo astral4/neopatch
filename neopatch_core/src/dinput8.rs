@@ -12,7 +12,7 @@ use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 use windows_sys::Win32::System::SystemInformation::GetSystemDirectoryW;
 use windows_sys::core::{GUID, HRESULT};
 
-pub(crate) type DirectInput8CreateFn = unsafe extern "system" fn(
+type DirectInput8CreateFn = unsafe extern "system" fn(
     HINSTANCE,
     u32,
     *const GUID,
@@ -28,7 +28,7 @@ static ON_CREATED: OnceLock<unsafe fn(*mut c_void)> = OnceLock::new();
 
 /// Registers a hook to run after `DirectInput8Create` returns a new `IDirectInput8`;
 /// first caller wins. This should be called before any DirectInput call from the game.
-pub fn set_on_created(f: unsafe fn(*mut c_void)) {
+pub(crate) fn set_on_created(f: unsafe fn(*mut c_void)) {
     let _ = ON_CREATED.set(f);
 }
 

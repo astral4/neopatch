@@ -24,7 +24,7 @@ use tracing::info;
 /// between `xor ecx, ecx` and `add ecx, 0x16`, so the persistent `[0x491d62]` choice
 /// can never push the result from `0x16` (X8R8G8B8) to `0x17` (R5G6B5). Windowed mode pulls
 /// the format from the desktop display mode, so no patches are needed there.
-pub(crate) const PATCHES: &[Patch] = &[
+const PATCHES: &[Patch] = &[
     Patch::new(
         0x0043_93b7,
         &[0x0f, 0x85, 0x6a, 0x01, 0x00, 0x00],

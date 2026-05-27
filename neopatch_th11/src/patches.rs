@@ -18,7 +18,7 @@ use std::arch::naked_asm;
 /// "replay speed control skip": skips the game's own Ctrl-key fast-forward
 /// branch at `0x00436d5f`. Without it the game's internal speed control fights
 /// our pacer's replay-skip / replay-slow modes (see `state::replay_mode`).
-pub(crate) const PATCHES: &[Patch] = &[
+const PATCHES: &[Patch] = &[
     Patch::new(0x0044_6454, &[0x75, 0x08], &[0xeb, 0x43], "UpdateFast skip"),
     Patch::new(0x0044_5877, &[0x74], &[0xeb], "fast input latency #1"),
     Patch::new(0x0044_588b, &[0x75], &[0xeb], "fast input latency #2"),
