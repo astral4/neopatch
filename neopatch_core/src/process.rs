@@ -1,7 +1,7 @@
 //! Process-level tunables applied once at `DllMain`.
 
-use crate::MainToken;
 use crate::config::{PriorityClass, ProcessCfg};
+use crate::thread::MainToken;
 use tracing::info;
 use windows::core::w;
 use windows_sys::Win32::Foundation::GetLastError;

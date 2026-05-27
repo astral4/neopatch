@@ -1,4 +1,4 @@
-//! Joystick input hooks.
+//! DirectInput hooks for controller input.
 //!
 //! The games read `lX` and `lY` from `DIJOYSTATE`/`DIJOYSTATE2` for direction input,
 //! but not `rgdwPOV`, which is for the D-pad on controllers. We convert POV into X/Y values

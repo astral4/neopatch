@@ -1,7 +1,7 @@
 //! Loaded-module enumeration and address symbolication.
 
 use std::ptr::null_mut;
-use windows_sys::Win32::Foundation::HMODULE;
+use windows_sys::Win32::Foundation::{HMODULE, MAX_PATH};
 use windows_sys::Win32::System::ProcessStatus::{
     EnumProcessModules, GetModuleFileNameExW, GetModuleInformation, MODULEINFO,
 };
@@ -61,8 +61,6 @@ pub(crate) fn walk_modules() -> Vec<Module> {
     const HANDLES_LEN: usize = HANDLES_CAP as usize;
     #[allow(clippy::cast_possible_truncation)]
     const BUF_BYTES: u32 = HANDLES_CAP * size_of::<HMODULE>() as u32;
-    const NAME_CAP: u32 = 260;
-    const NAME_LEN: usize = NAME_CAP as usize;
 
     let mut result: Vec<Module> = Vec::new();
     unsafe {
@@ -78,8 +76,8 @@ pub(crate) fn walk_modules() -> Vec<Module> {
             let Some(range) = module_info(module) else {
                 continue;
             };
-            let mut name_buf = [0u16; NAME_LEN];
-            let name_len = GetModuleFileNameExW(process, module, name_buf.as_mut_ptr(), NAME_CAP);
+            let mut name_buf = [0u16; MAX_PATH as usize];
+            let name_len = GetModuleFileNameExW(process, module, name_buf.as_mut_ptr(), MAX_PATH);
             let mut name = if name_len == 0 {
                 String::from("<unknown>")
             } else {
