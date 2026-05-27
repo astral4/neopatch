@@ -1,11 +1,10 @@
 //! Logic for auto-dismissing th10's window-mode startup dialog.
 //!
-//! `fcn.00438ad0` calls `DialogBoxParamA` with template `0xCB` and the dialog proc
-//! at `0x0043a3a0` when `[0x491d78] & 0x100` ("ask every time at startup" checkbox) is set.
-//! The proc's `EndDialog` value lands in `[0x491d65]`, which the game later passes
-//! as `Windowed` to `CreateDevice`. We NOP the dialog-creation gate so the call always fires,
-//! then short-circuit the IAT hook to return the value the original proc would have
-//! for our INI mode, without creating any window.
+//! `fcn.00438ad0` calls `DialogBoxParamA` (template `0xCB`, proc `0x0043a3a0`) when
+//! `[0x491d78] & 0x100` is set. The proc's `EndDialog` value lands in `[0x491d65]`,
+//! which the game later passes as `Windowed` to `CreateDevice`. We NOP the gate so the call
+//! always fires, then short-circuit the IAT to return the value the proc would have for our
+//! own configuration without creating any window.
 
 use neopatch_core::config::{self as core_config, DisplayMode};
 use neopatch_core::iat_hook;
@@ -18,16 +17,13 @@ use windows_sys::Win32::UI::WindowsAndMessaging::DLGPROC;
 const TH10_DIALOG_TEMPLATE_ID: usize = 0xCB;
 const TH10_DIALOG_PROC_VA: usize = 0x0043_a3a0;
 
-/// `EndDialog` returns the dialog proc uses: Fullscreen radio (id `0xC9`) routes through
-/// `0x43a418` -> `EndDialog(6)`; Window radio (id `0xCB`) routes through
-/// `0x43a3cc` -> `EndDialog(7)`. Downstream `setne cl` against `6` writes
-/// `0` for fullscreen, `1` for windowed to `[0x491d65]`.
+/// `EndDialog` values: Fullscreen radio (`0xC9`) -> 6; Window radio (`0xCB`) -> 7.
+/// Downstream `setne cl` against `6` writes 0 / 1 to `[0x491d65]`.
 const DIALOG_RET_FULLSCREEN: isize = 6;
 const DIALOG_RET_WINDOWED: isize = 7;
 
-/// "force dialog gate open": NOPs `je 0x438b9e`, the gate that skips
-/// `DialogBoxParamA` when `[0x491d78]` bit 8 is clear. Without it,
-/// our hook only fires when `custom.exe` is in "Ask every time" mode.
+/// NOPs `je 0x438b9e` so `DialogBoxParamA` fires regardless of
+/// `custom.exe`'s "Ask every time" checkbox.
 const DIALOG_PATCHES: &[Patch] = &[Patch::new(
     0x0043_8b7b,
     &[0x74, 0x21],

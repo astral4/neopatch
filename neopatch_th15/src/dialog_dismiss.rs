@@ -35,17 +35,16 @@ const RES_RADIO_LAST_ID: i32 = 0xCF;
 
 const OK_BUTTON_ID: u32 = 0xD0;
 
-/// The pump exit predicate at `0x4716A2` is `test [0x4e6d1c], 0x80001`. We set bit 19
-/// ("Enter accept") to terminate the pump after the posted OK click is dispatched.
+/// Pump exit predicate at `0x4716A2`: `test [0x4e6d1c], 0x80001`. Setting bit 19
+/// ("Enter accept") terminates the pump after the posted OK click is dispatched.
 const EXIT_FLAG: GameAddr<u32> = unsafe { GameAddr::new(0x004E_6D1C) };
 const EXIT_FLAG_BIT: u32 = 0x0008_0000;
 
-/// "force resolution dialog" makes the dialog-creation gate unconditional
-/// so our IAT hook fires on every launch. Otherwise, th15.cfg's
-/// "don't show again" bit suppresses the dialog after the first run.
-/// "force dialog hidden" keeps the explicit `ShowWindow` from rendering the dialog.
-/// The template lacks `WS_VISIBLE`, so `SW_HIDE` is a no-op on an already-hidden window.
-/// The OK handler still runs and writes `[0x4e79c3]` invisibly.
+/// "force resolution dialog": unconditional gate so our IAT hook fires every launch
+/// instead of being suppressed by th15.cfg's "don't show again" bit.
+///
+/// "force dialog hidden": replaces `SW_SHOW` with `SW_HIDE` on the explicit
+/// `ShowWindow` call. The OK handler still runs and writes `[0x4e79c3]` invisibly.
 const DIALOG_PATCHES: &[Patch] = &[
     Patch::new(0x0047_15f2, &[0x75], &[0xeb], "force resolution dialog"),
     Patch::new(0x0047_1620, &[0x05], &[0x00], "force dialog hidden"),
@@ -101,8 +100,8 @@ unsafe extern "system" fn hook_create_dialog_param_a(
         let res_radio_id = RES_RADIO_FIRST_ID + i32::from(th15_cfg.resolution.index());
         let fullscreen = matches!(core_cfg.display.mode, DisplayMode::Fullscreen);
 
-        // Restrict the radio range to 0xCD..0xCF; otherwise `CheckRadioButton`'s
-        // "clear all others in range" would hit the checkboxes at 0xCA/CB/CC.
+        // The range is restricted to 0xCD..0xCF so `CheckRadioButton`'s
+        // "clear others in range" doesn't hit the checkboxes at 0xCA/CB/CC.
         let radio_ret = CheckRadioButton(hwnd, RES_RADIO_FIRST_ID, RES_RADIO_LAST_ID, res_radio_id);
         let fs_state = if fullscreen {
             BST_CHECKED
@@ -112,10 +111,9 @@ unsafe extern "system" fn hook_create_dialog_param_a(
         let dlg_btn_ret = CheckDlgButton(hwnd, FULLSCREEN_CHECKBOX_ID, fs_state);
         let wparam = ((BN_CLICKED << 16) | OK_BUTTON_ID) as WPARAM;
         let pm_ok = PostMessageA(hwnd, WM_COMMAND, wparam, 0);
-        // Post first, then set the exit bit. th15's pump at `0x471633` dispatches
-        // queued messages before re-testing `[0x4e6d1c]` at `0x471698`,
-        // so the OK handler's resolution write at `[0x4e79c3]` runs on
-        // the same iteration our bit terminates the loop.
+        // We post first, then set the exit bit. The pump at `0x471633` dispatches
+        // queued messages before re-testing `[0x4e6d1c]` at `0x471698`, so the OK handler's
+        // `[0x4e79c3]` write runs on the same iteration that our bit terminates the loop.
         let prev = EXIT_FLAG.read();
         let next = prev | EXIT_FLAG_BIT;
         EXIT_FLAG.write(next);

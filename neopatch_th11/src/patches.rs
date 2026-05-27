@@ -4,20 +4,15 @@ use neopatch_core::patches::{Patch, patch_jmp};
 use neopatch_core::screenshot::{log_failed, log_saved, sanitize_filename, save_live};
 use std::arch::naked_asm;
 
-/// "UpdateFast skip": flips `jne 0x44645e` to `jmp +0x43`, landing past the `Sleep(1)`
-/// at `0x00446458` and the FPU (x87) catch-up loop (`0x0044645e..0x00446497`) inside
-/// `CWindowManager::UpdateFast`. The catch-up loop iterates the game step without rendering
-/// when behind schedule. We let the D3D9 `Present` pacer in core be the sole timing source,
-/// so neither the yield nor the multi-step matters.
+/// "UpdateFast skip": flips `jne 0x44645e` to `jmp +0x43`, landing past
+/// the `Sleep(1)` and the FPU catch-up loop in `CWindowManager::UpdateFast`.
 ///
-/// "fast input latency #1/#2": flips two cond jumps so the per-frame driver dispatch
-/// at `0x004458a7` is always reached. Skips the alternative `fcn.00446080` ("slow")
-/// and `fcn.00446650` ("normal") paths in favor of `fcn.00446420` (`CWindowManager::UpdateFast`).
+/// "fast input latency #1/#2": flips two cond jumps so the per-frame dispatch
+/// always reaches `fcn.00446420` (`UpdateFast`) instead of the slow/normal paths.
 /// OILP also does this under "Force fast input latency mode."
 ///
-/// "replay speed control skip": skips the game's own Ctrl-key fast-forward
-/// branch at `0x00436d5f`. Without it the game's internal speed control fights
-/// our pacer's replay-skip / replay-slow modes (see `state::replay_mode`).
+/// "replay speed control skip": skips the game's own Ctrl-key fast-forward.
+/// Without this, the game's internal speed control fights our pacer's replay-speed modes.
 const PATCHES: &[Patch] = &[
     Patch::new(0x0044_6454, &[0x75, 0x08], &[0xeb, 0x43], "UpdateFast skip"),
     Patch::new(0x0044_5877, &[0x74], &[0xeb], "fast input latency #1"),
@@ -25,17 +20,14 @@ const PATCHES: &[Patch] = &[
     Patch::new(0x0043_6d5f, &[0x74], &[0xeb], "replay speed control skip"),
 ];
 
-/// Location of the `mov ebx, [ebx + 0x404]` we displace with `e9 disp32`.
+/// Splice over `mov ebx, [ebx + 0x404]` (6 bytes) inside `fcn.00450e20`, the `AnmManager`
+/// modes 5/7 position helper. X and Y correctly accumulate `matrix.t*`; Z doesn't.
+/// `[esp + 0x78]` is the `matrix.tz` frame slot; the displaced `mov` loads
+/// the `AnmVm` flags field and is replayed.
 const ANM_MODE57_SPLICE: usize = 0x0045_0f83;
-/// Length of the displaced instruction (6 bytes for `8B 9B disp32`).
 const ANM_MODE57_DISPLACED_LEN: usize = 6;
-/// Resume target past the displaced mov at the splice.
 static ANM_MODE57_AFTER_SPLICE: usize = ANM_MODE57_SPLICE + ANM_MODE57_DISPLACED_LEN;
 
-/// Adds the missing `matrix.tz` `fadd` before the Z `fstp` in `fcn.00450e20`, the position
-/// helper used by `AnmManager` render modes 5 and 7. X and Y correctly accumulate their
-/// `matrix.t*`, unlike Z. `[esp + 0x78]` is the `matrix.tz` slot in the function's frame.
-/// `[ebx + 0x404]` is the `AnmVm` flags field (replayed from the displaced `mov`).
 #[unsafe(naked)]
 unsafe extern "C" fn anm_mode57_z_trampoline() -> ! {
     naked_asm!(
@@ -61,7 +53,7 @@ pub(crate) unsafe fn install_anm_matrix_tz_fix() {
     }
 }
 
-/// `fcn.00429ca0`: th11 screenshot save.
+/// th11 screenshot save. Filename pointer in EAX.
 const SCREENSHOT_SAVE_FN: usize = 0x0042_9ca0;
 const SCREENSHOT_SAVE_FN_PROLOGUE: [u8; 5] = [0x83, 0xec, 0x10, 0x83, 0x3d];
 

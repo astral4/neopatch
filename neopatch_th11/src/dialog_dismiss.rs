@@ -1,15 +1,12 @@
 //! Logic for auto-dismissing th11's window-mode startup dialog.
 //!
-//! The dialog is gated by either `[0x4c3480] & 0x100` ("ask every time at startup" checkbox)
-//! or holding Alt during launch. `main` at `0x00445610..0x00445626` tests both
-//! before falling through to `DialogBoxParamA`. We NOP the Alt-key skip at `0x00445617`
-//! so the call site is reached unconditionally, then IAT-hook `DialogBoxParamA`
+//! `main` at `0x00445610..0x00445626` gates `DialogBoxParamA` on either the
+//! `[0x4c3480] & 0x100` checkbox or holding Alt at launch. We NOP the Alt-key skip at
+//! `0x00445617` so the call site is reached on every launch, then IAT-hook `DialogBoxParamA`
 //! to short-circuit without creating any window.
 //!
-//! Unlike th10's dialog, th11's dialog proc unconditionally calls `EndDialog(hwnd, 6)`
-//! regardless of which radio is checked. The selection is written to `[0x4c3465]`
-//! from inside the proc's `WM_COMMAND IDOK` branch. Short-circuiting the IAT therefore
-//! skips that write, so we perform it ourselves.
+//! th11's dialog proc returns `EndDialog(hwnd, 6)` on IDOK regardless of selection;
+//! the selection is a side-write to `[0x4c3465]`. We replicate it.
 
 use neopatch_core::config::{self as core_config, DisplayMode};
 use neopatch_core::game_addr::GameAddr;
@@ -23,21 +20,16 @@ use windows_sys::Win32::UI::WindowsAndMessaging::DLGPROC;
 const TH11_DIALOG_TEMPLATE_ID: usize = 0xCB;
 const TH11_DIALOG_PROC_VA: usize = 0x0044_7910;
 
-/// Game's display-mode byte. Read at `fcn.00446d30` to gate the fullscreen vs. windowed path;
-/// written by the dialog proc's `WM_COMMAND IDOK` branch.
+/// Read at `fcn.00446d30` to gate fullscreen vs. windowed; written by the dialog proc on IDOK.
 const DISPLAY_MODE_BYTE: GameAddr<u8> = unsafe { GameAddr::new(0x004c_3465) };
 const MODE_FULLSCREEN: u8 = 0;
 const MODE_WINDOWED: u8 = 1;
 
-/// `EndDialog` value returned by th11's dialog proc on the IDOK branch.
-/// `main` doesn't branch on this; the dialog's effect lives entirely in
-/// the side-write to `[0x4c3465]`.
+/// `EndDialog` value returned by the IDOK branch. `main` doesn't branch on it.
 const DIALOG_RET: isize = 6;
 
-/// "force dialog gate open": NOPs the `je 0x44562c` at `0x00445617` that skips
-/// `DialogBoxParamA` when the Alt key wasn't held at launch. The other entry to the dialog
-/// (the `[0x4c3480] & 0x100` test at `0x00445606`) already runs unconditionally;
-/// only this Alt-key skip needs disabling for our hook to fire on every launch.
+/// NOPs the Alt-key `je 0x44562c` at `0x00445617` so `DialogBoxParamA`
+/// fires every launch instead of only when Alt is held.
 const DIALOG_PATCHES: &[Patch] = &[Patch::new(
     0x0044_5617,
     &[0x74, 0x13],

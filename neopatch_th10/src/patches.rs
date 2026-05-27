@@ -5,25 +5,18 @@ use neopatch_core::screenshot::{sanitize_filename, set_pending_cached_save};
 use std::arch::naked_asm;
 use tracing::info;
 
-/// "Sleep-path branch nop": NOPs the `jne 0x439527` inside `fcn.00439390`
-/// (`CWindowManager::Update`). The branch target contains the game's `Sleep`
-/// at `0x0043952B`, so killing the branch keeps the loop from reaching it.
+/// "Sleep-path branch nop" + "frame limiter unconditional skip": disengages the game's
+/// own pacer in `CWindowManager::Update` (the `Sleep` at `0x0043952B`, the FPU deadline check).
 ///
-/// "frame limiter unconditional skip": flips a post-FPU (x87) `jne` to `jmp` so the loop
-/// always lands past the deadline check. Together with the above, this disengages
-/// the game's pacer in favor of ours.
+/// "AnmManager mode 2 y -> z": fixes a typo in `fcn.00443290`. The Y component of
+/// `parentPos` (`+0x350`) is summed where the Z component (`+0x354`) was meant to be.
+/// Reached in render mode 2, and modes 1/3 when rotation is exactly 0.
 ///
-/// "AnmManager mode 2 y -> z": fixes a typo in `fcn.00443290`. The Y component
-/// of `parentPos` (`0x350`) is used in a sum instead of the Z component (`0x354`).
-/// This bug is reached in render mode 2, and modes 1 and 3 when rotation is exactly 0.
-///
-/// "32-bit color skip force-16-bit branch" and "32-bit color ignore persistent choice":
+/// "32-bit color skip force-16-bit branch" + "32-bit color ignore persistent choice":
 /// forces `pp.BackBufferFormat = X8R8G8B8` in `fcn.00439890`'s fullscreen path regardless of
-/// the `custom.exe` color-depth selection. The first flips a `je` to `jmp` so the
-/// `[0x491d78] & 1` "force 16-bit" fallback is bypassed; the second NOPs the `setne cl`
-/// between `xor ecx, ecx` and `add ecx, 0x16`, so the persistent `[0x491d62]` choice
-/// can never push the result from `0x16` (X8R8G8B8) to `0x17` (R5G6B5). Windowed mode pulls
-/// the format from the desktop display mode, so no patches are needed there.
+/// `custom.exe`. First skips the `[0x491d78] & 1` 16-bit fallback; second NOPs the `setne cl`
+/// so the persistent `[0x491d62]` choice can't push `0x16` (X8R8G8B8) up to `0x17` (R5G6B5).
+/// Windowed mode pulls the format from the desktop and needs no patches.
 const PATCHES: &[Patch] = &[
     Patch::new(
         0x0043_93b7,
@@ -57,17 +50,14 @@ const PATCHES: &[Patch] = &[
     ),
 ];
 
-/// Location of the `mov ebx, [ebx + 0x35c]` we displace with `e9 disp32`.
+/// Splice over `mov ebx, [ebx + 0x35c]` (6 bytes) inside `fcn.00444240`, the `AnmManager`
+/// modes 5/7 position helper. X and Y correctly accumulate `matrix.t*`; Z doesn't.
+/// `[esp + 0x74]` is the `matrix.tz` frame slot; the displaced `mov` loads
+/// the `AnmVm` flags field and is replayed.
 const ANM_MODE57_SPLICE: usize = 0x0044_438e;
-/// Length of the displaced instruction (6 bytes for `8B 9B disp32`).
 const ANM_MODE57_DISPLACED_LEN: usize = 6;
-/// Resume target past the displaced `mov` at the splice.
 static ANM_MODE57_AFTER_SPLICE: usize = ANM_MODE57_SPLICE + ANM_MODE57_DISPLACED_LEN;
 
-/// Adds the missing `matrix.tz` `fadd` before the Z `fstp` in `fcn.00444240`, the position
-/// helper used by `AnmManager` render modes 5 and 7. X and Y correctly accumulate their
-/// `matrix.t*`, unlike Z. `[esp + 0x74]` is the `matrix.tz` slot in the function's frame.
-/// `[ebx + 0x35c]` is the `AnmVm` flags field (replayed from the displaced `mov`).
 #[unsafe(naked)]
 unsafe extern "C" fn anm_mode57_z_trampoline() -> ! {
     naked_asm!(
@@ -93,7 +83,8 @@ pub(crate) unsafe fn install_anm_matrix_tz_fix() {
     }
 }
 
-/// `fcn.00420670`: th10 screenshot save.
+/// th10 screenshot save. Filename pointer in EAX. This runs after `Present`,
+/// so we stash the path and capture in the next `on_pre_present` instead of `save_live`.
 const SCREENSHOT_SAVE_FN: usize = 0x0042_0670;
 const SCREENSHOT_SAVE_FN_PROLOGUE: [u8; 5] = [0x83, 0xec, 0x0c, 0x53, 0x55];
 

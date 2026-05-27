@@ -25,8 +25,7 @@ use windows_sys::Win32::Foundation::{HINSTANCE, HMODULE};
 use windows_sys::Win32::System::LibraryLoader::{DisableThreadLibraryCalls, GetModuleHandleW};
 use windows_sys::Win32::System::SystemServices::DLL_PROCESS_ATTACH;
 
-/// 640x480 is the only render resolution for th10. `custom.exe` has no resolution selector.
-/// `[window] width` / `[window] height` enlarge the displayed window via D3D9 stretch-blit.
+// The render resolution is always 640x480.
 const TH10_FRAMEBUFFER_SIZE: (u32, u32) = (640, 480);
 
 dinput8_export!();

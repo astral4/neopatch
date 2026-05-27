@@ -27,14 +27,8 @@ use windows_sys::Win32::Foundation::{HINSTANCE, HMODULE};
 use windows_sys::Win32::System::LibraryLoader::{DisableThreadLibraryCalls, GetModuleHandleW};
 use windows_sys::Win32::System::SystemServices::DLL_PROCESS_ATTACH;
 
-/// `0x0047158C` in the game is `FF 15 disp32` (6-byte indirect call to `Direct3DCreate9`).
-/// We rewrite it to `E8 disp32 90` (5-byte direct call to our hook plus a trailing NOP).
-/// This is defense for the IAT hook in case another program IAT-hooks
-/// `Direct3DCreate9` after us, so the main call still lands on us.
-///
-/// A second `FF 15 [iat]` site exists at `0x00472e72` in what seems like
-/// dead error-recovery code. We intentionally don't patch this site.
-/// The IAT hook covers it for any live caller.
+/// Live `Direct3DCreate9` call site, rewritten to defend against downstream IAT hijacks.
+/// There is a second site at `0x00472e72` that seems to be dead error-recovery code.
 const TH15_DIRECT3DCREATE9_CALL_ADDR: usize = 0x0047_158c;
 const TH15_DIRECT3DCREATE9_CALL_BYTES: [u8; 6] = [0xff, 0x15, 0xb0, 0xe2, 0x4b, 0x00];
 
@@ -123,8 +117,8 @@ unsafe fn install_hooks() {
         }));
 
         d3d9::install(host_exe);
-        // We rewrite a live `Direct3DCreate9` call site in th15 so a downstream IAT hijack
-        // can't reroute the main call away from us.
+        // We rewrite a live `Direct3DCreate9` call site in th15
+        // so a downstream IAT hijack can't reroute the main call away from us.
         d3d9::install_call_site_rewrite(
             TH15_DIRECT3DCREATE9_CALL_ADDR,
             &TH15_DIRECT3DCREATE9_CALL_BYTES,

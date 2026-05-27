@@ -1,13 +1,12 @@
 //! Logic for auto-dismissing th12's window-mode startup dialog.
 //!
-//! `main` at `0x0044f660..0x0044f67c` tests an "Alt held at launch" stack-local bit before
-//! falling through to `DialogBoxParamA` at `0x0044f676` (template `0xCB`, proc at `0x004518c0`).
-//! We NOP the `je` at `0x0044f667` so the call site is reached unconditionally, then IAT-hook
+//! `main` at `0x0044f660..0x0044f67c` gates `DialogBoxParamA` at `0x0044f676`
+//! (template `0xCB`, proc at `0x004518c0`) on an "Alt held at launch" stack-local bit.
+//! We NOP the `je` at `0x0044f667` so the call fires every launch, then IAT-hook
 //! `DialogBoxParamA` to short-circuit without creating any window.
 //!
-//! Like th11's dialog, th12's dialog proc unconditionally calls `EndDialog(hwnd, 6)`
-//! on the IDOK branch. The selection is a side-effect write in `WM_COMMAND IDOK`.
-//! Short-circuiting the IAT skips that write, so we perform it ourselves.
+//! th12's dialog proc returns `EndDialog(hwnd, 6)` on IDOK regardless of selection;
+//! the selection is a side-write to `[0x004ceacd]`. We replicate it.
 
 use neopatch_core::config::{self as core_config, DisplayMode};
 use neopatch_core::game_addr::GameAddr;
@@ -21,20 +20,17 @@ use windows_sys::Win32::UI::WindowsAndMessaging::DLGPROC;
 const TH12_DIALOG_TEMPLATE_ID: usize = 0xCB;
 const TH12_DIALOG_PROC_VA: usize = 0x0045_18c0;
 
-/// Game's display-mode byte. Read after the dialog returns to gate the
-/// fullscreen vs. windowed path; written by the dialog proc's `WM_COMMAND IDOK` branch.
+/// Read after the dialog returns to gate fullscreen vs. windowed;
+/// written by the dialog proc on IDOK.
 const DISPLAY_MODE_BYTE: GameAddr<u8> = unsafe { GameAddr::new(0x004c_eacd) };
 const MODE_FULLSCREEN: u8 = 0;
 const MODE_WINDOWED: u8 = 1;
 
-/// `EndDialog` value returned by th12's dialog proc on the IDOK branch.
-/// `main` doesn't branch on this; the dialog's effect lives entirely in
-/// the side-write to `[0x004ceacd]`.
+/// `EndDialog` value returned by the IDOK branch. `main` doesn't branch on it.
 const DIALOG_RET: isize = 6;
 
-/// "force dialog gate open": NOPs the `je 0x44f67c` at `0x0044f667` that skips
-/// `DialogBoxParamA` when the Alt-held stack-local bit was clear. Without this,
-/// our hook only fires when the user holds Alt at launch.
+/// NOPs the Alt-key `je 0x44f67c` at `0x0044f667` so `DialogBoxParamA`
+/// fires every launch instead of only when Alt is held.
 const DIALOG_PATCHES: &[Patch] = &[Patch::new(
     0x0044_f667,
     &[0x74, 0x13],

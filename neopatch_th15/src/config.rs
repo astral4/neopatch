@@ -82,8 +82,7 @@ fn parse_th15_only(text: &str) -> Th15Config {
     cfg
 }
 
-/// Writes th15-specific manifest lines that aren't already covered
-/// by the shared core preamble.
+/// Writes th15-specific manifest lines that aren't already covered by the core configuration.
 pub(crate) fn write_manifest_extras<W: Write + ?Sized>(
     w: &mut W,
     th15: &Th15Config,

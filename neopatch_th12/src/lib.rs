@@ -25,8 +25,7 @@ use windows_sys::Win32::Foundation::{HINSTANCE, HMODULE};
 use windows_sys::Win32::System::LibraryLoader::{DisableThreadLibraryCalls, GetModuleHandleW};
 use windows_sys::Win32::System::SystemServices::DLL_PROCESS_ATTACH;
 
-// 640x480 is the only render resolution for th12.
-// The 960x720 and 1280x960 startup dialog options just resize the window.
+// The render resolution is always 640x480.
 const TH12_FRAMEBUFFER_SIZE: (u32, u32) = (640, 480);
 
 dinput8_export!();
