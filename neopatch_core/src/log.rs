@@ -17,7 +17,7 @@ use std::num::NonZero;
 use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
 use std::ptr::null_mut;
-use std::sync::atomic::{AtomicPtr, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicPtr, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 use tracing::field::{Field, Visit};
@@ -326,37 +326,6 @@ impl Visit for FieldVisitor<'_> {
         } else {
             _ = write!(self.out, " {}={:?}", field.name(), value);
         }
-    }
-}
-
-/// Bounded counter for log sites.
-///
-/// The first `limit` calls to `LogCap::tick` return `Some(n)` (0-indexed).
-/// Subsequent calls return `None`. This can be used to gate `info!`/`warn!`
-/// on a per-frame or loop path so a single such site doesn't flood the log.
-pub(crate) struct LogCap {
-    count: AtomicU32,
-    limit: NonZero<u32>,
-}
-
-impl LogCap {
-    #[must_use]
-    pub(crate) const fn new(limit: NonZero<u32>) -> Self {
-        Self {
-            count: AtomicU32::new(0),
-            limit,
-        }
-    }
-
-    pub(crate) fn tick(&self) -> Option<u32> {
-        // Early-return via `load` introduces a race window, but the window
-        // can leak at most one extra increment past the limit, which is harmless.
-        let limit = self.limit.get();
-        if self.count.load(Ordering::Relaxed) >= limit {
-            return None;
-        }
-        let n = self.count.fetch_add(1, Ordering::Relaxed);
-        if n < limit { Some(n) } else { None }
     }
 }
 

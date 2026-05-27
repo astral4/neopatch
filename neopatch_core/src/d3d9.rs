@@ -20,7 +20,7 @@
 
 use crate::config::{CONFIG, RefreshRateMode};
 use crate::iat_hook;
-use crate::log::LogCap;
+use crate::log_cap::LogCap;
 use crate::match_named;
 use crate::pacer::{PACER, PacingPolicy};
 use crate::patches::patch_call_over_indirect;

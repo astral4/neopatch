@@ -7,7 +7,7 @@
 
 use crate::d3d9::{fmt_hr, format_name, out_ptr, translate_managed_pool};
 use crate::iat_hook;
-use crate::log::LogCap;
+use crate::log_cap::LogCap;
 use std::ffi::c_void;
 use std::num::NonZero;
 use tracing::info;

@@ -4,7 +4,7 @@
 //! is independent because our frame pacer drives the cadence of frames and logic ticks.
 
 use crate::iat_hook;
-use crate::log::LogCap;
+use crate::log_cap::LogCap;
 use std::num::NonZero;
 use tracing::info;
 use windows::Win32::Graphics::Gdi::{HDC, VREFRESH as SDK_VREFRESH};

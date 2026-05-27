@@ -3,7 +3,8 @@
 //! Vectored runs before the SEH chain and can't be overwritten by a later
 //! `SetUnhandledExceptionFilter`. The unhandled filter is the fallback path.
 
-use crate::log::{LogCap, dump_dir, elapsed_ms, flush};
+use crate::log::{dump_dir, elapsed_ms, flush};
+use crate::log_cap::LogCap;
 use crate::match_named;
 use crate::untrusted::safe_read_stack;
 use std::fmt::Write as _;
