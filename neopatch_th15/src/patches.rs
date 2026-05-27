@@ -167,20 +167,36 @@ unsafe extern "thiscall" fn hooked_fcn_0044bed0(this: *mut c_void) -> i32 {
         // probe with `timeout = 0` to skip the pump entirely in the no-bug case.
         if !loader_handle.is_null() {
             let driver: unsafe extern "C" fn() -> i32 =
-                parse_fn_ptr(with_exposed_provenance_mut::<()>(FCN_004865F0))
+                parse_fn_ptr(with_exposed_provenance_mut(FCN_004865F0))
                     .expect("FCN_004865F0 is a non-zero constant");
             let mut pump_iters: u32 = 0;
-            let mut r = WaitForSingleObject(loader_handle, 0);
-            while r == WAIT_TIMEOUT {
-                driver();
-                pump_iters = pump_iters.saturating_add(1);
-                r = WaitForSingleObject(loader_handle, 1);
+            let drained = loop {
+                let timeout_ms = u32::from(pump_iters != 0);
+                match WaitForSingleObject(loader_handle, timeout_ms) {
+                    WAIT_OBJECT_0 => break true,
+                    WAIT_TIMEOUT => {
+                        driver();
+                        pump_iters = pump_iters.saturating_add(1);
+                    }
+                    other => {
+                        // The trampoline's `INFINITE` wait will also fail,
+                        // so we don't try to pump while spinning.
+                        warn!(
+                            kind = "destructor_pump_aborted",
+                            wait_result = format_args!("{other:#x}"),
+                            pump_iters,
+                        );
+                        break false;
+                    }
+                }
+            };
+            if drained {
+                info!(
+                    kind = "destructor_pump_drained",
+                    this = format_args!("{this:p}"),
+                    pump_iters,
+                );
             }
-            info!(
-                kind = "destructor_pump_drained",
-                this = format_args!("{this:p}"),
-                pump_iters,
-            );
         }
 
         let result = fcn_0044bed0_trampoline(this);
