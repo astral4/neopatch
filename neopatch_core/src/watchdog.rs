@@ -37,8 +37,8 @@ use windows_sys::Win32::System::Threading::{
 /// which also pulls in `CONTEXT_SEGMENTS_X86`. We don't read ds/es/fs/gs.
 const CONTEXT_FULL_X86_NO_SEGMENTS: u32 = CONTEXT_X86 | CONTEXT_CONTROL_X86 | CONTEXT_INTEGER_X86;
 
-/// Leading `UNICODE_STRING` of `ObjectTypeInformation`.
-/// `buffer` points back into the caller's query buffer in `lookup_handle_type`.
+/// Leading `UNICODE_STRING` of `ObjectTypeInformation`. The kernel writes the name
+/// into the trailing area of our buffer and sets `buffer` to point at it.
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct UnicodeStringHeader {
@@ -86,13 +86,21 @@ fn lookup_handle_type(handle: NonZero<u32>) -> Option<String> {
         if status < 0 {
             return None;
         }
-        // `ObjectTypeInformation`'s leading `UNICODE_STRING`.
-        // The `buffer` field points into `buf` past the header.
+        // The kernel writes the name string into the trailing area of our buffer and sets
+        // `TypeName.Buffer` to point at it. We check the bounds of the kernel-supplied pointer
+        // against our own buffer so a malformed reply can't redirect us at arbitrary kernel memory.
         let header: UnicodeStringHeader = read_unaligned(buf.as_ptr().cast());
-        if header.buffer.is_null() || header.length == 0 {
+        if header.length == 0 || header.buffer.is_null() {
             return None;
         }
-        let len_chars = (header.length / 2) as usize;
+        let buf_start = buf.as_ptr() as usize;
+        let buf_end = buf_start.saturating_add(buf.len());
+        let name_start = header.buffer as usize;
+        let name_end = name_start.saturating_add(usize::from(header.length));
+        if name_start < buf_start || name_end > buf_end || name_start & 1 != 0 {
+            return None;
+        }
+        let len_chars = usize::from(header.length) / 2;
         let slice = from_raw_parts(header.buffer, len_chars);
         Some(String::from_utf16_lossy(slice))
     }
