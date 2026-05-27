@@ -7,6 +7,9 @@
 use crate::vtable::{FnSlot, parse_fn_ptr};
 use std::ffi::c_void;
 use std::sync::OnceLock;
+use tracing::info;
+use windows::Win32::Devices::HumanInterfaceDevice::IDirectInput8A;
+use windows::core::Interface;
 use windows_sys::Win32::Foundation::{E_FAIL, HINSTANCE, MAX_PATH};
 use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 use windows_sys::Win32::System::SystemInformation::GetSystemDirectoryW;
@@ -84,13 +87,27 @@ pub unsafe fn forward(
         return E_FAIL;
     };
     let hr = unsafe { real(hinst, dw_version, riidltf, ppv_out, punk_outer) };
-    if hr >= 0
-        && !ppv_out.is_null()
-        && let Some(on_created) = ON_CREATED.get()
-    {
-        // SAFETY: `ppv_out` now holds the new `IDirectInput8`.
-        let di = unsafe { *ppv_out };
-        unsafe { on_created(di) };
+    if hr >= 0 && !ppv_out.is_null() && !riidltf.is_null() {
+        // SAFETY: `windows_sys::core::GUID` and `windows::core::GUID`
+        // are both `#[repr(C)]` with identical fields, so they share layout.
+        let iid = unsafe { &*riidltf.cast::<windows::core::GUID>() };
+        if *iid == IDirectInput8A::IID {
+            if let Some(on_created) = ON_CREATED.get() {
+                // SAFETY: `ppv_out` holds the new `IDirectInput8A`.
+                let di = unsafe { *ppv_out };
+                unsafe { on_created(di) };
+            }
+        } else {
+            // Our `on_created` callback uses "A" vtable types (`IDirectInput8A_Vtbl`,
+            // `IDirectInputDevice8A_Vtbl`) to look up slot offsets and type the hooks.
+            // The currently-patched methods don't take strings, so a W object would also work,
+            // but future extensions to string-bearing methods would diverge.
+            info!(
+                kind = "dinput8_on_created_skipped",
+                reason = "non_ansi_iid",
+                iid_data1 = format_args!("{:#010x}", iid.data1),
+            );
+        }
     }
     hr
 }
