@@ -110,7 +110,6 @@ level = info
 sessions_to_keep = 10
 
 ; The log root directory. Quote the path if it contains spaces.
-; Default behavior: write to <install_dir>\neopatch_logs\,
-; falling back to %LOCALAPPDATA%\neopatch\logs\ if the
-; installation directory isn't writable (e.g. Program Files).
+; Default behavior: try writing to <install_dir>\neopatch_logs\ first,
+; then %LOCALAPPDATA%\neopatch_logs\, then %TEMP%\neopatch_logs\.
 ; log_dir = "C:\Users\me\neopatch_logs"

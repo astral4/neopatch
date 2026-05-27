@@ -4,6 +4,10 @@ All notable changes to neopatch will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- Session log writing now accounts for UAC virtualization. neopatch first tries `<install>\neopatch_logs\`, then `%LOCALAPPDATA%\neopatch_logs\`, and finally `%TEMP%\neopatch_logs\`.
+
 ## [0.5.1] - 2026-05-23
 
 ### Fixed

@@ -1,16 +1,20 @@
 //! Per-session logging.
 //!
-//! Each session writes `events.log`, `manifest.txt`, and any crash minidumps
-//! into a new `<log_root>/<session_id>/` directory. `<log_root>` defaults to
-//! `<install_dir>\neopatch_logs\`, falling back to `%LOCALAPPDATA%\neopatch\logs\`
-//! when the install dir isn't writable (e.g. Program Files).
+//! Each session writes `events.log`, `manifest.txt`, and any crash minidumps into a new
+//! `<log_root>/<session_id>/` directory. Candidate roots are tried in order:
+//! `<install_dir>\neopatch_logs\`, then `%LOCALAPPDATA%\neopatch_logs\`, then
+//! `%TEMP%\neopatch_logs\`. The first fails on read-only installs (e.g. `Program Files`
+//! for a manifested process). The second one fails on UAC-redirected writes into
+//! `%LOCALAPPDATA%\VirtualStore\...`. The third should always be writable.
 
 use crate::config::{CoreConfig, write_manifest_common};
 use std::cell::{Cell, RefCell};
 use std::env::var;
 use std::ffi::c_void;
-use std::fmt::{Debug, Write as _};
-use std::fs::{File, OpenOptions, create_dir_all, read_dir, remove_dir_all};
+use std::fmt::{Debug, Display, Formatter, Result as FmtResult, Write as _};
+use std::fs::{
+    File, OpenOptions, canonicalize, create_dir_all, read_dir, remove_dir, remove_dir_all,
+};
 use std::io::{Result as IoResult, Write};
 use std::mem::zeroed;
 use std::num::NonZero;
@@ -22,7 +26,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 use tracing::field::{Field, Visit};
 use tracing::subscriber::set_global_default;
-use tracing::{Event, Level, Metadata, Subscriber, info};
+use tracing::{Event, Level, Metadata, Subscriber, info, warn};
 use tracing_subscriber::Layer;
 use tracing_subscriber::layer::{Context, SubscriberExt};
 use tracing_subscriber::registry::LookupSpan;
@@ -65,7 +69,7 @@ where
 
     _ = START.set(Instant::now());
 
-    let log_root = pick_log_root(install_dir, core_cfg.log.log_dir.as_deref());
+    let (log_root, decisions) = pick_log_root(install_dir, core_cfg.log.log_dir.as_deref());
     let Some(log_root) = log_root else {
         return false;
     };
@@ -115,6 +119,21 @@ where
         neopatch_version = env!("CARGO_PKG_VERSION"),
         session_dir = %session_dir.display(),
     );
+    for d in decisions {
+        if d.outcome.is_success() {
+            info!(
+                kind = "log_root_decision",
+                candidate = %d.path.display(),
+                outcome = %d.outcome,
+            );
+        } else {
+            warn!(
+                kind = "log_root_decision",
+                candidate = %d.path.display(),
+                outcome = %d.outcome,
+            );
+        }
+    }
     true
 }
 
@@ -151,24 +170,109 @@ pub(crate) fn elapsed_ms() -> u64 {
     })
 }
 
-fn pick_log_root(install_dir: &Path, override_dir: Option<&Path>) -> Option<PathBuf> {
-    if let Some(dir) = override_dir
-        && create_dir_all(dir).is_ok()
-    {
-        return Some(dir.to_path_buf());
+#[derive(Clone, Copy, Debug)]
+enum LogRootOutcome {
+    Chosen,
+    ChosenOverride,
+    OverrideCreateFailed,
+    CreateFailed,
+    CanonicalizeFailed,
+    VirtualStoreRedirected,
+}
+
+impl LogRootOutcome {
+    fn is_success(self) -> bool {
+        matches!(self, Self::Chosen | Self::ChosenOverride)
     }
-    let next_to_install = install_dir.join("neopatch_logs");
-    if create_dir_all(&next_to_install).is_ok() {
-        return Some(next_to_install);
+}
+
+impl Display for LogRootOutcome {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        f.write_str(match self {
+            Self::Chosen => "chosen",
+            Self::ChosenOverride => "chosen_override",
+            Self::OverrideCreateFailed => "override_create_failed",
+            Self::CreateFailed => "create_failed",
+            Self::CanonicalizeFailed => "canonicalize_failed",
+            Self::VirtualStoreRedirected => "virtualstore_redirected",
+        })
     }
-    // Fallback for read-only installs (e.g. Program Files).
-    if let Ok(local) = var("LOCALAPPDATA") {
-        let appdata = PathBuf::from(local).join("neopatch").join("logs");
-        if create_dir_all(&appdata).is_ok() {
-            return Some(appdata);
+}
+
+struct LogRootDecision {
+    path: PathBuf,
+    outcome: LogRootOutcome,
+}
+
+/// Picks a writable log root and returns the trace of candidates considered.
+/// The caller emits one `log_root_decision` event per entry post-subscriber-initialization
+/// so a user can see why their logs landed where they did.
+fn pick_log_root(
+    install_dir: &Path,
+    override_dir: Option<&Path>,
+) -> (Option<PathBuf>, Vec<LogRootDecision>) {
+    let mut trace = Vec::new();
+    if let Some(dir) = override_dir {
+        if create_dir_all(dir).is_ok() {
+            trace.push(LogRootDecision {
+                path: dir.to_path_buf(),
+                outcome: LogRootOutcome::ChosenOverride,
+            });
+            return (Some(dir.to_path_buf()), trace);
+        }
+        trace.push(LogRootDecision {
+            path: dir.to_path_buf(),
+            outcome: LogRootOutcome::OverrideCreateFailed,
+        });
+    }
+    for candidate in [
+        install_dir.join("neopatch_logs"),
+        appdata_subdir("LOCALAPPDATA"),
+        appdata_subdir("TEMP"),
+    ] {
+        // Empty path means the source env var is unset; skip silently.
+        if candidate.as_os_str().is_empty() {
+            continue;
+        }
+        let outcome = try_use_dir(&candidate);
+        trace.push(LogRootDecision {
+            path: candidate.clone(),
+            outcome,
+        });
+        if matches!(outcome, LogRootOutcome::Chosen) {
+            return (Some(candidate), trace);
         }
     }
-    None
+    (None, trace)
+}
+
+/// Returns `<%env_var%>\neopatch_logs\`, or an empty path if `env_var` is unset.
+fn appdata_subdir(env_var: &str) -> PathBuf {
+    var(env_var).map_or_else(
+        |_| PathBuf::new(),
+        |s| PathBuf::from(s).join("neopatch_logs"),
+    )
+}
+
+/// Creates `dir` and verifies it is actually located where the path says.
+fn try_use_dir(dir: &Path) -> LogRootOutcome {
+    if create_dir_all(dir).is_err() {
+        return LogRootOutcome::CreateFailed;
+    }
+    let Ok(canonical) = canonicalize(dir) else {
+        // `remove_dir` only removes empty directories, so the cleanup is
+        // safe even if another process has already populated the leaf.
+        drop(remove_dir(dir));
+        return LogRootOutcome::CanonicalizeFailed;
+    };
+    if canonical
+        .components()
+        .any(|c| c.as_os_str().eq_ignore_ascii_case("VirtualStore"))
+    {
+        drop(remove_dir(dir));
+        return LogRootOutcome::VirtualStoreRedirected;
+    }
+    LogRootOutcome::Chosen
 }
 
 fn make_session_id() -> String {
