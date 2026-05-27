@@ -10,7 +10,6 @@ use crate::vtable::{FnSlot, hook_to_raw, parse_fn_ptr};
 use std::ffi::{CStr, c_char};
 use std::mem::offset_of;
 use std::ptr::{NonNull, read_unaligned, write_unaligned};
-use std::sync::atomic::{Ordering, fence};
 use tracing::{info, warn};
 use windows_sys::Win32::Foundation::HMODULE;
 use windows_sys::Win32::System::Diagnostics::Debug::{
@@ -98,20 +97,38 @@ impl<F: Copy + Send + Sync + 'static> IatHook<F> {
             return false;
         };
         let slot_raw = slot_ptr.as_ptr();
-        // Probe outside the writable window. This is fine because reads don't need
-        // write permission, and an unresolved import (null slot) is detected
-        // without touching protection.
+        // `install` runs single-threaded under the OS loader lock. The first trampoline call
+        // comes from `DllMain` and returns before other threads resume,
+        // so plain reads and writes don't need fences.
         let raw_current: *mut () = unsafe { read_unaligned(slot_raw) };
+        if raw_current == hook_raw && self.slot.try_get().is_some() {
+            info!(kind = "iat_hook", name = self.name, status = "IDEMPOTENT");
+            return true;
+        }
         let Some(original) = parse_fn_ptr::<F>(raw_current) else {
             warn!(kind = "iat_hook", name = self.name, status = "NULL_SLOT");
             return false;
         };
-        self.slot.store(original);
-        // The fence orders `slot.store` before the IAT write so trampolines reading
-        // the new IAT value also see the captured `original` via `FnSlot::try_get`.
+        // The slot can be already populated by a different pointer if third-party code
+        // rebinds the IAT between two installations. In this situation, we refuse installation
+        // to avoid silently bypassing the layered shim on the next trampoline call.
+        if let Some(existing) = self.slot.try_get() {
+            let existing_raw = hook_to_raw(existing);
+            if existing_raw != raw_current {
+                warn!(
+                    kind = "iat_hook",
+                    name = self.name,
+                    status = "RECAPTURE_DIVERGENT",
+                    kept = format_args!("{existing_raw:p}"),
+                    seen = format_args!("{raw_current:p}"),
+                );
+                return false;
+            }
+        } else {
+            self.slot.store(original);
+        }
         let written = unsafe {
             with_writable(slot_raw.cast::<u8>(), size_of::<*mut ()>(), |_| {
-                fence(Ordering::Release);
                 write_unaligned(slot_raw, hook_raw);
             })
         };
@@ -189,9 +206,8 @@ unsafe fn find_iat_slot(module: HMODULE, import_name: &str) -> Option<NonNull<*m
                 return None;
             }
 
-            // `OriginalFirstThunk` holds names and `FirstThunk` holds live pointers.
-            // Some loaders strip `OriginalFirstThunk`, so we fall back to `FirstThunk`.
-            // The `Anonymous` union aliases `OriginalFirstThunk`.
+            // OFT holds name RVAs (`Anonymous` union aliases it). FT holds bound function VAs
+            // after the loader runs. We can't fall back from OFT to FT after binding.
             let oft: u32 = read_unaligned(
                 imp_dir
                     .add(desc_offset + offset_of!(IMAGE_IMPORT_DESCRIPTOR, Anonymous))
@@ -202,7 +218,17 @@ unsafe fn find_iat_slot(module: HMODULE, import_name: &str) -> Option<NonNull<*m
                     .add(desc_offset + offset_of!(IMAGE_IMPORT_DESCRIPTOR, FirstThunk))
                     .cast(),
             );
-            let lookup_rva = if oft != 0 { oft } else { ft };
+            if oft == 0 {
+                info!(
+                    kind = "iat_hook",
+                    name = import_name,
+                    status = "OFT_STRIPPED_SKIP",
+                    dll_rva = format_args!("{dll_name_rva:#x}"),
+                );
+                desc_offset += size_of::<IMAGE_IMPORT_DESCRIPTOR>();
+                continue;
+            }
+            let lookup_rva = oft;
 
             let mut i: usize = 0;
             loop {
