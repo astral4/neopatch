@@ -1,14 +1,29 @@
 //! Patches and hooks for th15.exe v1.00b.
 
+use neopatch_core::d3d9::install_call_site_rewrite;
 use neopatch_core::patches::{Patch, patch_jmp};
-use neopatch_core::screenshot::{log_failed, log_saved, sanitize_filename, save_live};
+use neopatch_core::screenshot::save_screenshot_live;
 use neopatch_core::vtable::parse_fn_ptr;
 use std::arch::naked_asm;
 use std::ffi::c_void;
 use std::ptr::{null_mut, read_unaligned, with_exposed_provenance_mut};
-use tracing::info;
-use windows_sys::Win32::Foundation::{HANDLE, WAIT_TIMEOUT};
+use tracing::{info, warn};
+use windows_sys::Win32::Foundation::{HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT};
 use windows_sys::Win32::System::Threading::WaitForSingleObject;
+
+/// Live `Direct3DCreate9` call site, rewritten to defend against downstream IAT hijacks.
+/// There is a second site at `0x00472e72` that seems to be dead error-recovery code.
+const TH15_DIRECT3DCREATE9_CALL_ADDR: usize = 0x0047_158c;
+const TH15_DIRECT3DCREATE9_CALL_BYTES: [u8; 6] = [0xff, 0x15, 0xb0, 0xe2, 0x4b, 0x00];
+
+pub(crate) unsafe fn install_d3d9_call_site_rewrite() {
+    unsafe {
+        install_call_site_rewrite(
+            TH15_DIRECT3DCREATE9_CALL_ADDR,
+            &TH15_DIRECT3DCREATE9_CALL_BYTES,
+        );
+    }
+}
 
 /// "UpdateFast skip": unconditional `jmp +0x4A` past the game's `Sleep`, spin,
 /// and deadline-advance. Without this, the game's pacer holds the inter-`Present`
@@ -31,6 +46,66 @@ const PATCHES: &[Patch] = &[
     ),
 ];
 
+pub(crate) unsafe fn apply_basic() {
+    unsafe { Patch::apply_all(PATCHES) };
+}
+
+/// Splice over `movss dword [ebp-0x64], xmm3` (5 bytes) inside `fcn.0047fcd0`, the
+/// `AnmManager` modes 5/7 position helper. X and Y correctly accumulate `matrix.t*`;
+/// Z doesn't. `[esi + 0x454]` is `matrix.tz` (scratch matrix at `vm + 0x41c`).
+/// `[ebp - 0x64]` is the Z frame slot that the displaced `movss` writes to.
+const ANM_MODE57_SPLICE: usize = 0x0047_fed0;
+const ANM_MODE57_DISPLACED_LEN: usize = 5;
+static ANM_MODE57_AFTER_SPLICE: usize = ANM_MODE57_SPLICE + ANM_MODE57_DISPLACED_LEN;
+
+#[unsafe(naked)]
+unsafe extern "C" fn anm_mode57_z_trampoline() -> ! {
+    naked_asm!(
+        "addss xmm3, dword ptr [esi + 0x454]",
+        "movss dword ptr [ebp - 0x64], xmm3",
+        "jmp   dword ptr [{slot}]",
+        slot = sym ANM_MODE57_AFTER_SPLICE,
+    )
+}
+
+pub(crate) unsafe fn install_anm_matrix_tz_fix() {
+    unsafe {
+        patch_jmp(
+            ANM_MODE57_SPLICE,
+            &[0xf3, 0x0f, 0x11, 0x5d, 0x9c],
+            anm_mode57_z_trampoline as *mut (),
+            "AnmManager mode 5/7 z + matrix.tz",
+        );
+    }
+}
+
+/// th15 screenshot save (stdcall; filename pointer pushed on the stack).
+/// The game calls this from the render thread before `Present`.
+const SCREENSHOT_SAVE_FN: usize = 0x0044_cbf0;
+const SCREENSHOT_SAVE_FN_PROLOGUE: [u8; 5] = [0x55, 0x8b, 0xec, 0x83, 0xec];
+
+#[unsafe(naked)]
+unsafe extern "C" fn screenshot_trampoline() -> u32 {
+    naked_asm!(
+        "push dword ptr [esp + 4]",
+        "call {save}",
+        "add esp, 4",
+        "ret 4",
+        save = sym save_screenshot_live,
+    );
+}
+
+pub(crate) unsafe fn install_screenshot_hook() {
+    unsafe {
+        patch_jmp(
+            SCREENSHOT_SAVE_FN,
+            &SCREENSHOT_SAVE_FN_PROLOGUE,
+            screenshot_trampoline as *mut (),
+            "screenshot save (fcn.0044cbf0)",
+        );
+    }
+}
+
 /// Fixes an anim loading deadlock.
 ///
 /// Here are the loader-context destructor (`fcn.0044bed0`) and the anim driver (`fcn.004865f0`)
@@ -50,10 +125,6 @@ const FCN_004865F0: usize = 0x0048_65f0;
 const LOADER_CTX_HANDLE_OFFSET: usize = 0x10;
 const PROLOGUE_LEN: usize = 5;
 static FCN_0044BED0_AFTER_PROLOGUE: usize = FCN_0044BED0 + PROLOGUE_LEN;
-
-pub(crate) unsafe fn apply_basic() {
-    unsafe { Patch::apply_all(PATCHES) };
-}
 
 /// Replays the displaced prologue and resumes past the splice.
 /// None of the replayed instructions touch ECX, so `this` survives the trampoline.
@@ -120,78 +191,6 @@ pub(crate) unsafe fn install_destructor_hook() {
             &[0x55, 0x8b, 0xec, 0x6a, 0xff],
             hooked_fcn_0044bed0 as *mut (),
             "fcn.0044bed0 entry-jmp -> hooked_fcn_0044bed0",
-        );
-    }
-}
-
-/// Splice over `movss dword [ebp-0x64], xmm3` (5 bytes) inside `fcn.0047fcd0`, the
-/// `AnmManager` modes 5/7 position helper. X and Y correctly accumulate `matrix.t*`;
-/// Z doesn't. `[esi + 0x454]` is `matrix.tz` (scratch matrix at `vm + 0x41c`).
-/// `[ebp - 0x64]` is the Z frame slot that the displaced `movss` writes to.
-const ANM_MODE57_SPLICE: usize = 0x0047_fed0;
-const ANM_MODE57_DISPLACED_LEN: usize = 5;
-static ANM_MODE57_AFTER_SPLICE: usize = ANM_MODE57_SPLICE + ANM_MODE57_DISPLACED_LEN;
-
-#[unsafe(naked)]
-unsafe extern "C" fn anm_mode57_z_trampoline() -> ! {
-    naked_asm!(
-        "addss xmm3, dword ptr [esi + 0x454]",
-        "movss dword ptr [ebp - 0x64], xmm3",
-        "jmp   dword ptr [{slot}]",
-        slot = sym ANM_MODE57_AFTER_SPLICE,
-    )
-}
-
-pub(crate) unsafe fn install_anm_matrix_tz_fix() {
-    unsafe {
-        patch_jmp(
-            ANM_MODE57_SPLICE,
-            &[0xf3, 0x0f, 0x11, 0x5d, 0x9c],
-            anm_mode57_z_trampoline as *mut (),
-            "AnmManager mode 5/7 z + matrix.tz",
-        );
-    }
-}
-
-/// th15 screenshot save. stdcall; filename pointer pushed on the stack.
-const SCREENSHOT_SAVE_FN: usize = 0x0044_cbf0;
-const SCREENSHOT_SAVE_FN_PROLOGUE: [u8; 5] = [0x55, 0x8b, 0xec, 0x83, 0xec];
-
-#[unsafe(naked)]
-unsafe extern "C" fn screenshot_trampoline() -> u32 {
-    naked_asm!(
-        "push dword ptr [esp + 4]",
-        "call {save}",
-        "add esp, 4",
-        "ret 4",
-        save = sym save_screenshot,
-    );
-}
-
-unsafe extern "C" fn save_screenshot(filename_ptr: *const u8) -> u32 {
-    let Some(path) = sanitize_filename(filename_ptr) else {
-        return 1;
-    };
-    let bytes = path.as_slice();
-    match save_live(bytes) {
-        Ok((w, h)) => {
-            log_saved(bytes, w, h, "live");
-            0
-        }
-        Err(e) => {
-            log_failed(bytes, &e);
-            1
-        }
-    }
-}
-
-pub(crate) unsafe fn install_screenshot_hook() {
-    unsafe {
-        patch_jmp(
-            SCREENSHOT_SAVE_FN,
-            &SCREENSHOT_SAVE_FN_PROLOGUE,
-            screenshot_trampoline as *mut (),
-            "screenshot save (fcn.0044cbf0)",
         );
     }
 }

@@ -229,13 +229,16 @@ pub unsafe fn install(host: HMODULE) {
     }
 }
 
-/// Rewrites a 6-byte `FF 15 disp32` indirect-call site to a 5-byte direct call
-/// to our `Direct3DCreate9` hook plus a trailing NOP.
+/// Rewrites a `Direct3DCreate9` call site to a 5-byte direct call to our hook.
+/// Accepts both 5-byte `E8 disp32` direct-call sites (TH10/TH11/TH12, where the original
+/// call goes through a thunk) and 6-byte `FF 15 disp32` indirect-call sites (TH13/TH15,
+/// where the original call dispatches through the IAT). The replacement is always a 5-byte
+/// `E8 disp32`; the 6-byte variant gets a trailing NOP. This bypasses any downstream IAT
+/// hook (e.g. thcrap) that would otherwise intercept `Direct3DCreate9` from us.
 ///
 /// # Safety
-/// `addr` must be a writable code address holding a 6-byte indirect call whose
-/// bytes equal `expected`.
-pub unsafe fn install_call_site_rewrite(addr: usize, expected: &[u8; 6]) {
+/// `addr` must be a writable code address holding a call whose bytes equal `expected`.
+pub unsafe fn install_call_site_rewrite<const N: usize>(addr: usize, expected: &[u8; N]) {
     unsafe {
         patch_call(
             addr,

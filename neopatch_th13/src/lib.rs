@@ -28,11 +28,6 @@ use windows_sys::Win32::System::SystemServices::DLL_PROCESS_ATTACH;
 // The render resolution is always 640x480.
 const TH13_FRAMEBUFFER_SIZE: (u32, u32) = (640, 480);
 
-/// Live `Direct3DCreate9` call site, rewritten to defend against downstream IAT hijacks.
-/// There is a second site at `0x0045da12` that seems to be dead error-recovery code.
-const TH13_DIRECT3DCREATE9_CALL_ADDR: usize = 0x0045_c42f;
-const TH13_DIRECT3DCREATE9_CALL_BYTES: [u8; 6] = [0xff, 0x15, 0x98, 0x22, 0x4a, 0x00];
-
 dinput8_export!();
 
 #[unsafe(no_mangle)]
@@ -118,13 +113,10 @@ unsafe fn install_hooks() {
         }));
 
         d3d9::install(host_exe);
-        // We rewrite a live `Direct3DCreate9` call site in th13
-        // so a downstream IAT hijack can't reroute the main call away from us.
-        d3d9::install_call_site_rewrite(
-            TH13_DIRECT3DCREATE9_CALL_ADDR,
-            &TH13_DIRECT3DCREATE9_CALL_BYTES,
-        );
+        patches::install_d3d9_call_site_rewrite();
 
+        // th13's input writer at `fcn.00471620` does not read `DIJOYSTATE` offsets
+        // 0x44-0x50 (`rgdwPOV[]`), so the default of `dpad = true` is safe.
         if core_cfg.input.dpad {
             input::install();
         }

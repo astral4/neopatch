@@ -1,8 +1,23 @@
 //! Patches and hooks for th11.exe v1.00a.
 
+use neopatch_core::d3d9::install_call_site_rewrite;
 use neopatch_core::patches::{Patch, patch_jmp};
-use neopatch_core::screenshot::{log_failed, log_saved, sanitize_filename, save_live};
+use neopatch_core::screenshot::save_screenshot_live;
 use std::arch::naked_asm;
+
+/// Live `Direct3DCreate9` call site, rewritten to defend against downstream IAT hijacks.
+/// There is a second site at `0x00446ab2` that seems to be dead error-recovery code.
+const TH11_DIRECT3DCREATE9_CALL_ADDR: usize = 0x0044_570e;
+const TH11_DIRECT3DCREATE9_CALL_BYTES: [u8; 5] = [0xe8, 0xa3, 0xa2, 0x01, 0x00];
+
+pub(crate) unsafe fn install_d3d9_call_site_rewrite() {
+    unsafe {
+        install_call_site_rewrite(
+            TH11_DIRECT3DCREATE9_CALL_ADDR,
+            &TH11_DIRECT3DCREATE9_CALL_BYTES,
+        );
+    }
+}
 
 /// "UpdateFast skip": flips `jne 0x44645e` to `jmp +0x43`, landing past
 /// the `Sleep(1)` and the FPU catch-up loop in `CWindowManager::UpdateFast`.
@@ -38,10 +53,6 @@ unsafe extern "C" fn anm_mode57_z_trampoline() -> ! {
     )
 }
 
-pub(crate) unsafe fn apply_basic() {
-    unsafe { Patch::apply_all(PATCHES) };
-}
-
 pub(crate) unsafe fn install_anm_matrix_tz_fix() {
     unsafe {
         patch_jmp(
@@ -53,7 +64,8 @@ pub(crate) unsafe fn install_anm_matrix_tz_fix() {
     }
 }
 
-/// th11 screenshot save. Filename pointer in EAX.
+/// th11 screenshot save (eax-convention; filename pointer in EAX).
+/// The game calls this from the render thread before `Present`.
 const SCREENSHOT_SAVE_FN: usize = 0x0042_9ca0;
 const SCREENSHOT_SAVE_FN_PROLOGUE: [u8; 5] = [0x83, 0xec, 0x10, 0x83, 0x3d];
 
@@ -64,25 +76,8 @@ unsafe extern "C" fn screenshot_trampoline() -> u32 {
         "call {save}",
         "add esp, 4",
         "ret",
-        save = sym save_screenshot,
+        save = sym save_screenshot_live,
     );
-}
-
-unsafe extern "C" fn save_screenshot(filename_ptr: *const u8) -> u32 {
-    let Some(path) = sanitize_filename(filename_ptr) else {
-        return 1;
-    };
-    let bytes = path.as_slice();
-    match save_live(bytes) {
-        Ok((w, h)) => {
-            log_saved(bytes, w, h, "live");
-            0
-        }
-        Err(e) => {
-            log_failed(bytes, &e);
-            1
-        }
-    }
 }
 
 pub(crate) unsafe fn install_screenshot_hook() {

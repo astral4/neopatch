@@ -27,11 +27,6 @@ use windows_sys::Win32::Foundation::{HINSTANCE, HMODULE};
 use windows_sys::Win32::System::LibraryLoader::{DisableThreadLibraryCalls, GetModuleHandleW};
 use windows_sys::Win32::System::SystemServices::DLL_PROCESS_ATTACH;
 
-/// Live `Direct3DCreate9` call site, rewritten to defend against downstream IAT hijacks.
-/// There is a second site at `0x00472e72` that seems to be dead error-recovery code.
-const TH15_DIRECT3DCREATE9_CALL_ADDR: usize = 0x0047_158c;
-const TH15_DIRECT3DCREATE9_CALL_BYTES: [u8; 6] = [0xff, 0x15, 0xb0, 0xe2, 0x4b, 0x00];
-
 dinput8_export!();
 
 #[unsafe(no_mangle)]
@@ -117,19 +112,16 @@ unsafe fn install_hooks() {
         }));
 
         d3d9::install(host_exe);
-        // We rewrite a live `Direct3DCreate9` call site in th15
-        // so a downstream IAT hijack can't reroute the main call away from us.
-        d3d9::install_call_site_rewrite(
-            TH15_DIRECT3DCREATE9_CALL_ADDR,
-            &TH15_DIRECT3DCREATE9_CALL_BYTES,
-        );
+        patches::install_d3d9_call_site_rewrite();
 
+        // th15's input writer at `fcn.00401f50` does not read `DIJOYSTATE` offsets
+        // 0x44-0x50 (`rgdwPOV[]`), so the default of `dpad = true` is safe.
         if core_cfg.input.dpad {
             input::install();
         }
         patches::apply_basic();
-        patches::install_destructor_hook();
         patches::install_anm_matrix_tz_fix();
         patches::install_screenshot_hook();
+        patches::install_destructor_hook();
     }
 }
