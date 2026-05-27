@@ -1,6 +1,6 @@
 //! th15-specific configuration.
 
-use neopatch_core::config::{self, CoreConfig, DisplayCfg};
+use neopatch_core::config::{self, CoreConfig};
 use std::fmt::{Display, Formatter, Result as FmtResult};
 use std::io::Write;
 use std::sync::OnceLock;
@@ -67,30 +67,19 @@ fn parse_resolution(v: &str) -> Option<Resolution> {
 /// Parses INI text into a `(Th15Config, CoreConfig)` pair,
 /// with defaults for any keys/sections the text omits.
 pub(crate) fn parse(text: &str) -> (Th15Config, CoreConfig) {
-    let mut th15 = Th15Config::default();
-    let mut core = CoreConfig::default();
-    config::for_each_setting(text, |section, k, v| {
-        match section.to_ascii_lowercase().as_str() {
-            "display" => apply_display(&mut core.display, &mut th15.resolution, k, v),
-            "window" => config::apply_window(&mut core.window, k, v),
-            "framerate" => config::apply_framerate(&mut core.framerate, k, v),
-            "input" => config::apply_input(&mut core.input, k, v),
-            "process" => config::apply_process(&mut core.process, k, v),
-            "log" => config::apply_log(&mut core.log, k, v),
-            _ => {}
-        }
-    });
-    (th15, core)
+    (parse_th15_only(text), config::parse_core_only(text))
 }
 
-fn apply_display(disp: &mut DisplayCfg, resolution: &mut Resolution, k: &str, v: &str) {
-    if k.eq_ignore_ascii_case("resolution") {
-        if let Some(r) = parse_resolution(v) {
-            *resolution = r;
+fn parse_th15_only(text: &str) -> Th15Config {
+    let mut cfg = Th15Config::default();
+    config::for_each_setting(text, |section, k, v| {
+        if section.eq_ignore_ascii_case("display") && k.eq_ignore_ascii_case("resolution") {
+            if let Some(r) = parse_resolution(v) {
+                cfg.resolution = r;
+            }
         }
-    } else {
-        config::apply_display(disp, k, v);
-    }
+    });
+    cfg
 }
 
 /// Writes th15-specific manifest lines that aren't already covered

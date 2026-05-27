@@ -210,9 +210,8 @@ impl Display for PriorityClass {
 }
 
 // The `apply_*` functions below apply a key/value pair from a specific section to `cfg`.
-// Unknown keys are silently ignored. Game-specific parsers should handle their own keys
-// before delegating here.
-pub fn apply_display(cfg: &mut DisplayCfg, k: &str, v: &str) {
+// Unknown keys are silently ignored.
+fn apply_display(cfg: &mut DisplayCfg, k: &str, v: &str) {
     match k.to_ascii_lowercase().as_str() {
         "mode" => {
             if let Some(m) = parse_display_mode(v) {
@@ -228,7 +227,7 @@ pub fn apply_display(cfg: &mut DisplayCfg, k: &str, v: &str) {
     }
 }
 
-pub fn apply_window(cfg: &mut WindowCfg, k: &str, v: &str) {
+fn apply_window(cfg: &mut WindowCfg, k: &str, v: &str) {
     match k.to_ascii_lowercase().as_str() {
         "x" => cfg.x = parse_i32(v).unwrap_or(0),
         "y" => cfg.y = parse_i32(v).unwrap_or(0),
@@ -240,7 +239,7 @@ pub fn apply_window(cfg: &mut WindowCfg, k: &str, v: &str) {
     }
 }
 
-pub fn apply_framerate(cfg: &mut FramerateCfg, k: &str, v: &str) {
+fn apply_framerate(cfg: &mut FramerateCfg, k: &str, v: &str) {
     match k.to_ascii_lowercase().as_str() {
         "game_fps" => cfg.game_fps = parse_u32(v).unwrap_or(DEFAULT_GAME_FPS),
         "replay_skip_fps" => {
@@ -253,7 +252,7 @@ pub fn apply_framerate(cfg: &mut FramerateCfg, k: &str, v: &str) {
     }
 }
 
-pub fn apply_input(cfg: &mut InputCfg, k: &str, v: &str) {
+fn apply_input(cfg: &mut InputCfg, k: &str, v: &str) {
     if k.eq_ignore_ascii_case("dpad")
         && let Some(b) = parse_bool(v)
     {
@@ -261,7 +260,7 @@ pub fn apply_input(cfg: &mut InputCfg, k: &str, v: &str) {
     }
 }
 
-pub fn apply_process(cfg: &mut ProcessCfg, k: &str, v: &str) {
+fn apply_process(cfg: &mut ProcessCfg, k: &str, v: &str) {
     match k.to_ascii_lowercase().as_str() {
         "priority" => {
             if let Some(p) = parse_priority_class(v) {
@@ -275,7 +274,7 @@ pub fn apply_process(cfg: &mut ProcessCfg, k: &str, v: &str) {
     }
 }
 
-pub fn apply_log(cfg: &mut LogCfg, k: &str, v: &str) {
+fn apply_log(cfg: &mut LogCfg, k: &str, v: &str) {
     match k.to_ascii_lowercase().as_str() {
         "level" => {
             if let Some(level) = parse_level(v) {
@@ -316,8 +315,8 @@ pub(crate) fn parse_level(v: &str) -> Option<LevelFilter> {
 /// `[name]` header (empty before the first), and values are unquoted.
 /// Unknown sections and malformed lines are silently skipped.
 ///
-/// Game-specific parsing runners should pass each `(section, key, value)`
-/// to a match-on-section dispatcher that delegates to the appropriate `apply_*` helper.
+/// Game-specific parsers compose with [`parse_core_only`] by walking `for_each_setting`
+/// for the game's own keys and calling `parse_core_only` separately for the core sections.
 pub fn for_each_setting(text: &str, mut f: impl FnMut(&str, &str, &str)) {
     let mut section = "";
     for raw in text.lines() {
