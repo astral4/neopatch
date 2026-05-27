@@ -30,10 +30,29 @@ pub(crate) unsafe fn install_d3d9_call_site_rewrite() {
 /// Without this, the game's internal speed control fights our pacer's replay-speed modes.
 const PATCHES: &[Patch] = &[
     Patch::new(0x0044_6454, &[0x75, 0x08], &[0xeb, 0x43], "UpdateFast skip"),
-    Patch::new(0x0044_5877, &[0x74], &[0xeb], "fast input latency #1"),
-    Patch::new(0x0044_588b, &[0x75], &[0xeb], "fast input latency #2"),
-    Patch::new(0x0043_6d5f, &[0x74], &[0xeb], "replay speed control skip"),
+    Patch::new(
+        0x0044_5877,
+        &[0x74, 0x0c],
+        &[0xeb, 0x0c],
+        "fast input latency #1",
+    ),
+    Patch::new(
+        0x0044_588b,
+        &[0x75, 0x15],
+        &[0xeb, 0x15],
+        "fast input latency #2",
+    ),
+    Patch::new(
+        0x0043_6d5f,
+        &[0x74, 0x14],
+        &[0xeb, 0x14],
+        "replay speed control skip",
+    ),
 ];
+
+pub(crate) unsafe fn apply_basic() {
+    unsafe { Patch::apply_all(PATCHES) };
+}
 
 /// Splice over `mov ebx, [ebx + 0x404]` (6 bytes) inside `fcn.00450e20`, the `AnmManager`
 /// modes 5/7 position helper. X and Y correctly accumulate `matrix.t*`; Z doesn't.

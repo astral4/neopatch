@@ -12,30 +12,16 @@ use tracing::{info, warn};
 use windows_sys::Win32::Foundation::HANDLE;
 use windows_sys::Win32::System::Threading::{INFINITE, WaitForSingleObject};
 
-/// Splice over `mov ebx, [ebx + 0x570]` (6 bytes) inside `fcn.00468e50`, the `AnmManager`
-/// modes 5/7 position helper. X and Y correctly accumulate `matrix.t*`; Z doesn't.
-/// `[ebp - 0x5c]` is `matrix.tz`. The displaced `mov` loads the parent `AnmVm` pointer
-/// and is replayed so the parent-recursion path runs unchanged.
-const ANM_MODE57_SPLICE: usize = 0x0046_8fc9;
-const ANM_MODE57_DISPLACED_LEN: usize = 6;
-static ANM_MODE57_AFTER_SPLICE: usize = ANM_MODE57_SPLICE + ANM_MODE57_DISPLACED_LEN;
-#[unsafe(naked)]
-unsafe extern "C" fn anm_mode57_z_trampoline() -> ! {
-    naked_asm!(
-        "fadd dword ptr [ebp - 0x5c]",
-        "mov  ebx, [ebx + 0x570]",
-        "jmp  dword ptr [{slot}]",
-        slot = sym ANM_MODE57_AFTER_SPLICE,
-    )
-}
+/// Live `Direct3DCreate9` call site, rewritten to defend against downstream IAT hijacks.
+/// There is a second site at `0x0045da12` that seems to be dead error-recovery code.
+const TH13_DIRECT3DCREATE9_CALL_ADDR: usize = 0x0045_c42f;
+const TH13_DIRECT3DCREATE9_CALL_BYTES: [u8; 6] = [0xff, 0x15, 0x98, 0x22, 0x4a, 0x00];
 
-pub(crate) unsafe fn install_anm_matrix_tz_fix() {
+pub(crate) unsafe fn install_d3d9_call_site_rewrite() {
     unsafe {
-        patch_jmp(
-            ANM_MODE57_SPLICE,
-            &[0x8b, 0x9b, 0x70, 0x05, 0x00, 0x00],
-            anm_mode57_z_trampoline as *mut (),
-            "AnmManager mode 5/7 z + matrix.tz",
+        install_call_site_rewrite(
+            TH13_DIRECT3DCREATE9_CALL_ADDR,
+            &TH13_DIRECT3DCREATE9_CALL_BYTES,
         );
     }
 }

@@ -36,8 +36,18 @@ pub(crate) unsafe fn install_d3d9_call_site_rewrite() {
 /// so it doesn't fight our pacer.
 const PATCHES: &[Patch] = &[
     Patch::new(0x0047_27de, &[0x72, 0x08], &[0xeb, 0x4a], "UpdateFast skip"),
-    Patch::new(0x0047_1a86, &[0x74], &[0xeb], "fast input latency #1"),
-    Patch::new(0x0047_1a9b, &[0x75], &[0xeb], "fast input latency #2"),
+    Patch::new(
+        0x0047_1a86,
+        &[0x74, 0x0c],
+        &[0xeb, 0x0c],
+        "fast input latency #1",
+    ),
+    Patch::new(
+        0x0047_1a9b,
+        &[0x75, 0x15],
+        &[0xeb, 0x15],
+        "fast input latency #2",
+    ),
     Patch::new(
         0x0045_ced2,
         &[0x75, 0x04],
