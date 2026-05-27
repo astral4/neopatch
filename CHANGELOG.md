@@ -4,6 +4,8 @@ All notable changes to neopatch will be documented in this file.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-05-27
+
 ### Added
 
 - Support for Touhou 13 ~ Ten Desires (`th13.exe v1.00c`).
