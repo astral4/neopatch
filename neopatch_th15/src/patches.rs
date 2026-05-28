@@ -117,20 +117,32 @@ pub(crate) unsafe fn install_screenshot_hook() {
     }
 }
 
-/// Fixes an anim loading deadlock.
+/// Fixes an anim loader deadlock at scene transition.
 ///
-/// Here are the loader-context destructor (`fcn.0044bed0`) and the anim driver (`fcn.004865f0`)
-/// it must pump while waiting. The destructor joins a worker spinning in `preloadAnim`
-/// on `[anim+0x128]`; that flag is only cleared by the anim driver, reachable only from
-/// main's per-frame state-tick. Once the destructor takes main, the state-tick stops,
-/// the flag never clears, and `WaitForSingleObject` waits forever. We pump the anim driver
-/// inline while waiting. We hook the function entrypoint so all call sites are covered.
+/// `fcn.0044bed0` is the destructor of `AsciiInf`, ZUN's ASCII/text renderer
+/// (`sprtlib.h:750`). It owns a worker thread that preloads font and global UI anims
+/// (`ascii*.anm`, `sig.anm`, `text.anm`) in the background. The destructor must join
+/// that worker before freeing the buffers it's writing into.
 ///
-/// `fcn.004865f0`: cdecl, no args; iterates the 30-slot anim table and runs one
-/// `fcn.00486110` work-step on the first slot needing it. Returns non-zero on work.
+/// The worker loads each anim through a `preloadAnim` function, which sets a "loading" flag
+/// at `[anim+0x128]` and spins waiting for it to clear. The main thread's per-frame loop
+/// (peek-message -> state-tick -> render -> present) advances the flag by calling the
+/// anim driver (`fcn.004865f0`) during the state-tick. The driver processes one work-step
+/// per call and eventually clears the flag, freeing the worker.
 ///
-/// `[this + 0x10]`: loader thread `HANDLE`, written by `_beginthreadex` in `fcn.0044be50`.
-/// `fcn.00403f30(loader_ctx + 0xc)` reads `[+4]` of that pointer.
+/// When the destructor runs on main, the per-frame loop is paused. The driver stops running,
+/// the flag never advances, the worker never exits, and the destructor's join helper
+/// (`fcn.00403f30`, which polls the handle with `WaitForSingleObject(handle, 200ms)`
+/// and `Sleep(1)` until signaled) spins forever. Deadlock!
+///
+/// We fix this by pumping the driver inline from within the destructor,
+/// substituting for the per-frame tick. We hook at the destructor's entrypoint
+/// so every call site is covered.
+///
+/// `fcn.004865f0`: cdecl, no args; iterates the 30-slot anim table
+/// and runs one `fcn.00486110` work-step on the first slot needing it.
+///
+/// `[this + 0x10]`: worker thread `HANDLE`, written by `_beginthreadex` in `fcn.0044be50`.
 const FCN_0044BED0: usize = 0x0044_bed0;
 const FCN_004865F0: usize = 0x0048_65f0;
 const LOADER_CTX_HANDLE_OFFSET: usize = 0x10;
@@ -180,8 +192,8 @@ unsafe extern "thiscall" fn hooked_fcn_0044bed0(this: *mut c_void) -> i32 {
                         pump_iters = pump_iters.saturating_add(1);
                     }
                     other => {
-                        // The trampoline's `INFINITE` wait will also fail,
-                        // so we don't try to pump while spinning.
+                        // The original join sees the same result and falls through to
+                        // `CloseHandle`, so pumping can't help.
                         warn!(
                             kind = "destructor_pump_aborted",
                             wait_result = format_args!("{other:#x}"),
