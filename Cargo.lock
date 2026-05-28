@@ -30,7 +30,6 @@ version = "0.6.0"
 dependencies = [
  "neopatch_core",
  "tracing",
- "windows",
  "windows-sys",
 ]
 
@@ -40,7 +39,6 @@ version = "0.6.0"
 dependencies = [
  "neopatch_core",
  "tracing",
- "windows",
  "windows-sys",
 ]
 
@@ -50,7 +48,6 @@ version = "0.6.0"
 dependencies = [
  "neopatch_core",
  "tracing",
- "windows",
  "windows-sys",
 ]
 
@@ -60,7 +57,6 @@ version = "0.6.0"
 dependencies = [
  "neopatch_core",
  "tracing",
- "windows",
  "windows-sys",
 ]
 
@@ -70,7 +66,6 @@ version = "0.6.0"
 dependencies = [
  "neopatch_core",
  "tracing",
- "windows",
  "windows-sys",
 ]
 

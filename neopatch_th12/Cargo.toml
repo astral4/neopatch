@@ -19,5 +19,4 @@ workspace = true
 [dependencies]
 neopatch_core = { path = "../neopatch_core" }
 tracing = { workspace = true }
-windows = { workspace = true }
 windows-sys = { workspace = true }
