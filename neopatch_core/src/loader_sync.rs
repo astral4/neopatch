@@ -36,7 +36,7 @@ pub const LOADER_SIGNAL_ABORT: u32 = 2;
 /// Used to detect installation refusals which leave the original opcode in place.
 const HOOK2_INSTALLED_OPCODE: u8 = 0xe9;
 
-/// Per-game parameters for [`install`]. Addresses are absolute in the host executable.
+/// Per-game configuration for [`install`]. Addresses are absolute in the host executable.
 pub struct Config {
     /// Address of the `dword` flag polled by the game's loader threads.
     pub signal_addr: usize,
