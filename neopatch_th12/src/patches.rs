@@ -1,10 +1,12 @@
 //! Patches and hooks for th12.exe v1.00b.
 
 use neopatch_core::d3d9::install_call_site_rewrite;
+use neopatch_core::destructor_pump::{self, Hook};
 use neopatch_core::loader_sync::{self, LOADER_SIGNAL_ABORT};
 use neopatch_core::patches::{Patch, patch_jmp};
 use neopatch_core::screenshot::save_screenshot_live;
 use std::arch::naked_asm;
+use std::ffi::c_void;
 
 /// Live `Direct3DCreate9` call site, rewritten to defend against downstream IAT hijacks.
 /// There is a second site at `0x00450a42` that seems to be dead error-recovery code.
@@ -81,6 +83,49 @@ pub(crate) unsafe fn install_anm_matrix_tz_fix() {
             anm_mode57_z_trampoline as *mut (),
             "AnmManager mode 5/7 z + matrix.tz",
         );
+    }
+}
+
+/// AsciiInf destructor pump for th12. See `core::destructor_pump` for more details.
+///
+/// Destructor: `fcn.0042ec00` (`.\src\game\ascii.cpp:79`). Worker thread: `fcn.0042e9b0`,
+/// spawned by `AsciiInf::start` (`fcn.0042eb10`). The worker preloads `.anm` assets into
+/// a 32-slot table at `[[0x4ce8cc] + 0x4b50c0]`. Spin flag: `[anim+0x128]`.
+/// Anim driver: `fcn.004603d0`. Join helper: `fcn.00464c40`. Handle slot: `[this+0x14]`.
+///
+/// The destructor uses `__stdcall` with FPO: instead of `push ebp; mov ebp, esp`,
+/// it does 9 raw pushes including `push -1; push 0x497336` for the SEH frame, then reads
+/// `this` from `[esp+0x28]` into EBP (repurposed as a scratch register).
+/// The trampoline replays the two pushes so the SEH frame is in place
+/// before the destructor body resumes at byte 7.
+const FCN_0042EC00: usize = 0x0042_ec00;
+const DTOR_SEH_HANDLER: u32 = 0x0049_7336;
+static FCN_0042EC00_AFTER_PROLOGUE: usize = FCN_0042EC00 + 7;
+
+/// Replays the displaced 7-byte prologue (`push -1; push imm32`) and resumes past the splice.
+#[unsafe(naked)]
+unsafe extern "stdcall" fn fcn_0042ec00_trampoline(_this: *mut c_void) -> i32 {
+    naked_asm!(
+        "push -1",
+        "push {seh}",
+        "jmp dword ptr [{slot}]",
+        seh = const DTOR_SEH_HANDLER,
+        slot = sym FCN_0042EC00_AFTER_PROLOGUE,
+    )
+}
+
+pub(crate) unsafe fn install_destructor_hook() {
+    unsafe {
+        destructor_pump::install(destructor_pump::Config {
+            dtor_addr: FCN_0042EC00,
+            hook: Hook::FpoStdcall {
+                trampoline: fcn_0042ec00_trampoline,
+                seh_handler: DTOR_SEH_HANDLER,
+            },
+            anim_driver_addr: 0x0046_03d0,
+            loader_handle_offset: 0x14,
+            dtor_label: "fcn.0042ec00",
+        });
     }
 }
 

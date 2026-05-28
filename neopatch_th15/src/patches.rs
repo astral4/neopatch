@@ -1,16 +1,12 @@
 //! Patches and hooks for th15.exe v1.00b.
 
 use neopatch_core::d3d9::install_call_site_rewrite;
+use neopatch_core::destructor_pump::{self, Hook};
 use neopatch_core::loader_sync::{self, LOADER_SIGNAL_ABORT};
 use neopatch_core::patches::{Patch, patch_jmp};
 use neopatch_core::screenshot::save_screenshot_live;
-use neopatch_core::vtable::parse_fn_ptr;
 use std::arch::naked_asm;
 use std::ffi::c_void;
-use std::ptr::{null_mut, read_unaligned, with_exposed_provenance_mut};
-use tracing::{info, warn};
-use windows_sys::Win32::Foundation::{HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT};
-use windows_sys::Win32::System::Threading::WaitForSingleObject;
 
 /// Live `Direct3DCreate9` call site, rewritten to defend against downstream IAT hijacks.
 /// There is a second site at `0x00472e72` that seems to be dead error-recovery code.
@@ -117,39 +113,19 @@ pub(crate) unsafe fn install_screenshot_hook() {
     }
 }
 
-/// Fixes an anim loader deadlock at scene transition.
+/// AsciiInf destructor pump for th15. See `core::destructor_pump` for more details.
 ///
-/// `fcn.0044bed0` is the destructor of `AsciiInf`, ZUN's ASCII/text renderer
-/// (`sprtlib.h:750`). It owns a worker thread that preloads font and global UI anims
-/// (`ascii*.anm`, `sig.anm`, `text.anm`) in the background. The destructor must join
-/// that worker before freeing the buffers it's writing into.
-///
-/// The worker loads each anim through a `preloadAnim` function, which sets a "loading" flag
-/// at `[anim+0x128]` and spins waiting for it to clear. The main thread's per-frame loop
-/// (peek-message -> state-tick -> render -> present) advances the flag by calling the
-/// anim driver (`fcn.004865f0`) during the state-tick. The driver processes one work-step
-/// per call and eventually clears the flag, freeing the worker.
-///
-/// When the destructor runs on main, the per-frame loop is paused. The driver stops running,
-/// the flag never advances, the worker never exits, and the destructor's join helper
-/// (`fcn.00403f30`, which polls the handle with `WaitForSingleObject(handle, 200ms)`
-/// and `Sleep(1)` until signaled) spins forever. Deadlock!
-///
-/// We fix this by pumping the driver inline from within the destructor,
-/// substituting for the per-frame tick. We hook at the destructor's entrypoint
-/// so every call site is covered.
-///
-/// `fcn.004865f0`: cdecl, no args; iterates the 30-slot anim table
-/// and runs one `fcn.00486110` work-step on the first slot needing it.
-///
-/// `[this + 0x10]`: worker thread `HANDLE`, written by `_beginthreadex` in `fcn.0044be50`.
+/// Destructor: `fcn.0044bed0` (`sprtlib.h:750`).
+/// Worker thread: `fcn.0044bd00`, spawned by `AsciiInf::start` (`fcn.0044be50`).
+/// The worker preloads `.anm` assets (including one of `ascii.anm` / `ascii_960.anm` /
+/// `ascii_1280.anm`, chosen by `[0x4e79c3] % 3`, the display-mode byte) into a 30-slot
+/// table at `[DAT_00503c18 + 0x187f4d8]`.
+/// Spin flag: `[anim+0x12c]`. Anim driver: `fcn.004865f0`. Join helper: `fcn.00403f30`.
+/// Handle slot: `[this+0x10]`.
 const FCN_0044BED0: usize = 0x0044_bed0;
-const FCN_004865F0: usize = 0x0048_65f0;
-const LOADER_CTX_HANDLE_OFFSET: usize = 0x10;
-const PROLOGUE_LEN: usize = 5;
-static FCN_0044BED0_AFTER_PROLOGUE: usize = FCN_0044BED0 + PROLOGUE_LEN;
+static FCN_0044BED0_AFTER_PROLOGUE: usize = FCN_0044BED0 + 5;
 
-/// Replays the displaced prologue and resumes past the splice.
+/// Replays the displaced 5-byte prologue (`push ebp; mov ebp, esp; push -1`) and resumes past the splice.
 /// None of the replayed instructions touch ECX, so `this` survives the trampoline.
 #[unsafe(naked)]
 unsafe extern "thiscall" fn fcn_0044bed0_trampoline(_this: *mut c_void) -> i32 {
@@ -162,75 +138,15 @@ unsafe extern "thiscall" fn fcn_0044bed0_trampoline(_this: *mut c_void) -> i32 {
     )
 }
 
-unsafe extern "thiscall" fn hooked_fcn_0044bed0(this: *mut c_void) -> i32 {
-    unsafe {
-        let loader_handle: HANDLE = if this.is_null() {
-            null_mut()
-        } else {
-            read_unaligned(this.cast::<u8>().add(LOADER_CTX_HANDLE_OFFSET).cast())
-        };
-
-        info!(
-            kind = "destructor_entered",
-            this = format_args!("{this:p}"),
-            loader_handle = format_args!("{loader_handle:p}"),
-        );
-
-        // We pump the anim driver from main until the loader exits. We use an initial
-        // probe with `timeout = 0` to skip the pump entirely in the no-bug case.
-        if !loader_handle.is_null() {
-            let driver: unsafe extern "C" fn() -> i32 =
-                parse_fn_ptr(with_exposed_provenance_mut(FCN_004865F0))
-                    .expect("FCN_004865F0 is a non-zero constant");
-            let mut pump_iters: u32 = 0;
-            let drained = loop {
-                let timeout_ms = u32::from(pump_iters != 0);
-                match WaitForSingleObject(loader_handle, timeout_ms) {
-                    WAIT_OBJECT_0 => break true,
-                    WAIT_TIMEOUT => {
-                        driver();
-                        pump_iters = pump_iters.saturating_add(1);
-                    }
-                    other => {
-                        // The original join sees the same result and falls through to
-                        // `CloseHandle`, so pumping can't help.
-                        warn!(
-                            kind = "destructor_pump_aborted",
-                            wait_result = format_args!("{other:#x}"),
-                            pump_iters,
-                        );
-                        break false;
-                    }
-                }
-            };
-            if drained {
-                info!(
-                    kind = "destructor_pump_drained",
-                    this = format_args!("{this:p}"),
-                    pump_iters,
-                );
-            }
-        }
-
-        let result = fcn_0044bed0_trampoline(this);
-        info!(
-            kind = "destructor_returned",
-            this = format_args!("{this:p}"),
-            result,
-        );
-        result
-    }
-}
-
 pub(crate) unsafe fn install_destructor_hook() {
     unsafe {
-        patch_jmp(
-            FCN_0044BED0,
-            // Original prologue: `push ebp; mov ebp, esp; push -1`.
-            &[0x55, 0x8b, 0xec, 0x6a, 0xff],
-            hooked_fcn_0044bed0 as *mut (),
-            "fcn.0044bed0 entry-jmp -> hooked_fcn_0044bed0",
-        );
+        destructor_pump::install(destructor_pump::Config {
+            dtor_addr: FCN_0044BED0,
+            hook: Hook::EbpFrameThiscall(fcn_0044bed0_trampoline),
+            anim_driver_addr: 0x0048_65f0,
+            loader_handle_offset: 0x10,
+            dtor_label: "fcn.0044bed0",
+        });
     }
 }
 
@@ -238,21 +154,17 @@ pub(crate) unsafe fn install_destructor_hook() {
 ///
 /// `LOADER_SIGNAL` semantics for th15: non-zero releases the post-load waits
 /// in BGM and I/O thread procs. `2` (written by `io_error_abort_trampoline`)
-/// is the only escape from the inner `cmp [signal], 2` exit
-/// at the top of the I/O loop at `0x475970`.
-///
-/// The per-frame `UpdateFast` (`fcn.00472790`) uses `__thiscall`.
-/// `this` is passed in ECX and the call site at `0x471ab7` pushes nothing.
+/// is the only escape from the inner `cmp [signal], 2` exit at the top of
+/// the I/O loop at `fcn.00475970`.
 const LOADER_SIGNAL: usize = 0x0052_1344;
 const IO_ERROR_SPLICE: usize = 0x0047_59bf;
 const IO_ERROR_DISPLACED_LEN: usize = 7;
 static IO_ERROR_AFTER_SPLICE: usize = IO_ERROR_SPLICE + IO_ERROR_DISPLACED_LEN;
 
-/// Splices into the I/O thread's error-exit path at `0x475970+0x4f`. The displaced 7-byte
-/// `push dword [esi*4 + 0x4cb3c0]` (the filename for the "error : Sound %s" `printf` call)
-/// is replayed. The inserted `signal = 2` hits BGM-init's only escape from its NULL-slot
-/// busy-wait. Note: th15 has `push` instead of th10/11/12/13's `mov eax`;
-/// the trampoline preserves the same single-push side effect on ESP.
+/// Splices into the I/O thread's error-exit path at `fcn.00475970+0x4f`.
+/// The displaced 7-byte `push dword [esi*4 + 0x4cb3c0]` (the filename for the
+/// "error : Sound %s" `printf` call) is replayed.
+/// The inserted `signal = 2` hits BGM-init's only escape from its NULL-slot busy-wait.
 #[unsafe(naked)]
 unsafe extern "C" fn io_error_abort_trampoline() -> ! {
     naked_asm!(

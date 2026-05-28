@@ -1,10 +1,12 @@
 //! Patches and hooks for th13.exe v1.00c.
 
 use neopatch_core::d3d9::install_call_site_rewrite;
+use neopatch_core::destructor_pump::{self, Hook};
 use neopatch_core::loader_sync::{self, LOADER_SIGNAL_ABORT};
 use neopatch_core::patches::{Patch, patch_jmp};
 use neopatch_core::screenshot::save_screenshot_live;
 use std::arch::naked_asm;
+use std::ffi::c_void;
 
 /// Live `Direct3DCreate9` call site, rewritten to defend against downstream IAT hijacks.
 /// There is a second site at `0x0045da12` that seems to be dead error-recovery code.
@@ -82,6 +84,42 @@ pub(crate) unsafe fn install_anm_matrix_tz_fix() {
             anm_mode57_z_trampoline as *mut (),
             "AnmManager mode 5/7 z + matrix.tz",
         );
+    }
+}
+
+/// AsciiInf destructor pump for th13. See `core::destructor_pump` for more details.
+///
+/// Destructor: `fcn.004399e0` (`src\game\ascii.cpp:79`). Worker thread: `fcn.00439730`,
+/// spawned by `AsciiInf::start` (`fcn.004398e0`). The worker preloads `.anm` assets into
+/// a 26-slot table at `[[0x4dc688] + 0xb77b34]`. Spin flag: `[anim+0x12c]`.
+/// Anim driver: `fcn.0046e510`. Join helper: `fcn.00473590`. Handle slot: `[this+0x14]`.
+///
+/// The destructor uses `__stdcall`: the factory does `push esi; call dtor`,
+/// the destructor reads `this` from `[ebp+8]`, and returns with `ret 4`.
+const FCN_004399E0: usize = 0x0043_99e0;
+static FCN_004399E0_AFTER_PROLOGUE: usize = FCN_004399E0 + 5;
+
+/// Replays the displaced 5-byte prologue (`push ebp; mov ebp, esp; push -1`) and resumes past the splice.
+#[unsafe(naked)]
+unsafe extern "stdcall" fn fcn_004399e0_trampoline(_this: *mut c_void) -> i32 {
+    naked_asm!(
+        "push ebp",
+        "mov ebp, esp",
+        "push -1",
+        "jmp dword ptr [{slot}]",
+        slot = sym FCN_004399E0_AFTER_PROLOGUE,
+    )
+}
+
+pub(crate) unsafe fn install_destructor_hook() {
+    unsafe {
+        destructor_pump::install(destructor_pump::Config {
+            dtor_addr: FCN_004399E0,
+            hook: Hook::EbpFrameStdcall(fcn_004399e0_trampoline),
+            anim_driver_addr: 0x0046_e510,
+            loader_handle_offset: 0x14,
+            dtor_label: "fcn.004399e0",
+        });
     }
 }
 
