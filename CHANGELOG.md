@@ -4,6 +4,8 @@ All notable changes to neopatch will be documented in this file.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-05-28
+
 ### Added
 
 - Support for Touhou 14 ~ Double Dealing Character (`th14.exe v1.00b`).
