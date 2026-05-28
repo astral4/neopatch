@@ -2,7 +2,7 @@
 
 neopatch is a Touhou game mod for end-to-end latency reductions, optimizations, and other fixes.
 
-Currently supported: Touhou 10 (`th10.exe v1.00a`), Touhou 11 (`th11.exe v1.00a`), Touhou 12 (`th12.exe v1.00b`), Touhou 13 (`th13.exe v1.00c`), and Touhou 15 (`th15.exe v1.00b`). Support for more games is planned for the near future.
+Currently supported: Touhou 10 (`th10.exe v1.00a`), Touhou 11 (`th11.exe v1.00a`), Touhou 12 (`th12.exe v1.00b`), Touhou 13 (`th13.exe v1.00c`), Touhou 14 (`th14.exe v1.00b`), and Touhou 15 (`th15.exe v1.00b`). Support for more games is planned for the near future.
 
 ## Usage
 
@@ -14,6 +14,7 @@ neopatch is configured through a `neopatch.ini` file, which should also be place
 - Touhou 11: [`neopatch.ini.example`](neopatch_th11/neopatch.ini.example)
 - Touhou 12: [`neopatch.ini.example`](neopatch_th12/neopatch.ini.example)
 - Touhou 13: [`neopatch.ini.example`](neopatch_th13/neopatch.ini.example)
+- Touhou 14: [`neopatch.ini.example`](neopatch_th14/neopatch.ini.example)
 - Touhou 15: [`neopatch.ini.example`](neopatch_th15/neopatch.ini.example)
 
 neopatch is not compatible with similar mods like vpatch and OpenInputLagPatch (OILP). Attempting to use neopatch with them may cause hard-to-troubleshoot issues.

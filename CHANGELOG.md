@@ -4,6 +4,10 @@ All notable changes to neopatch will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- Support for Touhou 14 ~ Double Dealing Character (`th14.exe v1.00b`).
+
 ### Changed
 
 - D3D9 hooks now defend against downstream IAT hijacks of `Direct3DCreate9` for Touhou 10, 11, and 12. Previously, only Touhou 13 and 15 had this protection.

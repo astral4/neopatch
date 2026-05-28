@@ -5,12 +5,12 @@ build game:
 _test game:
     cargo test -p neopatch_{{game}} --target i686-pc-windows-gnu --release
 
-test: (_test "core") (_test "th10") (_test "th11") (_test "th12") (_test "th13") (_test "th15")
+test: (_test "core") (_test "th10") (_test "th11") (_test "th12") (_test "th13") (_test "th14") (_test "th15")
 
 _clippy game:
     cargo clippy -p neopatch_{{game}} --target i686-pc-windows-gnu --release --all-targets -- -D warnings
 
-clippy: (_clippy "core") (_clippy "th10") (_clippy "th11") (_clippy "th12") (_clippy "th13") (_clippy "th15")
+clippy: (_clippy "core") (_clippy "th10") (_clippy "th11") (_clippy "th12") (_clippy "th13") (_clippy "th14") (_clippy "th15")
 
 doc:
     cargo doc --no-deps --workspace --target i686-pc-windows-gnu
@@ -41,4 +41,4 @@ _release game:
     (cd "${out}" && zip -qr "${name}.zip" "${name}/")
     echo "Created ${out}/${name}.zip"
 
-release: (_release "th10") (_release "th11") (_release "th12") (_release "th13") (_release "th15")
+release: (_release "th10") (_release "th11") (_release "th12") (_release "th13") (_release "th14") (_release "th15")
