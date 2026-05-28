@@ -1,9 +1,8 @@
 //! Logic for auto-dismissing th15's startup dialog.
 //!
-//! We let the dialog's message pump continue running because the loader thread
-//! deadlocks otherwise. This is done by IAT-hooking `CreateDialogParamA`,
-//! overriding the dialog's selections from our config, and then using
-//! `PostMessage` to send an OK click and set the pump's exit-flag bit.
+//! We let the dialog's message pump continue running because the loader thread deadlocks otherwise.
+//! This is done by IAT-hooking `CreateDialogParamA`, overriding the dialog's selections from
+//! our config, and then using `PostMessage` to send an OK click and set the pump's exit-flag bit.
 
 use crate::config::CONFIG;
 use neopatch_core::config::{self as core_config, DisplayMode};
