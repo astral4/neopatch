@@ -39,11 +39,9 @@ pub struct MainToken(PhantomData<*const ()>);
 
 impl MainToken {
     /// Constructs a `MainToken`. The first call claims `MAIN_TID` atomically;
-    /// subsequent off-thread calls abort the process. Game-specific crates
-    /// should construct this at trampoline boundaries where the render-thread
-    /// invariant is established by the game's call site.
+    /// subsequent off-thread calls abort the process.
     #[allow(clippy::new_without_default)]
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let current = unsafe { GetCurrentThreadId() };
         match MAIN_TID.compare_exchange(0, current, Ordering::AcqRel, Ordering::Acquire) {
             Ok(_) => {
