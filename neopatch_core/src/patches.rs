@@ -81,7 +81,7 @@ pub unsafe fn patch_jmp<const N: usize>(
 ///
 /// # Safety
 /// `target` must be a writable code address holding `expected`.
-pub unsafe fn patch_call<const N: usize>(
+pub(crate) unsafe fn patch_call<const N: usize>(
     target: usize,
     expected: &[u8; N],
     hook: *mut (),
