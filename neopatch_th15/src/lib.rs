@@ -115,7 +115,7 @@ unsafe fn install_hooks() {
         patches::install_d3d9_call_site_rewrite();
 
         // th15's input writer at `fcn.00401f50` does not read `DIJOYSTATE` offsets
-        // 0x44-0x50 (`rgdwPOV[]`), so the default of `dpad = true` is safe.
+        // 0x20-0x30 (`rgdwPOV[]`), so the default of `dpad = true` is safe.
         if core_cfg.input.dpad {
             input::install();
         }
