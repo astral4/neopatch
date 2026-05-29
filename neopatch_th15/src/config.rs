@@ -13,11 +13,11 @@ pub(crate) struct Th15Config {
 pub(crate) static CONFIG: OnceLock<Th15Config> = OnceLock::new();
 
 // Important: discriminants are load-bearing! They're the resolution component of:
-// - the display-mode byte at `[0x4e79c3]` (`byte % 3`, with `byte / 3 == 0` selecting
-//   fullscreen and `== 1` selecting windowed)
+// - the display-mode byte (`byte % 3`, with `byte / 3 == 0` selecting fullscreen and
+//   `== 1` selecting windowed)
 // - the offset from `RES_RADIO_FIRST_ID` (`0xCD`) for the dialog radio control IDs
 // - the index into the `ascii.anm` / `ascii_960.anm` / `ascii_1280.anm` font selection
-//   done by the `AsciiInf` dispatcher (`fcn.0040bf20`).
+//   done by the `AsciiInf` dispatcher
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum Resolution {
