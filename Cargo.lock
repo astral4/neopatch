@@ -79,6 +79,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "neopatch_th16"
+version = "0.7.0"
+dependencies = [
+ "neopatch_core",
+ "tracing",
+ "windows-sys",
+]
+
+[[package]]
 name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
