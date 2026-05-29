@@ -4,6 +4,8 @@ All notable changes to neopatch will be documented in this file.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-05-29
+
 ### Added
 
 - Support for Touhou 16 ~ Hidden Star in Four Seasons (`th16.exe v1.00a`).
