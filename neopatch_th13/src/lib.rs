@@ -26,7 +26,7 @@ use windows_sys::Win32::System::LibraryLoader::{DisableThreadLibraryCalls, GetMo
 use windows_sys::Win32::System::SystemServices::DLL_PROCESS_ATTACH;
 
 // The render resolution is always 640x480.
-const TH13_FRAMEBUFFER_SIZE: (u32, u32) = (640, 480);
+const FRAMEBUFFER_SIZE: (u32, u32) = (640, 480);
 
 dinput8_export!();
 
@@ -96,7 +96,7 @@ unsafe fn install_hooks() {
         window::install(
             host_exe,
             &core_cfg.window,
-            TH13_FRAMEBUFFER_SIZE,
+            FRAMEBUFFER_SIZE,
             core_cfg.display.mode,
         );
         dialog_dismiss::install(host_exe);

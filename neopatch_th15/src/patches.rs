@@ -9,16 +9,13 @@ use std::arch::naked_asm;
 use std::ffi::c_void;
 
 /// Live `Direct3DCreate9` call site, rewritten to defend against downstream IAT hijacks.
-/// There is a second site at `0x00472e72` that seems to be dead error-recovery code.
-const TH15_DIRECT3DCREATE9_CALL_ADDR: usize = 0x0047_158c;
-const TH15_DIRECT3DCREATE9_CALL_BYTES: [u8; 6] = [0xff, 0x15, 0xb0, 0xe2, 0x4b, 0x00];
+/// There is a second call site at `0x00472e72`, a dead standalone init helper that nothing calls.
+const DIRECT3DCREATE9_CALL_ADDR: usize = 0x0047_158c;
+const DIRECT3DCREATE9_CALL_BYTES: [u8; 6] = [0xff, 0x15, 0xb0, 0xe2, 0x4b, 0x00];
 
 pub(crate) unsafe fn install_d3d9_call_site_rewrite() {
     unsafe {
-        install_call_site_rewrite(
-            TH15_DIRECT3DCREATE9_CALL_ADDR,
-            &TH15_DIRECT3DCREATE9_CALL_BYTES,
-        );
+        install_call_site_rewrite(DIRECT3DCREATE9_CALL_ADDR, &DIRECT3DCREATE9_CALL_BYTES);
     }
 }
 
@@ -113,7 +110,7 @@ pub(crate) unsafe fn install_screenshot_hook() {
     }
 }
 
-/// AsciiInf destructor pump for th15. See `core::destructor_pump` for more details.
+/// `AsciiInf` destructor pump for th15. See `core::destructor_pump` for more details.
 ///
 /// Destructor: `fcn.0044bed0` (`sprtlib.h:750`).
 /// Worker thread: `fcn.0044bd00`, spawned by `AsciiInf::start` (`fcn.0044be50`).

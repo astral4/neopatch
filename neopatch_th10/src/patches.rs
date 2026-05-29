@@ -7,16 +7,13 @@ use neopatch_core::screenshot::save_screenshot_deferred;
 use std::arch::naked_asm;
 
 /// Live `Direct3DCreate9` call site, rewritten to defend against downstream IAT hijacks.
-/// There is a second site at `0x00439702` that seems to be dead error-recovery code.
-const TH10_DIRECT3DCREATE9_CALL_ADDR: usize = 0x0043_8bc3;
-const TH10_DIRECT3DCREATE9_CALL_BYTES: [u8; 5] = [0xe8, 0xae, 0x95, 0x01, 0x00];
+/// There is a second call site at `0x00439702`, a dead standalone init helper that nothing calls.
+const DIRECT3DCREATE9_CALL_ADDR: usize = 0x0043_8bc3;
+const DIRECT3DCREATE9_CALL_BYTES: [u8; 5] = [0xe8, 0xae, 0x95, 0x01, 0x00];
 
 pub(crate) unsafe fn install_d3d9_call_site_rewrite() {
     unsafe {
-        install_call_site_rewrite(
-            TH10_DIRECT3DCREATE9_CALL_ADDR,
-            &TH10_DIRECT3DCREATE9_CALL_BYTES,
-        );
+        install_call_site_rewrite(DIRECT3DCREATE9_CALL_ADDR, &DIRECT3DCREATE9_CALL_BYTES);
     }
 }
 

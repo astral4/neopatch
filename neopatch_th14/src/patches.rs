@@ -9,15 +9,13 @@ use std::arch::naked_asm;
 use std::ffi::c_void;
 
 /// Live `Direct3DCreate9` call site, rewritten to defend against downstream IAT hijacks.
-const TH14_DIRECT3DCREATE9_CALL_ADDR: usize = 0x0046_952c;
-const TH14_DIRECT3DCREATE9_CALL_BYTES: [u8; 6] = [0xff, 0x15, 0xb0, 0x12, 0x4b, 0x00];
+/// There is a second call site at `0x0046ae12`, a dead standalone init helper that nothing calls.
+const DIRECT3DCREATE9_CALL_ADDR: usize = 0x0046_952c;
+const DIRECT3DCREATE9_CALL_BYTES: [u8; 6] = [0xff, 0x15, 0xb0, 0x12, 0x4b, 0x00];
 
 pub(crate) unsafe fn install_d3d9_call_site_rewrite() {
     unsafe {
-        install_call_site_rewrite(
-            TH14_DIRECT3DCREATE9_CALL_ADDR,
-            &TH14_DIRECT3DCREATE9_CALL_BYTES,
-        );
+        install_call_site_rewrite(DIRECT3DCREATE9_CALL_ADDR, &DIRECT3DCREATE9_CALL_BYTES);
     }
 }
 
@@ -90,7 +88,7 @@ pub(crate) unsafe fn install_anm_matrix_tz_fix() {
     }
 }
 
-/// AsciiInf destructor pump for th14. See `core::destructor_pump` for more details.
+/// `AsciiInf` destructor pump for th14. See `core::destructor_pump` for more details.
 ///
 /// Destructor: `fcn.00444340` (`src\game\ascii.cpp:82`). Worker thread: `fcn.00444170`,
 /// spawned by `AsciiInf::start` (`fcn.004442c0`). The worker preloads `.anm` assets

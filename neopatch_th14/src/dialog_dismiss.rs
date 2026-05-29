@@ -17,8 +17,8 @@ use windows_sys::Win32::UI::Controls::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{BN_CLICKED, DLGPROC, PostMessageA, WM_COMMAND};
 
-const TH14_DIALOG_TEMPLATE_ID: usize = 0xCB;
-const TH14_DIALOG_PROC_VA: usize = 0x0046_bd30;
+const DIALOG_TEMPLATE_ID: usize = 0xCB;
+const DIALOG_PROC_VA: usize = 0x0046_bd30;
 
 // Dialog control IDs:
 // - 0xCA "don't show again" checkbox
@@ -89,7 +89,7 @@ unsafe extern "system" fn hook_create_dialog_param_a(
         if hwnd.is_null() {
             return hwnd;
         }
-        if template_id != TH14_DIALOG_TEMPLATE_ID || proc_va != TH14_DIALOG_PROC_VA {
+        if template_id != DIALOG_TEMPLATE_ID || proc_va != DIALOG_PROC_VA {
             return hwnd;
         }
 

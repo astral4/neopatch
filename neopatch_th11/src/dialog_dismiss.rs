@@ -17,8 +17,8 @@ use tracing::info;
 use windows_sys::Win32::Foundation::{HMODULE, HWND, LPARAM};
 use windows_sys::Win32::UI::WindowsAndMessaging::DLGPROC;
 
-const TH11_DIALOG_TEMPLATE_ID: usize = 0xCB;
-const TH11_DIALOG_PROC_VA: usize = 0x0044_7910;
+const DIALOG_TEMPLATE_ID: usize = 0xCB;
+const DIALOG_PROC_VA: usize = 0x0044_7910;
 
 /// Read at `fcn.00446d30` to gate fullscreen vs. windowed; written by the dialog proc on IDOK.
 const DISPLAY_MODE_BYTE: GameAddr<u8> = unsafe { GameAddr::new(0x004c_3465) };
@@ -65,7 +65,7 @@ unsafe extern "system" fn hook_dialog_box_param_a(
     let template_id = template as usize;
     let proc_va = proc.map_or(0usize, |f| f as usize);
 
-    if template_id != TH11_DIALOG_TEMPLATE_ID || proc_va != TH11_DIALOG_PROC_VA {
+    if template_id != DIALOG_TEMPLATE_ID || proc_va != DIALOG_PROC_VA {
         info!(
             kind = "dialog_box_param_a_passthrough",
             template = format_args!("{template_id:#x}"),

@@ -20,8 +20,8 @@ use tracing::info;
 use windows_sys::Win32::Foundation::{HMODULE, HWND, LPARAM};
 use windows_sys::Win32::UI::WindowsAndMessaging::DLGPROC;
 
-const TH13_DIALOG_TEMPLATE_ID: usize = 0xCB;
-const TH13_DIALOG_PROC_VA: usize = 0x0045_e910;
+const DIALOG_TEMPLATE_ID: usize = 0xCB;
+const DIALOG_PROC_VA: usize = 0x0045_e910;
 
 /// Read by `fcn.0045da40` (window setup) to gate fullscreen vs. windowed;
 /// written by the dialog proc on IDOK. 0 = fullscreen, 1/2/3 = windowed at preset sizes.
@@ -74,7 +74,7 @@ unsafe extern "system" fn hook_dialog_box_param_a(
     let template_id = template as usize;
     let proc_va = proc.map_or(0usize, |f| f as usize);
 
-    if template_id != TH13_DIALOG_TEMPLATE_ID || proc_va != TH13_DIALOG_PROC_VA {
+    if template_id != DIALOG_TEMPLATE_ID || proc_va != DIALOG_PROC_VA {
         info!(
             kind = "dialog_box_param_a_passthrough",
             template = format_args!("{template_id:#x}"),

@@ -14,8 +14,8 @@ use tracing::info;
 use windows_sys::Win32::Foundation::{HMODULE, HWND, LPARAM};
 use windows_sys::Win32::UI::WindowsAndMessaging::DLGPROC;
 
-const TH10_DIALOG_TEMPLATE_ID: usize = 0xCB;
-const TH10_DIALOG_PROC_VA: usize = 0x0043_a3a0;
+const DIALOG_TEMPLATE_ID: usize = 0xCB;
+const DIALOG_PROC_VA: usize = 0x0043_a3a0;
 
 /// `EndDialog` values: Fullscreen radio (`0xC9`) -> 6; Window radio (`0xCB`) -> 7.
 /// Downstream `setne cl` against `6` writes 0 / 1 to `[0x491d65]`.
@@ -59,7 +59,7 @@ unsafe extern "system" fn hook_dialog_box_param_a(
     let template_id = template as usize;
     let proc_va = proc.map_or(0usize, |f| f as usize);
 
-    if template_id != TH10_DIALOG_TEMPLATE_ID || proc_va != TH10_DIALOG_PROC_VA {
+    if template_id != DIALOG_TEMPLATE_ID || proc_va != DIALOG_PROC_VA {
         info!(
             kind = "dialog_box_param_a_passthrough",
             template = format_args!("{template_id:#x}"),
