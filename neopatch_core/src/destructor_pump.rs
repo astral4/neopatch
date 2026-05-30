@@ -44,6 +44,10 @@ pub enum Hook {
     /// Ebp-frame prologue `push ebp; mov ebp, esp; push -1` (5 bytes);
     /// thiscall (`this` in ECX). Used by th14, th15.
     EbpFrameThiscall(unsafe extern "thiscall" fn(*mut c_void) -> i32),
+    /// Ebp-frame prologue (5 bytes); thiscall (`this` in ECX) but the factory
+    /// pushes one stack arg the destructor cleans with `ret 4`. The trampoline
+    /// takes the extra arg so its `ret 4` balances. Used by th17.
+    EbpFrameThiscallRet4(unsafe extern "thiscall" fn(*mut c_void, u32) -> i32),
     /// Ebp-frame prologue `push ebp; mov ebp, esp; push -1` (5 bytes);
     /// stdcall (`this` on stack). Used by th13.
     EbpFrameStdcall(unsafe extern "stdcall" fn(*mut c_void) -> i32),
@@ -117,6 +121,11 @@ pub unsafe fn install(cfg: Config) {
 
     let (entry_hook, entry_label, fpo_seh) = match &hook {
         Hook::EbpFrameThiscall(_) => (pump_entry_thiscall as *mut (), "pump_entry_thiscall", None),
+        Hook::EbpFrameThiscallRet4(_) => (
+            pump_entry_thiscall_ret4 as *mut (),
+            "pump_entry_thiscall_ret4",
+            None,
+        ),
         Hook::EbpFrameStdcall(_) => (pump_entry_stdcall as *mut (), "pump_entry_stdcall", None),
         Hook::FpoStdcall { seh_handler, .. } => (
             pump_entry_stdcall as *mut (),
@@ -152,6 +161,10 @@ pub unsafe fn install(cfg: Config) {
 }
 
 unsafe extern "thiscall" fn pump_entry_thiscall(this: *mut c_void) -> i32 {
+    unsafe { pump(this) }
+}
+
+unsafe extern "thiscall" fn pump_entry_thiscall_ret4(this: *mut c_void, _flags: u32) -> i32 {
     unsafe { pump(this) }
 }
 
@@ -231,6 +244,7 @@ unsafe fn pump(this: *mut c_void) -> i32 {
     let result = unsafe {
         match state.hook {
             Hook::EbpFrameThiscall(tramp) => tramp(this),
+            Hook::EbpFrameThiscallRet4(tramp) => tramp(this, 0),
             Hook::EbpFrameStdcall(tramp) => tramp(this),
             Hook::FpoStdcall { trampoline, .. } => trampoline(this),
         }
