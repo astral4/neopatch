@@ -4,6 +4,10 @@ All notable changes to neopatch will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- Support for Touhou 17 ~ Wily Beast and Weakest Creature (`th17.exe v1.00b`).
+
 ## [0.8.0] - 2026-05-29
 
 ### Added

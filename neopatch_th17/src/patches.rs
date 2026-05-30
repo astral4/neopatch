@@ -1,0 +1,189 @@
+//! Patches and hooks for th17.exe v1.00b.
+
+use neopatch_core::d3d9::install_call_site_rewrite;
+use neopatch_core::destructor_pump::{self, Hook};
+use neopatch_core::loader_sync::{self, LOADER_SIGNAL_ABORT};
+use neopatch_core::patches::{Patch, patch_jmp};
+use neopatch_core::screenshot::save_screenshot_live;
+use std::arch::naked_asm;
+use std::ffi::c_void;
+
+/// Live `Direct3DCreate9` call site, rewritten to defend against downstream IAT hijacks.
+/// This is the only call site in th17.
+const DIRECT3DCREATE9_CALL_ADDR: usize = 0x0046_0f1c;
+const DIRECT3DCREATE9_CALL_BYTES: [u8; 6] = [0xff, 0x15, 0x80, 0xa2, 0x49, 0x00];
+
+pub(crate) unsafe fn install_d3d9_call_site_rewrite() {
+    unsafe {
+        install_call_site_rewrite(DIRECT3DCREATE9_CALL_ADDR, &DIRECT3DCREATE9_CALL_BYTES);
+    }
+}
+
+/// "UpdateFast skip": unconditional `jmp +0x53` past the `Sleep(1)`, deadline comparison,
+/// and deadline-advance spin inside `CWindowManager::UpdateFast` (`fcn.00462190`), so our
+/// pacer is the sole timing source.
+///
+/// "force fast input latency": th17's input-mode dispatch is one block rather than the two
+/// short cond jumps th14/th15/th16 flip, so this `jmp`s over it onto the `UpdateFast` call,
+/// skipping the slow path's frame limiter and the "automatic"-mode variant (`fcn.00462370`).
+/// OILP also does this under "Force fast input latency mode."
+///
+/// "replay speed control skip": NOPs the viewer-mode branch in `fcn.0044e610` so the game's
+/// own replay-speed control doesn't fight our pacer.
+const PATCHES: &[Patch] = &[
+    Patch::new(0x0046_21e5, &[0x72, 0x18], &[0xeb, 0x53], "UpdateFast skip"),
+    Patch::new(
+        0x0046_119e,
+        &[0x0f, 0x84, 0x10, 0x01, 0x00, 0x00],
+        &[0xe9, 0x2f, 0x01, 0x00, 0x00, 0x90],
+        "force fast input latency",
+    ),
+    Patch::new(
+        0x0044_e633,
+        &[0x75, 0x3a],
+        &[0x90, 0x90],
+        "replay speed control skip",
+    ),
+];
+
+pub(crate) unsafe fn apply_basic() {
+    unsafe { Patch::apply_all(PATCHES) };
+}
+
+/// `AsciiInf` destructor pump for th17. See `core::destructor_pump` for more details.
+///
+/// Destructor: `fcn.00440bb0`. Worker thread: `fcn.00440770`, spawned by
+/// `AsciiInf::start` (`fcn.00440a30`). The worker preloads `.anm` assets off-main,
+/// including the resolution font (`ascii.anm` / `ascii_960.anm` / `ascii_1280.anm`,
+/// chosen by `[0x4b5cd3] % 3`, the display-mode byte). Spin flag: `[anim+0x128]`.
+/// Anim driver: `fcn.0046d050`. Join helper: `fcn.00402b60`. Handle slot: `[this+0x10]`.
+///
+/// The destructor is thiscall (`this` in ECX), but the factory does `push ecx; call dtor`
+/// and it returns with `ret 4` to clean that one unused stack arg.
+const FCN_00440BB0: usize = 0x0044_0bb0;
+static FCN_00440BB0_AFTER_PROLOGUE: usize = FCN_00440BB0 + 5;
+
+/// Replays the displaced 5-byte prologue (`push ebp; mov ebp, esp; push -1`) and resumes past the splice.
+#[unsafe(naked)]
+unsafe extern "thiscall" fn fcn_00440bb0_trampoline(_this: *mut c_void, _flags: u32) -> i32 {
+    naked_asm!(
+        "push ebp",
+        "mov ebp, esp",
+        "push -1",
+        "jmp dword ptr [{slot}]",
+        slot = sym FCN_00440BB0_AFTER_PROLOGUE,
+    )
+}
+
+pub(crate) unsafe fn install_destructor_hook() {
+    unsafe {
+        destructor_pump::install(destructor_pump::Config {
+            dtor_addr: FCN_00440BB0,
+            hook: Hook::EbpFrameThiscallRet4(fcn_00440bb0_trampoline),
+            anim_driver_addr: 0x0046_d050,
+            loader_handle_offset: 0x10,
+            dtor_label: "fcn.00440bb0",
+        });
+    }
+}
+
+/// Fixes a race between the main thread and the sound-file / I/O loader threads.
+///
+/// `LOADER_SIGNAL` semantics for th17: non-zero releases the loaders' post-load waits. `2`
+/// (written by `sound_load_error_abort_trampoline`) is the only escape from the consumer's
+/// NULL-slot busy-wait in `fcn.00465f90`, which consumes the `se_*.wav` table the sound-file
+/// loader (`fcn.00465030`) produces at `0x005269f4`.
+const LOADER_SIGNAL: usize = 0x0052_9ea8;
+const SOUND_LOAD_ERROR_SPLICE: usize = 0x0046_507f;
+const SOUND_LOAD_ERROR_DISPLACED_LEN: usize = 7;
+static SOUND_LOAD_ERROR_AFTER_SPLICE: usize =
+    SOUND_LOAD_ERROR_SPLICE + SOUND_LOAD_ERROR_DISPLACED_LEN;
+
+/// Splices into the sound-file loader's error-exit path at `fcn.00465030+0x4f`. The displaced
+/// 7-byte `push dword [esi*4 + 0x4a1060]` (the `.wav` path for the "error : Sound %s" `printf`)
+/// is replayed. The inserted `signal = 2` releases the consumer's NULL-slot busy-wait.
+#[unsafe(naked)]
+unsafe extern "C" fn sound_load_error_abort_trampoline() -> ! {
+    naked_asm!(
+        "mov dword ptr [{signal}], {abort}",
+        "push dword ptr [esi*4 + 0x4a1060]",
+        "jmp dword ptr [{slot}]",
+        signal = const LOADER_SIGNAL,
+        abort = const LOADER_SIGNAL_ABORT,
+        slot = sym SOUND_LOAD_ERROR_AFTER_SPLICE,
+    )
+}
+
+pub(crate) unsafe fn install_loader_sync_hooks() {
+    unsafe {
+        loader_sync::install(
+            &loader_sync::Config {
+                signal_addr: LOADER_SIGNAL,
+                bgm_handle_addr: 0x0052_9ea0,
+                io_handle_addr: 0x0052_9e9c,
+                call_site: 0x0046_12d7,
+                call_bytes: [0xe8, 0xb4, 0x0e, 0x00, 0x00],
+                real_fn: 0x0046_2190,
+                splice_addr: SOUND_LOAD_ERROR_SPLICE,
+                splice_expected: [0xff, 0x34, 0xb5, 0x60, 0x10, 0x4a, 0x00],
+            },
+            sound_load_error_abort_trampoline as *mut (),
+        );
+    }
+}
+
+/// Splice over `movss dword [ebp-0x64], xmm3` (5 bytes) inside `fcn.0046e560`, the
+/// `AnmManager` modes 5/7 position helper. X and Y correctly accumulate `matrix.t*`;
+/// Z doesn't. `[esi + 0x448]` is `matrix.tz` (scratch matrix at `vm + 0x410`).
+/// `[ebp - 0x64]` is the Z frame slot that the displaced `movss` writes to.
+const ANM_MODE57_SPLICE: usize = 0x0046_e75f;
+const ANM_MODE57_DISPLACED_LEN: usize = 5;
+static ANM_MODE57_AFTER_SPLICE: usize = ANM_MODE57_SPLICE + ANM_MODE57_DISPLACED_LEN;
+
+#[unsafe(naked)]
+unsafe extern "C" fn anm_mode57_z_trampoline() -> ! {
+    naked_asm!(
+        "addss xmm3, dword ptr [esi + 0x448]",
+        "movss dword ptr [ebp - 0x64], xmm3",
+        "jmp   dword ptr [{slot}]",
+        slot = sym ANM_MODE57_AFTER_SPLICE,
+    )
+}
+
+pub(crate) unsafe fn install_anm_matrix_tz_fix() {
+    unsafe {
+        patch_jmp(
+            ANM_MODE57_SPLICE,
+            &[0xf3, 0x0f, 0x11, 0x5d, 0x9c],
+            anm_mode57_z_trampoline as *mut (),
+            "AnmManager mode 5/7 z + matrix.tz",
+        );
+    }
+}
+
+/// th17 screenshot save (stdcall; filename pointer pushed on the stack).
+/// The game calls this from the render thread before `Present`.
+const SCREENSHOT_SAVE_FN: usize = 0x0044_18c0;
+const SCREENSHOT_SAVE_FN_PROLOGUE: [u8; 5] = [0x53, 0x8b, 0xdc, 0x83, 0xec];
+
+#[unsafe(naked)]
+unsafe extern "C" fn screenshot_trampoline() -> u32 {
+    naked_asm!(
+        "push dword ptr [esp + 4]",
+        "call {save}",
+        "add esp, 4",
+        "ret 4",
+        save = sym save_screenshot_live,
+    );
+}
+
+pub(crate) unsafe fn install_screenshot_hook() {
+    unsafe {
+        patch_jmp(
+            SCREENSHOT_SAVE_FN,
+            &SCREENSHOT_SAVE_FN_PROLOGUE,
+            screenshot_trampoline as *mut (),
+            "screenshot save (fcn.004418c0)",
+        );
+    }
+}
