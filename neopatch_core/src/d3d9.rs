@@ -195,6 +195,7 @@ iat_hook! {
 static TEX_LOG: LogCap = LogCap::new(NonZero::new(64).unwrap());
 static VBUF_LOG: LogCap = LogCap::new(NonZero::new(64).unwrap());
 static CHECK_DEVICE_FORMAT_LOG: LogCap = LogCap::new(NonZero::new(64).unwrap());
+static PRESENT_FAIL_LOG: LogCap = LogCap::new(NonZero::new(16).unwrap());
 
 static PRESENT_COUNT: AtomicU32 = AtomicU32::new(0);
 
@@ -890,7 +891,19 @@ unsafe extern "system" fn hook_present(
         // not the last completed.
         PRESENT_COUNT.fetch_add(1, Ordering::Relaxed);
 
-        call_real_present(this, src_rect, dst_rect, dest_window_override, dirty_region)
+        let hr = call_real_present(this, src_rect, dst_rect, dest_window_override, dirty_region);
+
+        if hr.is_err()
+            && let Some(n) = PRESENT_FAIL_LOG.tick()
+        {
+            warn!(
+                kind = "present_failed",
+                n = n + 1,
+                hr = fmt_hr!(hr),
+                frame = PRESENT_COUNT.load(Ordering::Relaxed),
+            );
+        }
+        hr
     }
 }
 
