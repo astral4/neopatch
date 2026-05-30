@@ -110,9 +110,8 @@ unsafe fn install_hooks() {
         d3d9::install(host_exe);
         patches::install_d3d9_call_site_rewrite();
 
-        // TODO(th16): audit th16's input-writer function for `rgdwPOV[]` reads before trusting
-        // `dpad = on` (ARCHITECTURE's bring-up rule). Until then
-        // the default is kept; a user whose stick stops while the D-pad is held sets `dpad = off`.
+        // th16's input writer at `fcn.004018e0` does not read `DIJOYSTATE` offsets
+        // 0x20-0x30 (`rgdwPOV[]`), so the default of `dpad = true` is safe.
         if core_cfg.input.dpad {
             input::install();
         }
