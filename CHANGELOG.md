@@ -8,6 +8,10 @@ All notable changes to neopatch will be documented in this file.
 
 - Support for Touhou 17 ~ Wily Beast and Weakest Creature (`th17.exe v1.00b`).
 
+### Fixed
+
+- Touhou 10, Touhou 11, Touhou 12, Touhou 13, Touhou 14, Touhou 15, and Touhou 16 no longer deadlock from an I/O loader synchronization fix. This resolves a regression introduced in version 0.7.0.
+
 ## [0.8.0] - 2026-05-29
 
 ### Added

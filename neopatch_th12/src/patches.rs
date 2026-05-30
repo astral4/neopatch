@@ -2,7 +2,6 @@
 
 use neopatch_core::d3d9::install_call_site_rewrite;
 use neopatch_core::destructor_pump::{self, Hook};
-use neopatch_core::loader_sync::{self, LOADER_SIGNAL_ABORT};
 use neopatch_core::patches::{Patch, patch_jmp};
 use neopatch_core::screenshot::save_screenshot_live;
 use std::arch::naked_asm;
@@ -149,49 +148,6 @@ pub(crate) unsafe fn install_screenshot_hook() {
             &SCREENSHOT_SAVE_FN_PROLOGUE,
             screenshot_trampoline as *mut (),
             "screenshot save (fcn.0042fca0)",
-        );
-    }
-}
-
-/// Fixes a race between the main thread and the BGM-init / I/O loader threads.
-///
-/// `LOADER_SIGNAL` semantics for th12: non-zero releases the post-load waits
-/// in BGM and I/O thread procs. `2` (written by `io_error_abort_trampoline`)
-/// is the only escape from the inner busy-wait in `fcn.00453120` and the outer loop.
-const LOADER_SIGNAL: usize = 0x004d_4770;
-const IO_ERROR_SPLICE: usize = 0x0045_34af;
-const IO_ERROR_DISPLACED_LEN: usize = 7;
-static IO_ERROR_AFTER_SPLICE: usize = IO_ERROR_SPLICE + IO_ERROR_DISPLACED_LEN;
-
-/// Splices into the I/O thread's error-exit path at `fcn.00453460+0x4f`.
-/// The displaced 7-byte `mov eax, [esi*4 + 0x4aea50]` is replayed.
-/// The inserted `signal = 2` hits BGM-init's only escape from its NULL-slot busy-wait.
-#[unsafe(naked)]
-unsafe extern "C" fn io_error_abort_trampoline() -> ! {
-    naked_asm!(
-        "mov dword ptr [{signal}], {abort}",
-        "mov eax, dword ptr [esi*4 + 0x4aea50]",
-        "jmp dword ptr [{slot}]",
-        signal = const LOADER_SIGNAL,
-        abort = const LOADER_SIGNAL_ABORT,
-        slot = sym IO_ERROR_AFTER_SPLICE,
-    )
-}
-
-pub(crate) unsafe fn install_loader_sync_hooks() {
-    unsafe {
-        loader_sync::install(
-            &loader_sync::Config {
-                signal_addr: LOADER_SIGNAL,
-                bgm_handle_addr: 0x004d_4764,
-                io_handle_addr: 0x004d_4768,
-                call_site: 0x0044_f8aa,
-                call_bytes: [0xe8, 0x41, 0x0b, 0x00, 0x00],
-                real_fn: 0x0045_03f0,
-                splice_addr: IO_ERROR_SPLICE,
-                splice_expected: [0x8b, 0x04, 0xb5, 0x50, 0xea, 0x4a, 0x00],
-            },
-            io_error_abort_trampoline as *mut (),
         );
     }
 }

@@ -19,7 +19,6 @@ pub mod game_addr;
 pub mod gdi_caps;
 pub mod iat;
 pub mod input;
-pub mod loader_sync;
 pub mod log;
 mod log_cap;
 mod modules;

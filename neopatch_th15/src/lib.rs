@@ -123,6 +123,5 @@ unsafe fn install_hooks() {
         patches::install_anm_matrix_tz_fix();
         patches::install_screenshot_hook();
         patches::install_destructor_hook();
-        patches::install_loader_sync_hooks();
     }
 }

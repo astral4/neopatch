@@ -2,7 +2,6 @@
 
 use neopatch_core::d3d9::install_call_site_rewrite;
 use neopatch_core::destructor_pump::{self, Hook};
-use neopatch_core::loader_sync::{self, LOADER_SIGNAL_ABORT};
 use neopatch_core::patches::{Patch, patch_jmp};
 use neopatch_core::screenshot::save_screenshot_live;
 use std::arch::naked_asm;
@@ -83,51 +82,6 @@ pub(crate) unsafe fn install_destructor_hook() {
             loader_handle_offset: 0x10,
             dtor_label: "fcn.0043afe0",
         });
-    }
-}
-
-/// Fixes a race between the main thread and the sound-file / I/O loader threads.
-///
-/// `LOADER_SIGNAL` semantics for th16: non-zero releases the loaders' post-load waits. `2`
-/// (written by `sound_load_error_abort_trampoline`) is the only escape from the I/O thread's
-/// NULL-slot busy-wait in `fcn.0045e990`, which consumes the `se_*.wav` table the sound-file
-/// loader (`fcn.0045d7e0`) produces at `0x004dbfe4`.
-const LOADER_SIGNAL: usize = 0x004d_f490;
-const SOUND_LOAD_ERROR_SPLICE: usize = 0x0045_d82f;
-const SOUND_LOAD_ERROR_DISPLACED_LEN: usize = 7;
-static SOUND_LOAD_ERROR_AFTER_SPLICE: usize =
-    SOUND_LOAD_ERROR_SPLICE + SOUND_LOAD_ERROR_DISPLACED_LEN;
-
-/// Splices into the sound-file loader's error-exit path at `fcn.0045d7e0+0x4f`. The displaced
-/// 7-byte `push dword [esi*4 + 0x491a00]` (the `.wav` path for the "error : Sound %s" `printf`)
-/// is replayed. The inserted `signal = 2` releases the I/O thread's NULL-slot busy-wait.
-#[unsafe(naked)]
-unsafe extern "C" fn sound_load_error_abort_trampoline() -> ! {
-    naked_asm!(
-        "mov dword ptr [{signal}], {abort}",
-        "push dword ptr [esi*4 + 0x491a00]",
-        "jmp dword ptr [{slot}]",
-        signal = const LOADER_SIGNAL,
-        abort = const LOADER_SIGNAL_ABORT,
-        slot = sym SOUND_LOAD_ERROR_AFTER_SPLICE,
-    )
-}
-
-pub(crate) unsafe fn install_loader_sync_hooks() {
-    unsafe {
-        loader_sync::install(
-            &loader_sync::Config {
-                signal_addr: LOADER_SIGNAL,
-                bgm_handle_addr: 0x004d_f488,
-                io_handle_addr: 0x004d_f484,
-                call_site: 0x0045_9fa3,
-                call_bytes: [0xe8, 0xa8, 0x0c, 0x00, 0x00],
-                real_fn: 0x0045_ac50,
-                splice_addr: SOUND_LOAD_ERROR_SPLICE,
-                splice_expected: [0xff, 0x34, 0xb5, 0x00, 0x1a, 0x49, 0x00],
-            },
-            sound_load_error_abort_trampoline as *mut (),
-        );
     }
 }
 
