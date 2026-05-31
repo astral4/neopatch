@@ -12,7 +12,6 @@ pub mod config;
 pub mod crash;
 pub mod d3d9;
 pub mod d3dx9;
-pub mod destructor_pump;
 pub mod dinput8;
 pub mod exit_hooks;
 pub mod game_addr;

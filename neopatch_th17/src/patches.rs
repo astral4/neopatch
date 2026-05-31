@@ -1,11 +1,9 @@
 //! Patches and hooks for th17.exe v1.00b.
 
 use neopatch_core::d3d9::install_call_site_rewrite;
-use neopatch_core::destructor_pump::{self, Hook};
 use neopatch_core::patches::{Patch, patch_jmp};
 use neopatch_core::screenshot::save_screenshot_live;
 use std::arch::naked_asm;
-use std::ffi::c_void;
 
 /// Live `Direct3DCreate9` call site, rewritten to defend against downstream IAT hijacks.
 /// This is the only call site in th17.
@@ -47,43 +45,6 @@ const PATCHES: &[Patch] = &[
 
 pub(crate) unsafe fn apply_basic() {
     unsafe { Patch::apply_all(PATCHES) };
-}
-
-/// `AsciiInf` destructor pump for th17. See `core::destructor_pump` for more details.
-///
-/// Destructor: `fcn.00440bb0`. Worker thread: `fcn.00440770`, spawned by
-/// `AsciiInf::start` (`fcn.00440a30`). The worker preloads `.anm` assets off-main,
-/// including the resolution font (`ascii.anm` / `ascii_960.anm` / `ascii_1280.anm`,
-/// chosen by `[0x4b5cd3] % 3`, the display-mode byte). Spin flag: `[anim+0x128]`.
-/// Anim driver: `fcn.0046d050`. Join helper: `fcn.00402b60`. Handle slot: `[this+0x10]`.
-///
-/// The destructor is thiscall (`this` in ECX), but the factory does `push ecx; call dtor`
-/// and it returns with `ret 4` to clean that one unused stack arg.
-const FCN_00440BB0: usize = 0x0044_0bb0;
-static FCN_00440BB0_AFTER_PROLOGUE: usize = FCN_00440BB0 + 5;
-
-/// Replays the displaced 5-byte prologue (`push ebp; mov ebp, esp; push -1`) and resumes past the splice.
-#[unsafe(naked)]
-unsafe extern "thiscall" fn fcn_00440bb0_trampoline(_this: *mut c_void, _flags: u32) -> i32 {
-    naked_asm!(
-        "push ebp",
-        "mov ebp, esp",
-        "push -1",
-        "jmp dword ptr [{slot}]",
-        slot = sym FCN_00440BB0_AFTER_PROLOGUE,
-    )
-}
-
-pub(crate) unsafe fn install_destructor_hook() {
-    unsafe {
-        destructor_pump::install(destructor_pump::Config {
-            dtor_addr: FCN_00440BB0,
-            hook: Hook::EbpFrameThiscallRet4(fcn_00440bb0_trampoline),
-            anim_driver_addr: 0x0046_d050,
-            loader_handle_offset: 0x10,
-            dtor_label: "fcn.00440bb0",
-        });
-    }
 }
 
 /// Splice over `movss dword [ebp-0x64], xmm3` (5 bytes) inside `fcn.0046e560`, the

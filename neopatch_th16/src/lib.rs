@@ -116,7 +116,6 @@ unsafe fn install_hooks() {
             input::install();
         }
         patches::apply_basic();
-        patches::install_destructor_hook();
         patches::install_anm_matrix_tz_fix();
         patches::install_screenshot_hook();
     }

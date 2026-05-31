@@ -1,11 +1,9 @@
 //! Patches and hooks for th15.exe v1.00b.
 
 use neopatch_core::d3d9::install_call_site_rewrite;
-use neopatch_core::destructor_pump::{self, Hook};
 use neopatch_core::patches::{Patch, patch_jmp};
 use neopatch_core::screenshot::save_screenshot_live;
 use std::arch::naked_asm;
-use std::ffi::c_void;
 
 /// Live `Direct3DCreate9` call site, rewritten to defend against downstream IAT hijacks.
 /// There is a second call site at `0x00472e72`, a dead standalone init helper that nothing calls.
@@ -106,42 +104,5 @@ pub(crate) unsafe fn install_screenshot_hook() {
             screenshot_trampoline as *mut (),
             "screenshot save (fcn.0044cbf0)",
         );
-    }
-}
-
-/// `AsciiInf` destructor pump for th15. See `core::destructor_pump` for more details.
-///
-/// Destructor: `fcn.0044bed0` (`sprtlib.h:750`).
-/// Worker thread: `fcn.0044bd00`, spawned by `AsciiInf::start` (`fcn.0044be50`).
-/// The worker preloads `.anm` assets (including one of `ascii.anm` / `ascii_960.anm` /
-/// `ascii_1280.anm`, chosen by `[0x4e79c3] % 3`, the display-mode byte) into a 30-slot
-/// table at `[DAT_00503c18 + 0x187f4d8]`.
-/// Spin flag: `[anim+0x12c]`. Anim driver: `fcn.004865f0`. Join helper: `fcn.00403f30`.
-/// Handle slot: `[this+0x10]`.
-const FCN_0044BED0: usize = 0x0044_bed0;
-static FCN_0044BED0_AFTER_PROLOGUE: usize = FCN_0044BED0 + 5;
-
-/// Replays the displaced 5-byte prologue (`push ebp; mov ebp, esp; push -1`) and resumes past the splice.
-/// None of the replayed instructions touch ECX, so `this` survives the trampoline.
-#[unsafe(naked)]
-unsafe extern "thiscall" fn fcn_0044bed0_trampoline(_this: *mut c_void) -> i32 {
-    naked_asm!(
-        "push ebp",
-        "mov ebp, esp",
-        "push -1",
-        "jmp dword ptr [{slot}]",
-        slot = sym FCN_0044BED0_AFTER_PROLOGUE,
-    )
-}
-
-pub(crate) unsafe fn install_destructor_hook() {
-    unsafe {
-        destructor_pump::install(destructor_pump::Config {
-            dtor_addr: FCN_0044BED0,
-            hook: Hook::EbpFrameThiscall(fcn_0044bed0_trampoline),
-            anim_driver_addr: 0x0048_65f0,
-            loader_handle_offset: 0x10,
-            dtor_label: "fcn.0044bed0",
-        });
     }
 }

@@ -1,11 +1,9 @@
 //! Patches and hooks for th14.exe v1.00b.
 
 use neopatch_core::d3d9::install_call_site_rewrite;
-use neopatch_core::destructor_pump::{self, Hook};
 use neopatch_core::patches::{Patch, patch_jmp};
 use neopatch_core::screenshot::save_screenshot_live;
 use std::arch::naked_asm;
-use std::ffi::c_void;
 
 /// Live `Direct3DCreate9` call site, rewritten to defend against downstream IAT hijacks.
 /// There is a second call site at `0x0046ae12`, a dead standalone init helper that nothing calls.
@@ -84,43 +82,6 @@ pub(crate) unsafe fn install_anm_matrix_tz_fix() {
             anm_mode57_z_trampoline as *mut (),
             "AnmManager mode 5/7 z + matrix.tz",
         );
-    }
-}
-
-/// `AsciiInf` destructor pump for th14. See `core::destructor_pump` for more details.
-///
-/// Destructor: `fcn.00444340` (`src\game\ascii.cpp:82`). Worker thread: `fcn.00444170`,
-/// spawned by `AsciiInf::start` (`fcn.004442c0`). The worker preloads `.anm` assets
-/// (including one of `ascii.anm` / `ascii_960.anm` / `ascii_1280.anm`, chosen by
-/// `[0x4d9153] % 3`, the display-mode byte) into a 26-slot table at `[[0x4f56cc] + 0xbc7b0c]`.
-/// Spin flag: `[anim+0x12c]`. Anim driver: `fcn.0047d720`. Join helper: `fcn.00403bb0`.
-/// Handle slot: `[this+0x14]` (the destructor passes `&edi[0x10]` to the join helper,
-/// which reads `[ecx+4]`).
-const FCN_00444340: usize = 0x0044_4340;
-static FCN_00444340_AFTER_PROLOGUE: usize = FCN_00444340 + 5;
-
-/// Replays the displaced 5-byte prologue (`push ebp; mov ebp, esp; push -1`) and resumes past the splice.
-/// None of the replayed instructions touch ECX, so `this` survives the trampoline.
-#[unsafe(naked)]
-unsafe extern "thiscall" fn fcn_00444340_trampoline(_this: *mut c_void) -> i32 {
-    naked_asm!(
-        "push ebp",
-        "mov ebp, esp",
-        "push -1",
-        "jmp dword ptr [{slot}]",
-        slot = sym FCN_00444340_AFTER_PROLOGUE,
-    )
-}
-
-pub(crate) unsafe fn install_destructor_hook() {
-    unsafe {
-        destructor_pump::install(destructor_pump::Config {
-            dtor_addr: FCN_00444340,
-            hook: Hook::EbpFrameThiscall(fcn_00444340_trampoline),
-            anim_driver_addr: 0x0047_d720,
-            loader_handle_offset: 0x14,
-            dtor_label: "fcn.00444340",
-        });
     }
 }
 

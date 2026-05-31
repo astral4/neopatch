@@ -1,11 +1,9 @@
 //! Patches and hooks for th16.exe v1.00a.
 
 use neopatch_core::d3d9::install_call_site_rewrite;
-use neopatch_core::destructor_pump::{self, Hook};
 use neopatch_core::patches::{Patch, patch_jmp};
 use neopatch_core::screenshot::save_screenshot_live;
 use std::arch::naked_asm;
-use std::ffi::c_void;
 
 /// Live `Direct3DCreate9` call site, rewritten to defend against downstream IAT hijacks.
 /// This is the only call site in th16.
@@ -50,39 +48,6 @@ const PATCHES: &[Patch] = &[
 
 pub(crate) unsafe fn apply_basic() {
     unsafe { Patch::apply_all(PATCHES) };
-}
-
-/// `AsciiInf` destructor pump for th16. See `core::destructor_pump` for more details.
-///
-/// Destructor: `fcn.0043afe0` (ebp-frame + SEH prologue, thiscall).
-/// Worker thread: `fcn.0043adc0`, spawned by `AsciiInf::start` (`fcn.0043af60`) via `_beginthreadex`.
-/// Spin flag: `[anim+0x128]`. Anim driver: `fcn.00465a30`. Handle slot: `[this+0x10]`.
-const FCN_0043AFE0: usize = 0x0043_afe0;
-static FCN_0043AFE0_AFTER_PROLOGUE: usize = FCN_0043AFE0 + 5;
-
-/// Replays the displaced 5-byte prologue (`push ebp; mov ebp, esp; push -1`) and resumes
-/// past the splice. None of the replayed instructions touch ECX, so `this` survives.
-#[unsafe(naked)]
-unsafe extern "thiscall" fn fcn_0043afe0_trampoline(_this: *mut c_void) -> i32 {
-    naked_asm!(
-        "push ebp",
-        "mov ebp, esp",
-        "push -1",
-        "jmp dword ptr [{slot}]",
-        slot = sym FCN_0043AFE0_AFTER_PROLOGUE,
-    )
-}
-
-pub(crate) unsafe fn install_destructor_hook() {
-    unsafe {
-        destructor_pump::install(destructor_pump::Config {
-            dtor_addr: FCN_0043AFE0,
-            hook: Hook::EbpFrameThiscall(fcn_0043afe0_trampoline),
-            anim_driver_addr: 0x0046_5a30,
-            loader_handle_offset: 0x10,
-            dtor_label: "fcn.0043afe0",
-        });
-    }
 }
 
 /// Splice over `movss dword [ebp-0x64], xmm3` (5 bytes) inside `fcn.00466f00`, the
