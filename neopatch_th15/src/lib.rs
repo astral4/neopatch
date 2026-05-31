@@ -95,8 +95,10 @@ unsafe fn install_hooks() {
         window::install(
             host_exe,
             &core_cfg.window,
-            th15_cfg.resolution.dimensions(),
-            core_cfg.display.mode,
+            window::WindowPolicy::Restyle {
+                framebuffer: th15_cfg.resolution.dimensions(),
+                display_mode: core_cfg.display.mode,
+            },
         );
         dialog_dismiss::install(host_exe);
         exit_hooks::install(host_exe);

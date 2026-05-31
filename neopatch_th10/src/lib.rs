@@ -96,8 +96,10 @@ unsafe fn install_hooks() {
         window::install(
             host_exe,
             &core_cfg.window,
-            FRAMEBUFFER_SIZE,
-            core_cfg.display.mode,
+            window::WindowPolicy::Restyle {
+                framebuffer: FRAMEBUFFER_SIZE,
+                display_mode: core_cfg.display.mode,
+            },
         );
         dialog_dismiss::install(host_exe);
         exit_hooks::install(host_exe);

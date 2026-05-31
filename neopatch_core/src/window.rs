@@ -13,10 +13,23 @@ use windows_sys::Win32::Foundation::{HMODULE, HWND, RECT};
 use windows_sys::Win32::Globalization::MultiByteToWideChar;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AdjustWindowRectEx, GWL_EXSTYLE, GWL_STYLE, HMENU, HWND_TOPMOST, SWP_FRAMECHANGED,
-    SWP_NOOWNERZORDER, SWP_SHOWWINDOW, SetWindowLongA, SetWindowPos, SetWindowTextW,
-    WINDOW_EX_STYLE, WINDOW_STYLE, WS_CAPTION, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_OVERLAPPED,
-    WS_POPUP, WS_SYSMENU, WS_VISIBLE,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_SHOWWINDOW, SetWindowLongA,
+    SetWindowPos, SetWindowTextW, WINDOW_EX_STYLE, WINDOW_STYLE, WS_CAPTION, WS_MAXIMIZEBOX,
+    WS_MINIMIZEBOX, WS_OVERLAPPED, WS_POPUP, WS_SYSMENU, WS_VISIBLE,
 };
+
+/// What `install` does with the game's render window. `Restyle` rewrites
+/// size/position/style/title/Z-order from `[window]`. `DeferToGame` is for th18 specifically
+/// and leaves geometry and style to the game; only the title rewrite and `always_on_top`
+/// still apply, since Z-order is part of `GWL_EXSTYLE`, which the game doesn't touch.
+#[derive(Clone, Copy)]
+pub enum WindowPolicy {
+    Restyle {
+        framebuffer: (u32, u32),
+        display_mode: DisplayMode,
+    },
+    DeferToGame,
+}
 
 iat_hook! {
     REAL_CREATEWINDOWEXA / real_create_window_ex_a : "CreateWindowExA"
@@ -65,27 +78,35 @@ impl ResolvedWindowCfg {
     }
 }
 
-struct State {
-    framebuffer: (u32, u32),
-    restyle: ResolvedWindowCfg,
+enum State {
+    Restyle {
+        framebuffer: (u32, u32),
+        restyle: ResolvedWindowCfg,
+    },
+    DeferToGame {
+        always_on_top: bool,
+    },
 }
 
 /// Caches the resolved `WindowCfg` and IAT-hooks `CreateWindowExA` against
-/// `host`'s import table. The hook restyles the game's main render window
-/// (matched by the `"BASE"` class name) to the configured setting.
+/// `host`'s import table. The hook acts on the game's main render window
+/// (matched by the `"BASE"` class name) per the `WindowPolicy`.
 ///
 /// # Safety
 /// `host` must be a loaded module handle.
-pub unsafe fn install(
-    host: HMODULE,
-    restyle: &WindowCfg,
-    framebuffer: (u32, u32),
-    display_mode: DisplayMode,
-) {
+pub unsafe fn install(host: HMODULE, restyle: &WindowCfg, policy: WindowPolicy) {
     unsafe {
-        let state = State {
-            framebuffer,
-            restyle: ResolvedWindowCfg::new(restyle, framebuffer, display_mode),
+        let state = match policy {
+            WindowPolicy::Restyle {
+                framebuffer,
+                display_mode,
+            } => State::Restyle {
+                framebuffer,
+                restyle: ResolvedWindowCfg::new(restyle, framebuffer, display_mode),
+            },
+            WindowPolicy::DeferToGame => State::DeferToGame {
+                always_on_top: restyle.always_on_top,
+            },
         };
         _ = STATE.set(state);
         REAL_CREATEWINDOWEXA.install(host, hook_create_window_ex_a);
@@ -118,8 +139,11 @@ unsafe extern "system" fn hook_create_window_ex_a(
             && h_wnd_parent.is_null()
             && class_name_matches(class_name, b"BASE");
 
-        let (use_w, use_h) = if is_main && (dw_style & WS_POPUP) == 0 {
-            let (bw, bh) = STATE.get().unwrap().framebuffer;
+        let state = STATE.get().unwrap();
+        let (use_w, use_h) = if let (true, State::Restyle { framebuffer, .. }) = (is_main, state)
+            && (dw_style & WS_POPUP) == 0
+        {
+            let (bw, bh) = *framebuffer;
             let mut rc = RECT {
                 left: 0,
                 top: 0,
@@ -170,9 +194,33 @@ unsafe extern "system" fn hook_create_window_ex_a(
                 .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
         {
-            apply(hwnd, &STATE.get().unwrap().restyle, window_name);
+            match state {
+                State::Restyle { restyle, .. } => apply(hwnd, restyle, window_name),
+                State::DeferToGame { always_on_top } => {
+                    apply_deferred(hwnd, *always_on_top, window_name);
+                }
+            }
         }
         hwnd
+    }
+}
+
+/// `apply` without geometry/style modifications.
+unsafe fn apply_deferred(hwnd: HWND, always_on_top: bool, lp_window_name: Untrusted<u8>) {
+    unsafe {
+        let title = build_extended_title(lp_window_name);
+        SetWindowTextW(hwnd, title.as_ptr());
+        if always_on_top {
+            SetWindowPos(
+                hwnd,
+                HWND_TOPMOST,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER,
+            );
+        }
     }
 }
 
