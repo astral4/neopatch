@@ -2,7 +2,7 @@
 
 use neopatch_core::config::{self, CoreConfig};
 use std::fmt::{Display, Formatter, Result as FmtResult};
-use std::io::Write;
+use std::io::{Result as IoResult, Write};
 use std::sync::OnceLock;
 
 #[derive(Default)]
@@ -88,7 +88,7 @@ fn parse_th15_only(text: &str) -> Th15Config {
 pub(crate) fn write_manifest_extras<W: Write + ?Sized>(
     w: &mut W,
     th15: &Th15Config,
-) -> std::io::Result<()> {
+) -> IoResult<()> {
     writeln!(w, "display.resolution={}", th15.resolution)
 }
 
