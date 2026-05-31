@@ -4,6 +4,7 @@ use neopatch_core::d3d9::install_call_site_rewrite;
 use neopatch_core::patches::{Patch, patch_jmp};
 use neopatch_core::screenshot::save_screenshot_live;
 use std::arch::naked_asm;
+use std::ffi::c_char;
 
 /// Live `Direct3DCreate9` call site, rewritten to defend against downstream IAT hijacks.
 /// This is the only call site in th17.
@@ -82,7 +83,7 @@ const SCREENSHOT_SAVE_FN: usize = 0x0044_18c0;
 const SCREENSHOT_SAVE_FN_PROLOGUE: [u8; 5] = [0x53, 0x8b, 0xdc, 0x83, 0xec];
 
 #[unsafe(naked)]
-unsafe extern "C" fn screenshot_trampoline() -> u32 {
+unsafe extern "stdcall" fn screenshot_trampoline(_filename: *const c_char) -> u32 {
     naked_asm!(
         "push dword ptr [esp + 4]",
         "call {save}",
