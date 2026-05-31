@@ -10,6 +10,7 @@ members = [
     "neopatch_th15",
     "neopatch_th16",
     "neopatch_th17",
+    "neopatch_th18",
 ]
 
 [workspace.package]

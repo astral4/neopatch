@@ -21,7 +21,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 /// What `install` does with the game's render window. `Restyle` rewrites
 /// size/position/style/title/Z-order from `[window]`. `DeferToGame` is for th18 specifically
 /// and leaves geometry and style to the game; only the title rewrite and `always_on_top`
-/// still apply, since Z-order is part of `GWL_EXSTYLE`, which the game doesn't touch.
+/// still apply. th18's borderless path resets `GWL_STYLE` and reorders the window with `HWND_TOP`,
+/// but neither removes `WS_EX_TOPMOST`, so `always_on_top` is preserved
 #[derive(Clone, Copy)]
 pub enum WindowPolicy {
     Restyle {

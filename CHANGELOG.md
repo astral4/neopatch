@@ -7,6 +7,7 @@ All notable changes to neopatch will be documented in this file.
 ### Added
 
 - Support for Touhou 17 ~ Wily Beast and Weakest Creature (`th17.exe v1.00b`).
+- Support for Touhou 18 ~ Unconnected Marketeers (`th18.exe v1.00a`).
 
 ### Fixed
 
