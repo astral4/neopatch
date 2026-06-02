@@ -155,7 +155,7 @@ fn sample_thread(tid: u32) -> Option<ThreadSample> {
     // and a non-allocating closure; ours only reads thread context into stack locals.
     unsafe {
         let access = THREAD_GET_CONTEXT | THREAD_SUSPEND_RESUME | THREAD_QUERY_INFORMATION;
-        let h: HANDLE = OpenThread(access, 0, tid.get());
+        let h = OpenThread(access, 0, tid.get());
         if h.is_null() {
             return None;
         }

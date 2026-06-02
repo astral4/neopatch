@@ -51,13 +51,13 @@ fn replay_mode(_tok: &MainToken) -> ReplayMode {
     let slide = *SLIDE
         .get()
         .expect("state::install must run before the first replay_mode call");
-    let mgr: *const u8 = unsafe { rebased_addr::<*const u8>(slide, MANAGER_PTR_VA) }.read();
+    let mgr: *const u8 = unsafe { rebased_addr(slide, MANAGER_PTR_VA) }.read();
     if mgr.is_null() {
         return ReplayMode::Normal;
     }
     // The mode field is at a pointer-derived address (`*mgr + offset`), so it stays a raw read.
     let mode_addr = mgr.addr().wrapping_add(MANAGER_MODE_OFFSET);
-    let mode: i32 = unsafe { read_volatile(with_exposed_provenance::<i32>(mode_addr)) };
+    let mode: i32 = unsafe { read_volatile(with_exposed_provenance(mode_addr)) };
     if mode != VIEWER_MODE {
         return ReplayMode::Normal;
     }
@@ -109,7 +109,7 @@ fn key_held(vk: u16) -> bool {
 }
 
 fn read_qpc() -> i64 {
-    let mut t: i64 = 0;
+    let mut t = 0;
     unsafe { QueryPerformanceCounter(&raw mut t) };
     t
 }
@@ -119,7 +119,7 @@ fn qpc_freq() -> i64 {
     if cached != 0 {
         return cached;
     }
-    let mut f: i64 = 0;
+    let mut f = 0;
     unsafe { QueryPerformanceFrequency(&raw mut f) };
     QPC_FREQ.store(f, Ordering::Relaxed);
     f

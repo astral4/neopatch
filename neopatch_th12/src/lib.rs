@@ -60,7 +60,7 @@ unsafe fn install_hooks() {
         let host_exe_path = current_exe().ok();
         let exe_dir = host_exe_path.as_deref().and_then(Path::parent);
 
-        let core_cfg: CoreConfig = exe_dir
+        let core_cfg = exe_dir
             .and_then(|d| read(d.join("neopatch.ini")).ok())
             .map_or_else(CoreConfig::default, |b| {
                 core_config::parse_core_only(&core_config::decode_text(&b))
@@ -87,7 +87,7 @@ unsafe fn install_hooks() {
         // Important: IAT patches should operate on th12.exe's import table, not ours!
         // Passing our `hinst` would walk the wrong import directory
         // and silently no-op for symbols we don't import ourselves.
-        let host_exe: HMODULE = GetModuleHandleW(null());
+        let host_exe = GetModuleHandleW(null());
 
         process::apply(&core_cfg.process);
 

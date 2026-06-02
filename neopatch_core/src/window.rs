@@ -351,7 +351,7 @@ fn build_extended_title_from_sjis(original: Untrusted<u8>) -> Vec<u16> {
 fn build_extended_title_from_wide(original: Untrusted<u16>) -> Vec<u16> {
     const BUF_LEN: usize = 512;
     let mut buf = [0u16; BUF_LEN];
-    let mut wide: Vec<u16> = original.safe_read_until(&mut buf, 0).to_vec();
+    let mut wide = original.safe_read_until(&mut buf, 0).to_vec();
     append_suffix(&mut wide);
     wide
 }

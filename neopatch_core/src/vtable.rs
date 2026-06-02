@@ -250,8 +250,8 @@ pub(crate) unsafe fn capture_slot<F, V>(
 ) where
     F: Copy + Send + Sync + 'static,
 {
-    let slot_ptr: *const F = proj.slot_ptr(vtbl.as_ptr()).cast_const();
-    let raw: *mut () = unsafe { read_unaligned(slot_ptr.cast::<*mut ()>()) };
+    let slot_ptr = proj.slot_ptr(vtbl.as_ptr()).cast_const();
+    let raw: *mut () = unsafe { read_unaligned(slot_ptr.cast()) };
 
     if let Some(existing) = dst.try_get() {
         let existing_raw = hook_to_raw(existing);
@@ -323,7 +323,7 @@ impl<V> VtblScope<'_, V> {
         let slot_raw: *mut *mut () = slot_ptr.cast();
         // SAFETY: writable window open for the scope; the projection's const assert
         // guarantees the slot lies within the `size_of::<V>()` protected range.
-        let current: *mut () = unsafe { read_unaligned(slot_raw) };
+        let current = unsafe { read_unaligned(slot_raw) };
         #[allow(clippy::cast_possible_truncation)]
         let current_addr = current as u32;
         let offset = proj.offset();
@@ -396,7 +396,7 @@ impl<V> VtblScope<'_, V> {
         unsafe { write_unaligned(slot_raw, hook_raw) };
 
         // SAFETY: see above.
-        let verify: *mut () = unsafe { read_unaligned(slot_raw) };
+        let verify = unsafe { read_unaligned(slot_raw) };
         let outcome = if verify == hook_raw {
             Outcome::Applied
         } else {

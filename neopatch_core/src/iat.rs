@@ -100,7 +100,7 @@ impl<F: Copy + Send + Sync + 'static> IatHook<F> {
         // `install` runs single-threaded under the OS loader lock. The first trampoline call
         // comes from `DllMain` and returns before other threads resume,
         // so plain reads and writes don't need fences.
-        let raw_current: *mut () = unsafe { read_unaligned(slot_raw) };
+        let raw_current = unsafe { read_unaligned(slot_raw) };
         if raw_current == hook_raw && self.slot.try_get().is_some() {
             info!(kind = "iat_hook", name = self.name, status = "IDEMPOTENT");
             return true;
@@ -195,7 +195,7 @@ unsafe fn find_iat_slot(module: HMODULE, import_name: &str) -> Option<NonNull<*m
         let base_mut = module.cast::<u8>();
         let base = base_mut.cast_const();
 
-        let mut desc_offset: usize = 0;
+        let mut desc_offset = 0;
         loop {
             let dll_name_rva: u32 = read_unaligned(
                 imp_dir
@@ -230,7 +230,7 @@ unsafe fn find_iat_slot(module: HMODULE, import_name: &str) -> Option<NonNull<*m
             }
             let lookup_rva = oft;
 
-            let mut i: usize = 0;
+            let mut i = 0;
             loop {
                 let entry: u32 = read_unaligned(
                     base.add(lookup_rva as usize + i * size_of::<IMAGE_THUNK_DATA32>())
@@ -239,7 +239,7 @@ unsafe fn find_iat_slot(module: HMODULE, import_name: &str) -> Option<NonNull<*m
                 if entry == 0 {
                     break;
                 }
-                let ord_flag: u32 = 0x8000_0000;
+                let ord_flag = 0x8000_0000;
                 if entry & ord_flag == 0 {
                     // By-name import: `entry` is the RVA of `IMAGE_IMPORT_BY_NAME`.
                     let name_offset = entry as usize + offset_of!(ImageImportByName, name);

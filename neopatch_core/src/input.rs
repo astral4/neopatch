@@ -142,9 +142,9 @@ unsafe extern "system" fn hook_get_device_state(
     if hr.is_ok() && !lpv_data.is_null() && matches!(cb_data, DIJOYSTATE_SIZE | DIJOYSTATE2_SIZE) {
         unsafe {
             let ptr = lpv_data.cast::<u8>();
-            let pov: u32 = ptr.add(POV0_OFFSET).cast::<u32>().read_unaligned();
-            let lx: i32 = ptr.add(LX_OFFSET).cast::<i32>().read_unaligned();
-            let ly: i32 = ptr.add(LY_OFFSET).cast::<i32>().read_unaligned();
+            let pov = ptr.add(POV0_OFFSET).cast::<u32>().read_unaligned();
+            let lx = ptr.add(LX_OFFSET).cast::<i32>().read_unaligned();
+            let ly = ptr.add(LY_OFFSET).cast::<i32>().read_unaligned();
             let (new_lx, new_ly) = convert_pov(pov, lx, ly);
             ptr.add(LX_OFFSET).cast::<i32>().write_unaligned(new_lx);
             ptr.add(LY_OFFSET).cast::<i32>().write_unaligned(new_ly);

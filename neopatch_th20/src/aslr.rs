@@ -1,7 +1,7 @@
 //! Runtime rebasing for Touhou 20.
 //!
 //! Constants are stored as preferred-base VAs. Installation code adds `host_slide()`
-//! to reach the runtime VA. With ASLR off, `slide == 0`.thezvi.
+//! to reach the runtime VA. With ASLR off, `slide == 0`.
 
 use neopatch_core::d3d9::install_call_site_rewrite;
 use neopatch_core::game_addr::GameAddr;

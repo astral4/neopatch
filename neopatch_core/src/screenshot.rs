@@ -477,7 +477,7 @@ fn write_atomic(tmp: &[u8], dst: &[u8], data: &[u8]) -> Result<(), String> {
         return Err(format!("CreateFileA gle={err}"));
     }
 
-    let mut written: u32 = 0;
+    let mut written = 0;
     let write_ok = unsafe { WriteFile(h, data.as_ptr(), len, &raw mut written, null_mut()) };
     let write_err = if write_ok == 0 {
         Some(format!("WriteFile gle={}", unsafe { GetLastError() }))

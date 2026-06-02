@@ -55,17 +55,17 @@ impl ReplayStateLayout {
 #[must_use]
 pub fn read_replay_mode(_tok: &MainToken, layout: ReplayStateLayout) -> ReplayMode {
     let mgr: *const u8 =
-        unsafe { read_volatile(with_exposed_provenance::<*const u8>(layout.mgr_ptr_addr)) };
+        unsafe { read_volatile(with_exposed_provenance(layout.mgr_ptr_addr)) };
     if mgr.is_null() {
         return ReplayMode::Normal;
     }
     // SAFETY: `mode_addr` is `mgr + mgr_mode_offset`; both are 4-byte aligned.
     let mode_addr = mgr.addr().wrapping_add(layout.mgr_mode_offset);
-    let mode: i32 = unsafe { read_volatile(with_exposed_provenance::<i32>(mode_addr)) };
+    let mode: i32 = unsafe { read_volatile(with_exposed_provenance(mode_addr)) };
     if mode != layout.viewer_mode {
         return ReplayMode::Normal;
     }
-    let input: u32 = unsafe { read_volatile(with_exposed_provenance::<u32>(layout.input_addr)) };
+    let input: u32 = unsafe { read_volatile(with_exposed_provenance(layout.input_addr)) };
     if input & layout.input_focus_bit != 0 {
         ReplayMode::Slow
     } else if input & (layout.input_shoot_bit | layout.input_skip_bit) != 0 {

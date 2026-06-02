@@ -157,7 +157,7 @@ impl Pacer {
         // We shave a safety margin and spin to the exact deadline.
         let hundred_ns = qpc_to_100ns(remaining_qpc, self.qpc_freq);
         if hundred_ns > SAFETY_MARGIN_100NS {
-            let due: i64 = -(hundred_ns - SAFETY_MARGIN_100NS);
+            let due = -(hundred_ns - SAFETY_MARGIN_100NS);
             unsafe {
                 if SetWaitableTimer(h, &raw const due, 0, None, null(), 0) != 0 {
                     WaitForSingleObject(h, INFINITE);
@@ -202,7 +202,7 @@ fn create_waitable_timer() -> HANDLE {
 }
 
 fn qpc() -> i64 {
-    let mut t: i64 = 0;
+    let mut t = 0;
     unsafe {
         QueryPerformanceCounter(&raw mut t);
     }
@@ -212,7 +212,7 @@ fn qpc() -> i64 {
 // `QueryPerformanceFrequency` is documented as fixed at boot, so a single read
 // at `Pacer::new` is enough; the value is then stored as a field.
 fn read_qpc_freq() -> i64 {
-    let mut f: i64 = 0;
+    let mut f = 0;
     unsafe {
         QueryPerformanceFrequency(&raw mut f);
     }

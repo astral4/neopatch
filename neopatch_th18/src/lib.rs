@@ -59,7 +59,7 @@ unsafe fn install_hooks() {
         let host_exe_path = current_exe().ok();
         let exe_dir = host_exe_path.as_deref().and_then(Path::parent);
 
-        let (th18_cfg, core_cfg): (Th18Config, CoreConfig) = exe_dir
+        let (th18_cfg, core_cfg) = exe_dir
             .and_then(|d| read(d.join("neopatch.ini")).ok())
             .map_or_else(
                 || (Th18Config::default(), CoreConfig::default()),
@@ -83,7 +83,7 @@ unsafe fn install_hooks() {
         }
 
         // Important: IAT patches operate on th18.exe's import table, not ours.
-        let host_exe: HMODULE = GetModuleHandleW(null());
+        let host_exe = GetModuleHandleW(null());
 
         process::apply(&core_cfg.process);
 

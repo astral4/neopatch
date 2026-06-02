@@ -66,7 +66,7 @@ pub(crate) fn walk_modules() -> Vec<Module> {
     unsafe {
         let process = GetCurrentProcess();
         let mut handles: [HMODULE; HANDLES_LEN] = [null_mut(); HANDLES_LEN];
-        let mut needed: u32 = 0;
+        let mut needed = 0;
         if EnumProcessModules(process, handles.as_mut_ptr(), BUF_BYTES, &raw mut needed) == 0 {
             return result;
         }

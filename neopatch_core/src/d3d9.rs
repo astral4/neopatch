@@ -267,7 +267,7 @@ unsafe extern "system" fn hook_direct3dcreate9(sdk_version: u32) -> *mut c_void 
             }
         };
         // `into_raw` transfers the ref to the game without `Release`.
-        let p_ex: *mut c_void = ex.into_raw();
+        let p_ex = ex.into_raw();
         let Some(p_ex_nn) = NonNull::new(p_ex) else {
             return null_mut();
         };
@@ -1166,7 +1166,7 @@ mod tests {
     #[test]
     fn translate_managed_pool_swaps_managed_for_default_dynamic() {
         let mut pool = D3DPOOL_MANAGED;
-        let mut usage: u32 = 0;
+        let mut usage = 0;
         assert!(translate_managed_pool(&mut pool, &mut usage));
         assert_eq!(pool, D3DPOOL_DEFAULT);
         assert_eq!(usage, D3DUSAGE_DYNAMIC.cast_unsigned());
@@ -1175,7 +1175,7 @@ mod tests {
     #[test]
     fn translate_managed_pool_preserves_existing_usage_bits() {
         let mut pool = D3DPOOL_MANAGED;
-        let mut usage: u32 = D3DUSAGE_WRITEONLY.cast_unsigned();
+        let mut usage = D3DUSAGE_WRITEONLY.cast_unsigned();
         assert!(translate_managed_pool(&mut pool, &mut usage));
         assert_eq!(pool, D3DPOOL_DEFAULT);
         assert_eq!(
@@ -1188,7 +1188,7 @@ mod tests {
     fn translate_managed_pool_leaves_non_managed_pools_alone() {
         for pool_in in [D3DPOOL_DEFAULT, D3DPOOL_SYSTEMMEM, D3DPOOL_SCRATCH] {
             let mut pool = pool_in;
-            let mut usage: u32 = 0;
+            let mut usage = 0;
             assert!(!translate_managed_pool(&mut pool, &mut usage));
             assert_eq!(pool, pool_in);
             assert_eq!(usage, 0);

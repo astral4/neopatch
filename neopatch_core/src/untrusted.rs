@@ -115,7 +115,7 @@ fn rpm(src: *const c_void, dst: *mut c_void, len: usize) -> usize {
     if src.is_null() {
         return 0;
     }
-    let mut bytes_read: usize = 0;
+    let mut bytes_read = 0;
     let _ = unsafe { ReadProcessMemory(GetCurrentProcess(), src, dst, len, &raw mut bytes_read) };
     bytes_read
 }

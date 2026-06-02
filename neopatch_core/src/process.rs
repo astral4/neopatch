@@ -40,7 +40,7 @@ pub fn apply(cfg: &ProcessCfg) {
 
 /// Registers the calling thread with the MMCSS "Games" task class.
 pub(crate) fn register_mmcss(_tok: &MainToken) {
-    let mut task_idx: u32 = 0;
+    let mut task_idx = 0;
     let h = unsafe { AvSetMmThreadCharacteristicsW(w!("Games").as_ptr(), &raw mut task_idx) };
     let os_error = last_error_if(h.is_null());
     info!(
