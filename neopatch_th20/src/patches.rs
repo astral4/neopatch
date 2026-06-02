@@ -71,9 +71,10 @@ pub(crate) unsafe fn apply_basic(slide: usize) {
     }
 }
 
-/// th20 screenshot save (vanilla is `__thiscall(this, filename)`; our replacement bypasses the
-/// device-and-deferred-saver path that `this` carries, so the trampoline discards ECX and uses a
-/// `stdcall` shape). The game calls this from the render thread before `Present`. Saves PNG.
+/// th20 screenshot save (thiscall; `this` in ECX, filename pointer pushed on the stack).
+/// The game calls this from the render thread before `Present`.
+/// Vanilla uses `this` for its device and deferred saver; our `stdcall` trampoline
+/// discards it and saves via the tracked device in the core crate.
 const SCREENSHOT_SAVE_FN_VA: usize = 0x004d_e040;
 const SCREENSHOT_SAVE_FN_PROLOGUE: [u8; 5] = [0x55, 0x8b, 0xec, 0x83, 0xec];
 
