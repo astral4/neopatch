@@ -23,9 +23,9 @@ pub(crate) fn install(slide: usize) {
     let _ = REPLAY_STATE.set(ReplayStateLayout {
         mgr_ptr_addr: MANAGER_PTR_VA.wrapping_add(slide),
         mgr_mode_offset: MANAGER_MODE_OFFSET,
+        viewer_mode: VIEWER_MODE,
         input_addr: INPUT_PTR_VA.wrapping_add(slide),
         input_indirect: true,
-        viewer_mode: VIEWER_MODE,
         input_shoot_bit: 0x1,
         input_focus_bit: 0x8,
         input_skip_bit: 0x200,

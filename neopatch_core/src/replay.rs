@@ -17,13 +17,13 @@ pub struct ReplayStateLayout {
     pub mgr_ptr_addr: usize,
     /// Byte offset of the `mode: i32` field within the manager instance.
     pub mgr_mode_offset: usize,
+    /// Mode value indicating "viewer" (user is in replay playback).
+    pub viewer_mode: i32,
     /// Address of the game's input bitfield (u32), or, when `input_indirect`, of a pointer to it.
     pub input_addr: usize,
     /// If `true`, `input_addr` holds a pointer to the input object and the bitfield
     /// is its first dword; if `false`, `input_addr` is the bitfield itself.
     pub input_indirect: bool,
-    /// Mode value indicating "viewer" (user is in replay playback).
-    pub viewer_mode: i32,
     /// Bit set when "shoot" input is held.
     pub input_shoot_bit: u32,
     /// Bit set when "focus" input is held.

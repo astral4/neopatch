@@ -7,9 +7,9 @@ use neopatch_core::replay::{ReplayStateLayout, read_replay_mode};
 const REPLAY_STATE: ReplayStateLayout = ReplayStateLayout {
     mgr_ptr_addr: 0x0047_7838,
     mgr_mode_offset: 16,
+    viewer_mode: 1,
     input_addr: 0x0047_4e30,
     input_indirect: false,
-    viewer_mode: 1,
     input_shoot_bit: 0x1,
     input_focus_bit: 0x4,
     input_skip_bit: 0x100,
