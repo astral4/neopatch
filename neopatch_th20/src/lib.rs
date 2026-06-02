@@ -1,14 +1,20 @@
-//! neopatch_th11: latency reductions, optimizations, and other fixes for Touhou 11.
+//! neopatch_th20: latency reductions, optimizations, and other fixes for Touhou 20.
 //!
-//! Shipped as `dinput8.dll` next to `th11.exe`.
+//! Shipped as `dinput8.dll` next to `th20.exe`.
+//!
+//! Targets `th20.exe v1.00a`; the in-game title misreports "v1.00c" (copied from th19).
 
 #[cfg(all(not(panic = "abort"), not(test), not(doc)))]
-compile_error!("neopatch_th11 requires `panic = \"abort\"`");
+compile_error!("neopatch_th20 requires `panic = \"abort\"`");
 
+mod aslr;
+mod config;
 mod dialog_dismiss;
 mod patches;
 mod state;
 
+use crate::aslr::host_slide;
+use crate::config::{self as th20_config, Th20Config, Th20DisplayMode};
 use neopatch_core::config::{self as core_config, CoreConfig};
 use neopatch_core::pacer::{PACER, Pacer, PacingPolicy};
 use neopatch_core::{
@@ -20,13 +26,11 @@ use std::ffi::c_void;
 use std::fs::read;
 use std::path::{Path, PathBuf};
 use std::ptr::null;
+use tracing::info;
 use tracing::level_filters::LevelFilter;
 use windows_sys::Win32::Foundation::{HINSTANCE, HMODULE};
 use windows_sys::Win32::System::LibraryLoader::{DisableThreadLibraryCalls, GetModuleHandleW};
 use windows_sys::Win32::System::SystemServices::DLL_PROCESS_ATTACH;
-
-// The render resolution is always 640x480.
-const FRAMEBUFFER_SIZE: (u32, u32) = (640, 480);
 
 dinput8_export!();
 
@@ -45,9 +49,9 @@ pub unsafe extern "system" fn DllMain(
         // Lets the vtable patcher distinguish "already our hook" (idempotent re-entry)
         // from a shim-layer chain like `apphelp.dll`'s `CreateDevice` hijack.
         vtable::set_our_dll_handle(hinst as HMODULE);
+        dinput8::init();
         // Cache the real `DirectInput8Create` before `install_hooks`
         // so the proxy export works even if hook installation fails.
-        dinput8::init();
         install_hooks();
     }
     1
@@ -55,39 +59,38 @@ pub unsafe extern "system" fn DllMain(
 
 unsafe fn install_hooks() {
     unsafe {
-        // If `current_exe` fails, the configuration path is `None`
-        // and `install_dir` falls back to "." for the log root.
         let host_exe_path = current_exe().ok();
         let exe_dir = host_exe_path.as_deref().and_then(Path::parent);
 
-        let core_cfg: CoreConfig = exe_dir
+        let (th20_cfg, core_cfg): (Th20Config, CoreConfig) = exe_dir
             .and_then(|d| read(d.join("neopatch.ini")).ok())
-            .map_or_else(CoreConfig::default, |b| {
-                core_config::parse_core_only(&core_config::decode_text(&b))
-            });
+            .map_or_else(
+                || (Th20Config::default(), CoreConfig::default()),
+                |b| th20_config::parse(&core_config::decode_text(&b)),
+            );
         drop(core_config::CONFIG.set(core_cfg));
+        drop(config::CONFIG.set(th20_cfg));
         let core_cfg = core_config::CONFIG.get().unwrap();
+        let th20_cfg = config::CONFIG.get().unwrap();
 
-        // Initialize logging first so the earliest install events are captured.
-        // Minidumps land in `log::dump_dir`, the per-session directory next to `events.log`.
         let install_dir = exe_dir.map_or_else(|| PathBuf::from("."), Path::to_path_buf);
-        log::init(
-            &install_dir,
-            core_cfg,
-            host_exe_path.as_deref(),
-            |_w| Ok(()),
-        );
+        log::init(&install_dir, core_cfg, host_exe_path.as_deref(), |w| {
+            th20_config::write_manifest_extras(w, th20_cfg)
+        });
 
         crash::install_handlers();
-        // The watchdog only emits at INFO level anyway.
         if core_cfg.log.level >= LevelFilter::INFO {
             watchdog::install();
         }
 
-        // Important: IAT patches should operate on th11.exe's import table, not ours!
-        // Passing our `hinst` would walk the wrong import directory
-        // and silently no-op for symbols we don't import ourselves.
         let host_exe: HMODULE = GetModuleHandleW(null());
+        let slide = host_slide(host_exe);
+        info!(
+            kind = "aslr_slide",
+            host_base = format_args!("{:#010x}", host_exe as usize),
+            preferred_base = format_args!("{:#010x}", aslr::PREFERRED_IMAGE_BASE),
+            slide = format_args!("{slide:#010x}"),
+        );
 
         process::apply(&core_cfg.process);
 
@@ -96,35 +99,37 @@ unsafe fn install_hooks() {
         window::install(
             host_exe,
             &core_cfg.window,
-            window::WindowPolicy::Restyle {
-                framebuffer: FRAMEBUFFER_SIZE,
-                display_mode: core_cfg.display.mode,
+            match th20_cfg.display_mode {
+                Th20DisplayMode::Borderless => window::WindowPolicy::DeferToGame,
+                Th20DisplayMode::Windowed | Th20DisplayMode::Fullscreen => {
+                    window::WindowPolicy::Restyle {
+                        framebuffer: th20_cfg.resolution.dimensions(),
+                        display_mode: core_cfg.display.mode,
+                    }
+                }
             },
-            window::WindowApi::Ansi,
+            window::WindowApi::Wide,
         );
-        dialog_dismiss::install(host_exe);
+        dialog_dismiss::install(slide);
         exit_hooks::install(host_exe);
         d3dx9::install(host_exe);
 
         // Wire the replay-mode probe before any `Present` can fire.
-        d3d9::set_replay_mode_fn(state::replay_mode);
+        state::install(slide);
 
-        // We do this before `d3d9::install` because that call
-        // wires `Present` into `hook_present`, which unwraps `PACER.get()`.
         _ = PACER.set(Pacer::new(PacingPolicy::LiveInput {
             target_fps: core_cfg.framerate.game_fps,
         }));
 
         d3d9::install(host_exe);
-        patches::install_d3d9_call_site_rewrite();
+        patches::install_d3d9_call_site_rewrite(slide);
 
-        // th11's input writer at `fcn.004576b0` does not read `DIJOYSTATE` offsets
+        // th20's input writer at `fcn.00421b00` does not read `DIJOYSTATE2` offsets
         // 0x20-0x30 (`rgdwPOV[]`), so the default of `dpad = true` is safe.
         if core_cfg.input.dpad {
             input::install();
         }
-        patches::apply_basic();
-        patches::install_anm_matrix_tz_fix();
-        patches::install_screenshot_hook();
+        patches::apply_basic(slide);
+        patches::install_screenshot_hook(slide);
     }
 }

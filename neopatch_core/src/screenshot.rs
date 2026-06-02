@@ -7,16 +7,18 @@
 //! offscreen surface, which is lockable regardless of presentation flags.
 //!
 //! A game's screenshot save function runs either before or after `Present`:
-//! - th11/th12/th13/th15: before `Present`. The back buffer is still fresh; the game's trampoline
-//!   calls `save_live` directly and we capture synchronously, matching vanilla frame timing.
-//! - th10: after `Present`. The back buffer is undefined under D3D9Ex flip-model. The game's
-//!   trampoline calls `set_pending_cached_save`, and the next `on_pre_present` captures
-//!   the live back buffer one frame later than when the screenshot key was pressed.
+//! - th11-th18 (`save_screenshot_live_bmp`), th20 (`save_screenshot_live_png`):
+//!   before `Present`, so the back buffer is still fresh and we capture synchronously,
+//!   matching vanilla frame timing.
+//! - th10 calls `save_screenshot_deferred_bmp`: after `Present`, where the back buffer is
+//!   undefined under D3D9Ex flip-model. We stash the filename, and the next
+//!   `on_pre_present` captures the live back buffer one frame later.
 
 use crate::fmt_hr;
 use crate::thread::{MainCell, MainToken};
 use crate::untrusted::Untrusted;
 use crate::vtable::vtbl_field;
+use png::{BitDepth, ColorType, Encoder};
 use std::ffi::c_void;
 use std::mem::zeroed;
 use std::ptr::{null, null_mut};
@@ -40,6 +42,102 @@ use windows_sys::Win32::Storage::FileSystem::{
 /// Mirrors the device pointer the games hold in their own globals. Held with our own `AddRef`
 /// so the vtable pointer stays dereferenceable across the game's `Release` calls.
 static ACTIVE_DEVICE: MainCell<*mut c_void> = MainCell::new(null_mut());
+
+// Idempotent when the device pointer is unchanged; `Reset` preserves the device instance.
+pub(crate) fn on_post_create_device(tok: &MainToken, dev: *mut c_void) {
+    unsafe { set_active_device(tok, dev) };
+}
+
+/// Updates `ACTIVE_DEVICE` to `new_dev`, calling `AddRef` on the new device
+/// and `Release` on the prior one.
+///
+/// If a `Release` call in game code brings the COM object's refcount to 0, the object is
+/// destroyed and the vtable memory is freed. A subsequent `ACTIVE_DEVICE` query would be a
+/// use-after-free. Holding our own ref keeps the vtable pointer dereferenceable for as long as
+/// we might dereference it, even after the game drops its refs.
+///
+/// There is no code path that nulls `ACTIVE_DEVICE` and calls `Release` on our held ref, so
+/// this is a leak. This is fine for the games' shutdown sequences, which call `Release`
+/// on their device and then `ExitProcess` immediately after. Nothing changes from the game's
+/// perspective. This would only be an issue if we wanted to cleanly unload neopatch.
+unsafe fn set_active_device(tok: &MainToken, new_dev: *mut c_void) {
+    type AddRefFn = unsafe extern "system" fn(*mut c_void) -> u32;
+    type ReleaseFn = unsafe extern "system" fn(*mut c_void) -> u32;
+    let prev = ACTIVE_DEVICE.get(tok);
+    if prev == new_dev {
+        return;
+    }
+    unsafe {
+        if !new_dev.is_null() {
+            let vtbl: *mut IDirect3DDevice9Ex_Vtbl = *new_dev.cast();
+            let add_ref: AddRefFn =
+                vtbl_field!(IDirect3DDevice9Ex_Vtbl, base__.base__.AddRef).read(vtbl);
+            add_ref(new_dev);
+        }
+        ACTIVE_DEVICE.set(tok, new_dev);
+        if !prev.is_null() {
+            let vtbl: *mut IDirect3DDevice9Ex_Vtbl = *prev.cast();
+            let release: ReleaseFn =
+                vtbl_field!(IDirect3DDevice9Ex_Vtbl, base__.base__.Release).read(vtbl);
+            release(prev);
+        }
+    }
+}
+
+/// Synchronously saves a screenshot as BMP. Use this for games whose save function trampoline
+/// runs before `Present`. Returns 0 on success, 1 on failure. Callers must be on the render thread.
+///
+/// # Safety
+/// `filename_ptr` must be valid.
+#[must_use]
+pub unsafe extern "C" fn save_screenshot_live_bmp(filename_ptr: *const u8) -> u32 {
+    live_save(filename_ptr, build_bmp_24bpp, "live")
+}
+
+/// Synchronously saves a screenshot as PNG. Use this for games whose save function trampoline
+/// runs before `Present`. Returns 0 on success, 1 on failure. Callers must be on the render thread.
+///
+/// # Safety
+/// `filename_ptr` must be valid.
+#[must_use]
+pub unsafe extern "C" fn save_screenshot_live_png(filename_ptr: *const u8) -> u32 {
+    live_save(filename_ptr, build_png_24bpp, "live_png")
+}
+
+fn live_save(filename_ptr: *const u8, encoder: ImageEncoder, source: &'static str) -> u32 {
+    let Some(path) = sanitize_filename(filename_ptr) else {
+        return 1;
+    };
+    let tok = MainToken::new();
+    let bytes = path.as_slice();
+    match save_live(&tok, bytes, encoder) {
+        Ok((w, h)) => {
+            log_saved(bytes, w, h, source);
+            0
+        }
+        Err(e) => {
+            log_failed(bytes, &e);
+            1
+        }
+    }
+}
+
+/// Saves a screenshot, deferring capture to when `on_pre_present` is called next.
+/// Use this for games whose save function trampoline runs after `Present` (th10).
+/// Returns 0 on successful stash, 1 on failure. Callers must be on the render thread.
+///
+/// # Safety
+/// `filename_ptr` must be valid.
+#[must_use]
+pub unsafe extern "C" fn save_screenshot_deferred_bmp(filename_ptr: *const u8) -> u32 {
+    let Some(path) = sanitize_filename(filename_ptr) else {
+        return 1;
+    };
+    let tok = MainToken::new();
+    info!(kind = "screenshot_deferred", path = %String::from_utf8_lossy(path.as_slice()));
+    set_pending_cached_save(&tok, &path);
+    0
+}
 
 /// Captured screenshot filename.
 #[derive(Clone, Copy)]
@@ -92,47 +190,6 @@ fn set_pending_cached_save(tok: &MainToken, path: &PendingPath) {
     );
 }
 
-/// Updates `ACTIVE_DEVICE` to `new_dev`, calling `AddRef` on the new device
-/// and `Release` on the prior one.
-///
-/// If a `Release` call in game code brings the COM object's refcount to 0, the object is
-/// destroyed and the vtable memory is freed. A subsequent `ACTIVE_DEVICE` query would be a
-/// use-after-free. Holding our own ref keeps the vtable pointer dereferenceable for as long as
-/// we might dereference it, even after the game drops its refs.
-///
-/// There is no code path that nulls `ACTIVE_DEVICE` and calls `Release` on our held ref, so
-/// this is a leak. This is fine for the games' shutdown sequences, which call `Release`
-/// on their device and then `ExitProcess` immediately after. Nothing changes from the game's
-/// perspective. This would only be an issue if we wanted to cleanly unload neopatch.
-unsafe fn set_active_device(tok: &MainToken, new_dev: *mut c_void) {
-    type AddRefFn = unsafe extern "system" fn(*mut c_void) -> u32;
-    type ReleaseFn = unsafe extern "system" fn(*mut c_void) -> u32;
-    let prev = ACTIVE_DEVICE.get(tok);
-    if prev == new_dev {
-        return;
-    }
-    unsafe {
-        if !new_dev.is_null() {
-            let vtbl: *mut IDirect3DDevice9Ex_Vtbl = *new_dev.cast();
-            let add_ref: AddRefFn =
-                vtbl_field!(IDirect3DDevice9Ex_Vtbl, base__.base__.AddRef).read(vtbl);
-            add_ref(new_dev);
-        }
-        ACTIVE_DEVICE.set(tok, new_dev);
-        if !prev.is_null() {
-            let vtbl: *mut IDirect3DDevice9Ex_Vtbl = *prev.cast();
-            let release: ReleaseFn =
-                vtbl_field!(IDirect3DDevice9Ex_Vtbl, base__.base__.Release).read(vtbl);
-            release(prev);
-        }
-    }
-}
-
-// Idempotent when the device pointer is unchanged; `Reset` preserves the device instance.
-pub(crate) fn on_post_create_device(tok: &MainToken, dev: *mut c_void) {
-    unsafe { set_active_device(tok, dev) };
-}
-
 pub(crate) fn on_pre_present(tok: &MainToken) {
     let Some(pending) = PENDING_CAPTURE.take(tok) else {
         return;
@@ -168,133 +225,31 @@ pub(crate) fn on_pre_reset(tok: &MainToken) {
 /// The caller must be on the render thread.
 unsafe fn save_pending_cached(device: *mut c_void, path: &[u8]) {
     ensure_parent(path);
-    match unsafe { capture_live_and_write(device, path) } {
+    match unsafe { capture_live_and_write(device, path, build_bmp_24bpp) } {
         Ok((w, h)) => log_saved(path, w, h, "cached"),
         Err(e) => log_failed(path, &e),
     }
 }
 
-/// Reads a NUL-terminated ASCII/ANSI filename from a caller-controlled pointer.
-/// Null pointers, empty paths, and non-terminating NULs are rejected.
-fn sanitize_filename(filename_ptr: *const u8) -> Option<PendingPath> {
-    let untrusted = Untrusted::from_raw(filename_ptr);
-    let mut buf = [0u8; MAX_PATH as usize];
-    let n = untrusted.safe_read(&mut buf);
-    if n == 0 {
-        warn!(kind = "screenshot_filename_unreadable");
-        return None;
-    }
-    let Some(nul_pos) = buf[..n].iter().position(|b| *b == 0) else {
-        warn!(
-            kind = "screenshot_filename_too_long_or_unterminated",
-            budget = MAX_PATH,
-            read = n,
-        );
-        return None;
-    };
-    if nul_pos == 0 {
-        warn!(kind = "screenshot_filename_empty");
-        return None;
-    }
-    Some(PendingPath { buf, len: nul_pos })
-}
-
-fn log_saved(path: &[u8], w: u32, h: u32, source: &'static str) {
-    info!(
-        kind = "screenshot_saved",
-        path = %String::from_utf8_lossy(path),
-        width = w,
-        height = h,
-        source,
-    );
-}
-
-fn log_failed(path: &[u8], error: &str) {
-    warn!(
-        kind = "screenshot_failed",
-        path = %String::from_utf8_lossy(path),
-        error,
-    );
-}
-
-/// Synchronously saves a screenshot. Use this for games whose save function trampoline
-/// runs before `Present` (th11/th12/th13/th15). Returns 0 on success, 1 on failure.
-/// Callers must be on the render thread.
-///
-/// # Safety
-/// `filename_ptr` must be valid.
-#[must_use]
-pub unsafe extern "C" fn save_screenshot_live(filename_ptr: *const u8) -> u32 {
-    let Some(path) = sanitize_filename(filename_ptr) else {
-        return 1;
-    };
-    let tok = MainToken::new();
-    let bytes = path.as_slice();
-    match save_live(&tok, bytes) {
-        Ok((w, h)) => {
-            log_saved(bytes, w, h, "live");
-            0
-        }
-        Err(e) => {
-            log_failed(bytes, &e);
-            1
-        }
-    }
-}
-
-/// Saves a screenshot, deferring capture to when `on_pre_present` is called next.
-/// Use this for games whose save function trampoline runs after `Present` (th10).
-/// Returns 0 on successful stash, 1 on failure. Callers must be on the render thread.
-///
-/// # Safety
-/// `filename_ptr` must be valid.
-#[must_use]
-pub unsafe extern "C" fn save_screenshot_deferred(filename_ptr: *const u8) -> u32 {
-    let Some(path) = sanitize_filename(filename_ptr) else {
-        return 1;
-    };
-    let tok = MainToken::new();
-    info!(kind = "screenshot_deferred", path = %String::from_utf8_lossy(path.as_slice()));
-    set_pending_cached_save(&tok, &path);
-    0
-}
-
-/// Captures the live back buffer to `path` as a BMP. Returns `(width, height)` on success,
-/// or an error string if no `CreateDeviceEx` has succeeded yet or a Windows API call fails.
-fn save_live(tok: &MainToken, path: &[u8]) -> Result<(u32, u32), String> {
+/// Captures the live back buffer to `path`, encoding it with `encode`.
+/// Returns `(width, height)` on success, or an error string if no `CreateDeviceEx` call
+/// has succeeded yet or a Windows API call fails.
+fn save_live(tok: &MainToken, path: &[u8], encode: ImageEncoder) -> Result<(u32, u32), String> {
     let device = ACTIVE_DEVICE.get(tok);
     if device.is_null() {
         return Err("no active device".to_string());
     }
     ensure_parent(path);
-    unsafe { capture_live_and_write(device, path) }
-}
-
-fn require_supported_format(format: D3DFORMAT) -> Result<(), String> {
-    if format == D3DFMT_X8R8G8B8 || format == D3DFMT_A8R8G8B8 {
-        Ok(())
-    } else {
-        Err(format!("unsupported back buffer format {:#x}", format.0))
-    }
-}
-
-/// Creates the parent directory of `path` if `path` contains a separator.
-fn ensure_parent(path: &[u8]) {
-    let Some(sep_idx) = path.iter().rposition(|b| matches!(b, b'/' | b'\\')) else {
-        return;
-    };
-    if sep_idx == 0 {
-        return;
-    }
-    let parent = nul_terminate(&path[..sep_idx]);
-    unsafe {
-        CreateDirectoryA(parent.as_ptr(), null());
-    }
+    unsafe { capture_live_and_write(device, path, encode) }
 }
 
 /// Gets the live back buffer, allocates a sysmem surface,
 /// calls `GetRenderTargetData`, and delegates to `lock_and_write`.
-unsafe fn capture_live_and_write(device: *mut c_void, path: &[u8]) -> Result<(u32, u32), String> {
+unsafe fn capture_live_and_write(
+    device: *mut c_void,
+    path: &[u8],
+    encode: ImageEncoder,
+) -> Result<(u32, u32), String> {
     // Surface handles are dropped on function exit due to
     // `IDirect3DSurface9`'s implementation of `Drop` calling `Release`.
     let dev = unsafe { IDirect3DDevice9Ex::from_raw_borrowed(&device) }
@@ -323,7 +278,7 @@ unsafe fn capture_live_and_write(device: *mut c_void, path: &[u8]) -> Result<(u3
     unsafe { dev.GetRenderTargetData(&back_buffer, &sysmem) }
         .map_err(|e| format!("GetRenderTargetData hr={}", fmt_hr!(e.code())))?;
 
-    lock_and_write(&sysmem, desc.Width, desc.Height, path)
+    lock_and_write(&sysmem, desc.Width, desc.Height, path, encode)
 }
 
 fn lock_and_write(
@@ -331,6 +286,7 @@ fn lock_and_write(
     width: u32,
     height: u32,
     path: &[u8],
+    encode: ImageEncoder,
 ) -> Result<(u32, u32), String> {
     let mut locked = D3DLOCKED_RECT::default();
     unsafe {
@@ -341,38 +297,55 @@ fn lock_and_write(
         )
     }
     .map_err(|e| format!("LockRect hr={}", fmt_hr!(e.code())))?;
-    let write_result = write_bmp_24bpp(
-        path,
-        width,
-        height,
-        locked.Pitch,
-        locked.pBits.cast::<u8>().cast_const(),
-    );
+    // We encode while the surface is locked since the encoder dereferences `src`.
+    let encoded = unsafe {
+        encode(
+            width,
+            height,
+            locked.Pitch,
+            locked.pBits.cast::<u8>().cast_const(),
+        )
+    };
     if let Err(e) = unsafe { surface.UnlockRect() } {
         warn!(
             kind = "screenshot_unlock_failed",
             hr = %fmt_hr!(e.code()),
         );
     }
-    write_result?;
+    let bytes = encoded?;
+    let tmp = tmp_path(path);
+    write_atomic(&tmp, path, &bytes)?;
     Ok((width, height))
 }
 
-/// Builds a 24bpp BGR Windows BMP in memory and writes it atomically
-/// via a tempfile and `MoveFileExA(MOVEFILE_REPLACE_EXISTING)`.
-fn write_bmp_24bpp(
-    path: &[u8],
-    width: u32,
-    height: u32,
-    pitch: i32,
-    src: *const u8,
-) -> Result<(), String> {
-    let bmp = unsafe { build_bmp_24bpp(width, height, pitch, src)? };
-    let tmp = tmp_path(path);
-    write_atomic(&tmp, path, &bmp)
+fn require_supported_format(format: D3DFORMAT) -> Result<(), String> {
+    if format == D3DFMT_X8R8G8B8 || format == D3DFMT_A8R8G8B8 {
+        Ok(())
+    } else {
+        Err(format!("unsupported back buffer format {:#x}", format.0))
+    }
 }
 
-/// Constructs a BMP byte stream in a single `Vec<u8>`.
+/// Creates the parent directory of `path` if `path` contains a separator.
+fn ensure_parent(path: &[u8]) {
+    let Some(sep_idx) = path.iter().rposition(|b| matches!(b, b'/' | b'\\')) else {
+        return;
+    };
+    if sep_idx == 0 {
+        return;
+    }
+    let parent = nul_terminate(&path[..sep_idx]);
+    unsafe {
+        CreateDirectoryA(parent.as_ptr(), null());
+    }
+}
+
+/// Encodes a captured frame into an in-memory image (BMP or PNG).
+/// Args are `(width, height, pitch, src)`, where `src` points to
+/// `height` rows of `width` 32-bit BGRX/BGRA pixels with `pitch` bytes between rows.
+type ImageEncoder = unsafe fn(u32, u32, i32, *const u8) -> Result<Vec<u8>, String>;
+
+/// Constructs a 24bpp BGR Windows BMP byte stream.
 ///
 /// # Safety
 /// `src` must point to `height` rows of `width` 32-bit BGRX/BGRA pixels,
@@ -434,13 +407,53 @@ unsafe fn build_bmp_24bpp(
     Ok(buf)
 }
 
+/// Constructs an 8-bit truecolor (24bpp RGB) PNG.
+///
+/// # Safety
+/// `src` must point to `height` rows of `width` 32-bit BGRX/BGRA pixels,
+/// with `pitch` bytes between row starts.
+unsafe fn build_png_24bpp(
+    width: u32,
+    height: u32,
+    pitch: i32,
+    src: *const u8,
+) -> Result<Vec<u8>, String> {
+    let pixels = width.checked_mul(height).ok_or("image too large")?;
+    let rgb_len = pixels.checked_mul(3).ok_or("image too large")?;
+    let mut rgb: Vec<u8> = Vec::with_capacity(rgb_len.try_into().unwrap_or(0));
+    for y in 0..height {
+        let row_off = isize::try_from(y).map_err(|e| e.to_string())?
+            * isize::try_from(pitch).map_err(|e| e.to_string())?;
+        let row_ptr = unsafe { src.offset(row_off) };
+        for x in 0..width {
+            let p = unsafe { row_ptr.add((x * 4) as usize) };
+            rgb.push(unsafe { *p.add(2) });
+            rgb.push(unsafe { *p.add(1) });
+            rgb.push(unsafe { *p });
+        }
+    }
+
+    let mut out: Vec<u8> = Vec::new();
+    let mut encoder = Encoder::new(&mut out, width, height);
+    encoder.set_color(ColorType::Rgb);
+    encoder.set_depth(BitDepth::Eight);
+    let mut writer = encoder
+        .write_header()
+        .map_err(|e| format!("png write_header: {e}"))?;
+    writer
+        .write_image_data(&rgb)
+        .map_err(|e| format!("png write_image_data: {e}"))?;
+    writer.finish().map_err(|e| format!("png finish: {e}"))?;
+    Ok(out)
+}
+
 /// Writes `data` to `tmp` via `CreateFileA + WriteFile`, then renames `tmp` to `dst` using
 /// `MoveFileExA(MOVEFILE_REPLACE_EXISTING)`. On any failure, the partial `tmp` is removed.
 /// Both path arguments should be raw (not NUL-terminated) ANSI bytes.
 fn write_atomic(tmp: &[u8], dst: &[u8], data: &[u8]) -> Result<(), String> {
     let tmp_c = nul_terminate(tmp);
     let dst_c = nul_terminate(dst);
-    let len = u32::try_from(data.len()).map_err(|_| "BMP too large for WriteFile".to_string())?;
+    let len = u32::try_from(data.len()).map_err(|_| "image too large for WriteFile".to_string())?;
 
     // We clear any leftover tempfile from a previous crashed write
     // so `CREATE_ALWAYS` doesn't inherit attributes/ACLs from a half-written file.
@@ -508,4 +521,107 @@ fn nul_terminate(bytes: &[u8]) -> Vec<u8> {
     out.extend_from_slice(bytes);
     out.push(0);
     out
+}
+
+/// Reads a NUL-terminated ASCII/ANSI filename from a caller-controlled pointer.
+/// Null pointers, empty paths, and non-terminating NULs are rejected.
+fn sanitize_filename(filename_ptr: *const u8) -> Option<PendingPath> {
+    let untrusted = Untrusted::from_raw(filename_ptr);
+    let mut buf = [0u8; MAX_PATH as usize];
+    let n = untrusted.safe_read(&mut buf);
+    if n == 0 {
+        warn!(kind = "screenshot_filename_unreadable");
+        return None;
+    }
+    let Some(nul_pos) = buf[..n].iter().position(|b| *b == 0) else {
+        warn!(
+            kind = "screenshot_filename_too_long_or_unterminated",
+            budget = MAX_PATH,
+            read = n,
+        );
+        return None;
+    };
+    if nul_pos == 0 {
+        warn!(kind = "screenshot_filename_empty");
+        return None;
+    }
+    Some(PendingPath { buf, len: nul_pos })
+}
+
+fn log_saved(path: &[u8], w: u32, h: u32, source: &'static str) {
+    info!(
+        kind = "screenshot_saved",
+        path = %String::from_utf8_lossy(path),
+        width = w,
+        height = h,
+        source,
+    );
+}
+
+fn log_failed(path: &[u8], error: &str) {
+    warn!(
+        kind = "screenshot_failed",
+        path = %String::from_utf8_lossy(path),
+        error,
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use png::Decoder;
+
+    #[test]
+    fn build_png_24bpp_round_trips_pixels() {
+        // 2x2 source, 32bpp BGRX, pitch = 8 bytes/row, top-down.
+        #[rustfmt::skip]
+        let src: [u8; 16] = [
+            0xff, 0x00, 0x00, 0x00,  0x00, 0xff, 0x00, 0x00, // blue, green
+            0x00, 0x00, 0xff, 0x00,  0xff, 0xff, 0xff, 0x00, // red, white
+        ];
+        let encoded = unsafe { build_png_24bpp(2, 2, 8, src.as_ptr()) }.expect("encode");
+
+        let mut reader = Decoder::new(encoded.as_slice())
+            .read_info()
+            .expect("read_info");
+        let mut buf = vec![0u8; reader.output_buffer_size()];
+        let info = reader.next_frame(&mut buf).expect("next_frame");
+
+        assert_eq!((info.width, info.height), (2, 2));
+        assert_eq!(info.color_type, ColorType::Rgb);
+        assert_eq!(info.bit_depth, BitDepth::Eight);
+        // Decoded RGB, top-down, row-major: BGR->RGB swap and row order preserved.
+        assert_eq!(&buf[0..3], &[0x00, 0x00, 0xff], "(0,0) blue");
+        assert_eq!(&buf[3..6], &[0x00, 0xff, 0x00], "(1,0) green");
+        assert_eq!(&buf[6..9], &[0xff, 0x00, 0x00], "(0,1) red");
+        assert_eq!(&buf[9..12], &[0xff, 0xff, 0xff], "(1,1) white");
+    }
+
+    #[test]
+    fn build_png_24bpp_handles_padded_pitch() {
+        // 2x3 source, 32bpp BGRX, pitch = 12 bytes/row, top-down.
+        // The 0xAA row-tail padding must be skipped by the stride math.
+        // If it leaked into the output, then the decoded pixels below would be wrong.
+        #[rustfmt::skip]
+        let src: [u8; 36] = [
+            0xff, 0x00, 0x00, 0x00,  0x00, 0xff, 0x00, 0x00,  0xaa, 0xaa, 0xaa, 0xaa, // blue, green
+            0x00, 0x00, 0xff, 0x00,  0xff, 0xff, 0xff, 0x00,  0xaa, 0xaa, 0xaa, 0xaa, // red, white
+            0x00, 0xff, 0xff, 0x00,  0xff, 0x00, 0xff, 0x00,  0xaa, 0xaa, 0xaa, 0xaa, // yellow, magenta
+        ];
+        let encoded = unsafe { build_png_24bpp(2, 3, 12, src.as_ptr()) }.expect("encode");
+
+        let mut reader = Decoder::new(encoded.as_slice())
+            .read_info()
+            .expect("read_info");
+        let mut buf = vec![0u8; reader.output_buffer_size()];
+        let info = reader.next_frame(&mut buf).expect("next_frame");
+
+        assert_eq!((info.width, info.height), (2, 3));
+        assert_eq!(&buf[0..3], &[0x00, 0x00, 0xff], "(0,0) blue");
+        assert_eq!(&buf[3..6], &[0x00, 0xff, 0x00], "(1,0) green");
+        assert_eq!(&buf[6..9], &[0xff, 0x00, 0x00], "(0,1) red");
+        assert_eq!(&buf[9..12], &[0xff, 0xff, 0xff], "(1,1) white");
+        assert_eq!(&buf[12..15], &[0xff, 0xff, 0x00], "(0,2) yellow");
+        assert_eq!(&buf[15..18], &[0xff, 0x00, 0xff], "(1,2) magenta");
+    }
 }

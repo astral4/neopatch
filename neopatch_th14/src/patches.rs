@@ -2,7 +2,7 @@
 
 use neopatch_core::d3d9::install_call_site_rewrite;
 use neopatch_core::patches::{Patch, patch_jmp};
-use neopatch_core::screenshot::save_screenshot_live;
+use neopatch_core::screenshot::save_screenshot_live_bmp;
 use std::arch::naked_asm;
 use std::ffi::c_char;
 
@@ -57,10 +57,9 @@ pub(crate) unsafe fn apply_basic() {
 /// Z doesn't. `[ebp - 0x5c]` is the stack matrix's `tz` slot, pre-loaded with the
 /// scratch matrix's `tz` by the `rep movsd` at `0x00477857` (which copies
 /// `[ebx + 0x420 .. ebx + 0x460]` into the stack frame before this splice runs).
-/// The fix adds that pre-loaded `tz` back into xmm3 before the displaced `movss`
-/// would have overwritten it. Equivalent to th15's `addss xmm3, [esi + 0x454]`
-/// but reads from the stack slot since `rep movsd` has already deposited the
-/// value there; th15 doesn't pre-copy and reads directly from the scratch matrix.
+/// The fix adds that pre-loaded `tz` back into xmm3 from the stack slot before the displaced
+/// `movss` would have overwritten it; we read the stack slot rather than the scratch matrix
+/// because `rep movsd` has already deposited the value there.
 const ANM_MODE57_SPLICE: usize = 0x0047_78f9;
 const ANM_MODE57_DISPLACED_LEN: usize = 5;
 static ANM_MODE57_AFTER_SPLICE: usize = ANM_MODE57_SPLICE + ANM_MODE57_DISPLACED_LEN;
@@ -98,7 +97,7 @@ unsafe extern "stdcall" fn screenshot_trampoline(_filename: *const c_char) -> u3
         "call {save}",
         "add esp, 4",
         "ret 4",
-        save = sym save_screenshot_live,
+        save = sym save_screenshot_live_bmp,
     );
 }
 

@@ -12,14 +12,23 @@ use std::ptr::with_exposed_provenance;
 use windows_sys::Win32::System::Diagnostics::Debug::ReadProcessMemory;
 use windows_sys::Win32::System::Threading::GetCurrentProcess;
 
-// Sealed marker: the all-zero bit pattern is a valid value of `T`.
-// Required by `safe_read`'s partial-`T` zero-fill at page boundaries.
+// Sealed; the all-zero bit pattern is a valid value of `T`, named `ZERO`.
 mod sealed {
-    pub(crate) trait Zeroable: Copy {}
-    impl Zeroable for u8 {}
-    impl Zeroable for u16 {}
-    impl Zeroable for u32 {}
-    impl<T: Zeroable, const N: usize> Zeroable for [T; N] {}
+    pub(crate) trait Zeroable: Copy {
+        const ZERO: Self;
+    }
+    impl Zeroable for u8 {
+        const ZERO: Self = 0;
+    }
+    impl Zeroable for u16 {
+        const ZERO: Self = 0;
+    }
+    impl Zeroable for u32 {
+        const ZERO: Self = 0;
+    }
+    impl<T: Zeroable, const N: usize> Zeroable for [T; N] {
+        const ZERO: Self = [T::ZERO; N];
+    }
 }
 
 /// A pointer whose validity isn't established by code we control.
@@ -57,12 +66,29 @@ impl<T: sealed::Zeroable> Untrusted<T> {
         let len = buf[..n].iter().position(|t| *t == terminator).unwrap_or(n);
         &buf[..len]
     }
+
+    /// True if the pointed-to buffer reads as exactly `expected` followed by a NUL (`T::ZERO`).
+    /// A short read (an `ATOM` in the null-guard region, or a guard-page fault)
+    /// fails the length check with no special case.
+    pub(crate) fn matches_nul_terminated<const N: usize>(self, expected: &[T; N]) -> bool
+    where
+        T: PartialEq,
+    {
+        const CAP: usize = 5;
+        const {
+            assert!(N < CAP, "expected length + NUL must fit the scratch buffer");
+        };
+        let mut buf = [T::ZERO; CAP];
+        let want_len = N + 1;
+        let n = self.safe_read(&mut buf[..want_len]);
+        n == want_len && &buf[..N] == expected.as_slice() && buf[N] == T::ZERO
+    }
 }
 
 /// Best-effort copy of up to `buf.len()` elements from `src` into `buf`.
 /// Returns the number of complete `T`s read. A partial-`T` trailing read
-/// (RPM stopping mid-`T` at a page boundary) zeroes `buf[n]`, so the all-zero
-/// bit pattern must be valid for `T`. The returned `n` excludes the partial slot.
+/// (RPM stopping mid-`T` at a page boundary) overwrites `buf[n]` with `T::ZERO`.
+/// The returned `n` excludes the partial slot.
 fn safe_read<T: sealed::Zeroable>(src: *const T, buf: &mut [T]) -> usize {
     let bytes = rpm(
         src.cast::<c_void>(),
@@ -71,14 +97,9 @@ fn safe_read<T: sealed::Zeroable>(src: *const T, buf: &mut [T]) -> usize {
     );
     let n = bytes / size_of::<T>();
     if !bytes.is_multiple_of(size_of::<T>()) && n < buf.len() {
-        // SAFETY: `n < buf.len()` so `buf[n]` is in-bounds; we zero exactly one `T`'s
-        // worth of bytes, overwriting any partial bytes RPM wrote.
-        unsafe {
-            buf.as_mut_ptr()
-                .add(n)
-                .cast::<u8>()
-                .write_bytes(0, size_of::<T>());
-        }
+        // A partial-`T` tail read left RPM's leftover bytes in `buf[n]`, so we overwrite
+        // the whole slot to the all-zero value that `Zeroable` guarantees is valid.
+        buf[n] = T::ZERO;
     }
     n
 }

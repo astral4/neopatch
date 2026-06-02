@@ -2,7 +2,7 @@
 
 use neopatch_core::d3d9::install_call_site_rewrite;
 use neopatch_core::patches::{Patch, patch_jmp};
-use neopatch_core::screenshot::save_screenshot_live;
+use neopatch_core::screenshot::save_screenshot_live_bmp;
 use std::arch::naked_asm;
 use std::ffi::c_char;
 
@@ -21,8 +21,7 @@ pub(crate) unsafe fn install_d3d9_call_site_rewrite() {
 /// and deadline-advance spin inside `CWindowManager::UpdateFast` (`fcn.00472dd0`), so our
 /// pacer is the sole timing source.
 ///
-/// "force fast input latency": th18's input-mode dispatch is one block, like th17's: a single
-/// `jmp` over the conditional sets us on the `CWindowManager::UpdateFast` call site directly,
+/// "force fast input latency": `jmp` past th18's input-mode dispatch onto the `UpdateFast` call,
 /// skipping the "slow"/"automatic" alternatives.
 ///
 /// "replay speed control skip": NOPs the viewer-mode branch in `fcn.00461db0` so the game's
@@ -89,7 +88,7 @@ unsafe extern "stdcall" fn screenshot_trampoline(_filename: *const c_char) -> u3
         "call {save}",
         "add esp, 4",
         "ret 4",
-        save = sym save_screenshot_live,
+        save = sym save_screenshot_live_bmp,
     );
 }
 

@@ -6,14 +6,31 @@
 
 use crate::vtable::{FnSlot, parse_fn_ptr};
 use std::ffi::c_void;
+use std::mem::offset_of;
 use std::sync::OnceLock;
 use tracing::info;
-use windows::Win32::Devices::HumanInterfaceDevice::IDirectInput8A;
+use windows::Win32::Devices::HumanInterfaceDevice::{
+    IDirectInput8A, IDirectInput8A_Vtbl, IDirectInput8W, IDirectInput8W_Vtbl,
+    IDirectInputDevice8A_Vtbl, IDirectInputDevice8W_Vtbl,
+};
 use windows::core::Interface;
 use windows_sys::Win32::Foundation::{E_FAIL, HINSTANCE, MAX_PATH};
 use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 use windows_sys::Win32::System::SystemInformation::GetSystemDirectoryW;
 use windows_sys::core::{GUID, HRESULT};
+
+// `forward` depends on patched slots (`CreateDevice`, `GetDeviceState`)
+// being at the same vtable offset in both the A and W vtables.
+const _: () = {
+    assert!(
+        offset_of!(IDirectInput8A_Vtbl, CreateDevice)
+            == offset_of!(IDirectInput8W_Vtbl, CreateDevice)
+    );
+    assert!(
+        offset_of!(IDirectInputDevice8A_Vtbl, GetDeviceState)
+            == offset_of!(IDirectInputDevice8W_Vtbl, GetDeviceState)
+    );
+};
 
 type DirectInput8CreateFn = unsafe extern "system" fn(
     HINSTANCE,
@@ -91,20 +108,17 @@ pub unsafe fn forward(
         // SAFETY: `windows_sys::core::GUID` and `windows::core::GUID`
         // are both `#[repr(C)]` with identical fields, so they share layout.
         let iid = unsafe { &*riidltf.cast::<windows::core::GUID>() };
-        if *iid == IDirectInput8A::IID {
+        // This is fine because A/W vtables coincide at the patched slots.
+        // th10-th18 provide the A IID; th20 provides the W IID.
+        if *iid == IDirectInput8A::IID || *iid == IDirectInput8W::IID {
             if let Some(on_created) = ON_CREATED.get() {
-                // SAFETY: `ppv_out` holds the new `IDirectInput8A`.
                 let di = unsafe { *ppv_out };
                 unsafe { on_created(di) };
             }
         } else {
-            // Our `on_created` callback uses "A" vtable types (`IDirectInput8A_Vtbl`,
-            // `IDirectInputDevice8A_Vtbl`) to look up slot offsets and type the hooks.
-            // The currently-patched methods don't take strings, so a W object would also work,
-            // but future extensions to string-bearing methods would diverge.
             info!(
                 kind = "dinput8_on_created_skipped",
-                reason = "non_ansi_iid",
+                reason = "non_idi8_iid",
                 iid_data1 = format_args!("{:#010x}", iid.data1),
             );
         }

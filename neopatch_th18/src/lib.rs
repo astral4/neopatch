@@ -101,6 +101,7 @@ unsafe fn install_hooks() {
                     }
                 }
             },
+            window::WindowApi::Ansi,
         );
         dialog_dismiss::install();
         exit_hooks::install(host_exe);

@@ -100,6 +100,7 @@ unsafe fn install_hooks() {
                 framebuffer: FRAMEBUFFER_SIZE,
                 display_mode: core_cfg.display.mode,
             },
+            window::WindowApi::Ansi,
         );
         dialog_dismiss::install(host_exe);
         exit_hooks::install(host_exe);

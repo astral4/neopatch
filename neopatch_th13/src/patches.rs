@@ -2,7 +2,7 @@
 
 use neopatch_core::d3d9::install_call_site_rewrite;
 use neopatch_core::patches::{Patch, patch_jmp};
-use neopatch_core::screenshot::save_screenshot_live;
+use neopatch_core::screenshot::save_screenshot_live_bmp;
 use std::arch::naked_asm;
 
 /// Live `Direct3DCreate9` call site, rewritten to defend against downstream IAT hijacks.
@@ -93,7 +93,7 @@ unsafe extern "C" fn screenshot_trampoline() -> u32 {
         "call {save}",
         "add esp, 4",
         "ret",
-        save = sym save_screenshot_live,
+        save = sym save_screenshot_live_bmp,
     );
 }
 

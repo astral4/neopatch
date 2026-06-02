@@ -50,6 +50,24 @@ iat_hook! {
         ) -> HWND;
 }
 
+iat_hook! {
+    REAL_CREATEWINDOWEXW / real_create_window_ex_w : "CreateWindowExW"
+        as fn(
+            dw_ex_style: u32,
+            lp_class_name: *const u16,
+            lp_window_name: *const u16,
+            dw_style: u32,
+            x: i32,
+            y: i32,
+            n_width: i32,
+            n_height: i32,
+            h_wnd_parent: HWND,
+            h_menu: HMENU,
+            h_instance: HMODULE,
+            lp_param: *mut c_void,
+        ) -> HWND;
+}
+
 static APPLIED: AtomicBool = AtomicBool::new(false);
 static STATE: OnceLock<State> = OnceLock::new();
 
@@ -89,13 +107,20 @@ enum State {
     },
 }
 
-/// Caches the resolved `WindowCfg` and IAT-hooks `CreateWindowExA` against
-/// `host`'s import table. The hook acts on the game's main render window
-/// (matched by the `"BASE"` class name) per the `WindowPolicy`.
+/// Picks the IAT slot `install` hooks. th11-th18 use Ansi; th20 uses Wide.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WindowApi {
+    Ansi,
+    Wide,
+}
+
+/// Caches the resolved `WindowCfg` and IAT-hooks `CreateWindowExA`/`CreateWindowExW`
+/// based on `api`. The hook acts on the game's main render window (class `"BASE"`)
+/// based on `WindowPolicy`.
 ///
 /// # Safety
 /// `host` must be a loaded module handle.
-pub unsafe fn install(host: HMODULE, restyle: &WindowCfg, policy: WindowPolicy) {
+pub unsafe fn install(host: HMODULE, restyle: &WindowCfg, policy: WindowPolicy, api: WindowApi) {
     unsafe {
         let state = match policy {
             WindowPolicy::Restyle {
@@ -110,7 +135,14 @@ pub unsafe fn install(host: HMODULE, restyle: &WindowCfg, policy: WindowPolicy) 
             },
         };
         _ = STATE.set(state);
-        REAL_CREATEWINDOWEXA.install(host, hook_create_window_ex_a);
+        match api {
+            WindowApi::Ansi => {
+                REAL_CREATEWINDOWEXA.install(host, hook_create_window_ex_a);
+            }
+            WindowApi::Wide => {
+                REAL_CREATEWINDOWEXW.install(host, hook_create_window_ex_w);
+            }
+        }
     }
 }
 
@@ -129,51 +161,14 @@ unsafe extern "system" fn hook_create_window_ex_a(
     lp_param: *mut c_void,
 ) -> HWND {
     unsafe {
-        let class_name = Untrusted::from_raw(lp_class_name);
-        let window_name = Untrusted::from_raw(lp_window_name);
-
-        // IME and sound-thread helpers also use this import, but we only want
-        // the game's render window. th15 registers it under class "BASE" at `fcn.00472f50`.
-        // We match by class name so we catch both the fullscreen (`WS_POPUP`)
+        // IME and sound-thread helpers also use this import, but we only want the game's
+        // render window. We match by class name "BASE" to catch both fullscreen (`WS_POPUP`)
         // and windowed (no `WS_POPUP`) branches.
         let is_main = !APPLIED.load(Ordering::Acquire)
             && h_wnd_parent.is_null()
-            && class_name_matches(class_name, b"BASE");
-
-        let state = STATE.get().unwrap();
-        let (use_w, use_h) = if let (true, State::Restyle { framebuffer, .. }) = (is_main, state)
-            && (dw_style & WS_POPUP) == 0
-        {
-            let (bw, bh) = *framebuffer;
-            let mut rc = RECT {
-                left: 0,
-                top: 0,
-                right: bw.cast_signed(),
-                bottom: bh.cast_signed(),
-            };
-            AdjustWindowRectEx(&raw mut rc, dw_style, 0, dw_ex_style);
-            (rc.right - rc.left, rc.bottom - rc.top)
-        } else {
-            (n_width, n_height)
-        };
-        // We log the configuration and recomputed dimensions
-        // before the `CreateWindowExA` call in case there's a failure
-        // or wrong-sized client area.
-        if is_main {
-            info!(
-                kind = "create_window_call",
-                dw_style = format_args!("{dw_style:#x}"),
-                dw_ex_style = format_args!("{dw_ex_style:#x}"),
-                x,
-                y,
-                width_in = n_width,
-                height_in = n_height,
-                width_out = use_w,
-                height_out = use_h,
-                recomputed = use_w != n_width || use_h != n_height,
-            );
-        }
-
+            && Untrusted::from_raw(lp_class_name).matches_nul_terminated(b"BASE");
+        let (use_w, use_h) =
+            prep_main_window(is_main, dw_ex_style, dw_style, x, y, n_width, n_height);
         let hwnd = real_create_window_ex_a(
             dw_ex_style,
             lp_class_name,
@@ -188,28 +183,60 @@ unsafe extern "system" fn hook_create_window_ex_a(
             h_instance,
             lp_param,
         );
+        finish_main_window(hwnd, is_main, || {
+            build_extended_title_from_sjis(Untrusted::from_raw(lp_window_name))
+        });
+        hwnd
+    }
+}
 
-        if is_main
-            && !hwnd.is_null()
-            && APPLIED
-                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-        {
-            match state {
-                State::Restyle { restyle, .. } => apply(hwnd, restyle, window_name),
-                State::DeferToGame { always_on_top } => {
-                    apply_deferred(hwnd, *always_on_top, window_name);
-                }
-            }
-        }
+/// The game's main render-window class as UTF-16.
+const BASE_CLASS_W: [u16; 4] = [b'B' as u16, b'A' as u16, b'S' as u16, b'E' as u16];
+
+unsafe extern "system" fn hook_create_window_ex_w(
+    dw_ex_style: u32,
+    lp_class_name: *const u16,
+    lp_window_name: *const u16,
+    dw_style: u32,
+    x: i32,
+    y: i32,
+    n_width: i32,
+    n_height: i32,
+    h_wnd_parent: HWND,
+    h_menu: HMENU,
+    h_instance: HMODULE,
+    lp_param: *mut c_void,
+) -> HWND {
+    unsafe {
+        let is_main = !APPLIED.load(Ordering::Acquire)
+            && h_wnd_parent.is_null()
+            && Untrusted::from_raw(lp_class_name).matches_nul_terminated(&BASE_CLASS_W);
+        let (use_w, use_h) =
+            prep_main_window(is_main, dw_ex_style, dw_style, x, y, n_width, n_height);
+        let hwnd = real_create_window_ex_w(
+            dw_ex_style,
+            lp_class_name,
+            lp_window_name,
+            dw_style,
+            x,
+            y,
+            use_w,
+            use_h,
+            h_wnd_parent,
+            h_menu,
+            h_instance,
+            lp_param,
+        );
+        finish_main_window(hwnd, is_main, || {
+            build_extended_title_from_wide(Untrusted::from_raw(lp_window_name))
+        });
         hwnd
     }
 }
 
 /// `apply` without geometry/style modifications.
-unsafe fn apply_deferred(hwnd: HWND, always_on_top: bool, lp_window_name: Untrusted<u8>) {
+unsafe fn apply_deferred(hwnd: HWND, always_on_top: bool, title: &[u16]) {
     unsafe {
-        let title = build_extended_title(lp_window_name);
         SetWindowTextW(hwnd, title.as_ptr());
         if always_on_top {
             SetWindowPos(
@@ -225,18 +252,69 @@ unsafe fn apply_deferred(hwnd: HWND, always_on_top: bool, lp_window_name: Untrus
     }
 }
 
-// `CreateWindowExA`'s `lpClassName` is either a Win32 `ATOM` (16-bit integer
-// in the pointer slot, < 0x10000) or a pointer to a null-terminated string.
-// `ATOM` values land in the process's null-guard region of address space, so `safe_read`
-// returns 0 bytes for them and the length check below rejects without a special case.
-fn class_name_matches(p: Untrusted<u8>, expected: &[u8]) -> bool {
-    let want_len = expected.len() + 1;
-    let mut buf = [0u8; 32];
-    if want_len > buf.len() {
-        return false;
+/// Shared geometry for the main render window, used by both the A and W hooks.
+/// Returns the (width, height) to pass to `CreateWindowEx*`: the framebuffer size
+/// under `State::Restyle` adjusted for chrome, else the game's requested size.
+fn prep_main_window(
+    is_main: bool,
+    dw_ex_style: u32,
+    dw_style: u32,
+    x: i32,
+    y: i32,
+    n_width: i32,
+    n_height: i32,
+) -> (i32, i32) {
+    let (use_w, use_h) = if let (true, State::Restyle { framebuffer, .. }) =
+        (is_main, STATE.get().unwrap())
+        && (dw_style & WS_POPUP) == 0
+    {
+        let (bw, bh) = *framebuffer;
+        let mut rc = RECT {
+            left: 0,
+            top: 0,
+            right: bw.cast_signed(),
+            bottom: bh.cast_signed(),
+        };
+        unsafe { AdjustWindowRectEx(&raw mut rc, dw_style, 0, dw_ex_style) };
+        (rc.right - rc.left, rc.bottom - rc.top)
+    } else {
+        (n_width, n_height)
+    };
+    if is_main {
+        info!(
+            kind = "create_window_call",
+            dw_style = format_args!("{dw_style:#x}"),
+            dw_ex_style = format_args!("{dw_ex_style:#x}"),
+            x,
+            y,
+            width_in = n_width,
+            height_in = n_height,
+            width_out = use_w,
+            height_out = use_h,
+            recomputed = use_w != n_width || use_h != n_height,
+        );
     }
-    let n = p.safe_read(&mut buf[..want_len]);
-    n == want_len && &buf[..expected.len()] == expected && buf[expected.len()] == 0
+    (use_w, use_h)
+}
+
+/// Shared post-creation handling, run once on the first successful creation
+/// of the main window. `State::Restyle` rewrites geometry/style and title;
+/// `State::DeferToGame` applies only the title and `always_on_top`.
+fn finish_main_window(hwnd: HWND, is_main: bool, build_title: impl FnOnce() -> Vec<u16>) {
+    if is_main
+        && !hwnd.is_null()
+        && APPLIED
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    {
+        let title = build_title();
+        match STATE.get().unwrap() {
+            State::Restyle { restyle, .. } => apply(hwnd, restyle, &title),
+            State::DeferToGame { always_on_top } => unsafe {
+                apply_deferred(hwnd, *always_on_top, &title);
+            },
+        }
+    }
 }
 
 /// Reads the game's Shift-JIS title bytes, transcodes through `CP_SHIFT_JIS` to UTF-16,
@@ -244,7 +322,7 @@ fn class_name_matches(p: Untrusted<u8>, expected: &[u8]) -> bool {
 ///
 /// This is independent of locale because we use the literal Shift-JIS code page,
 /// not the system ANSI code page.
-fn build_extended_title(original: Untrusted<u8>) -> Vec<u16> {
+fn build_extended_title_from_sjis(original: Untrusted<u8>) -> Vec<u16> {
     const CP_SHIFT_JIS: u32 = 932;
     const BUF_LEN: usize = 512;
     let mut buf = [0u8; BUF_LEN];
@@ -265,17 +343,29 @@ fn build_extended_title(original: Untrusted<u8>) -> Vec<u16> {
     };
     wide.truncate(written.max(0).cast_unsigned() as usize);
 
-    wide.extend(" + neopatch v".encode_utf16());
-    wide.extend(env!("CARGO_PKG_VERSION").encode_utf16());
-    wide.push(0);
+    append_suffix(&mut wide);
     wide
 }
 
-fn apply(hwnd: HWND, cfg: &ResolvedWindowCfg, lp_window_name: Untrusted<u8>) {
+/// Reads the game's UTF-16 title bytes and appends a version identifier for this project.
+fn build_extended_title_from_wide(original: Untrusted<u16>) -> Vec<u16> {
+    const BUF_LEN: usize = 512;
+    let mut buf = [0u16; BUF_LEN];
+    let mut wide: Vec<u16> = original.safe_read_until(&mut buf, 0).to_vec();
+    append_suffix(&mut wide);
+    wide
+}
+
+fn append_suffix(wide: &mut Vec<u16>) {
+    wide.extend(" + neopatch v".encode_utf16());
+    wide.extend(env!("CARGO_PKG_VERSION").encode_utf16());
+    wide.push(0);
+}
+
+fn apply(hwnd: HWND, cfg: &ResolvedWindowCfg, title: &[u16]) {
     unsafe {
         // We do this before `SetWindowPos` so the `SWP_FRAMECHANGED`-driven
         // first paint of the title chrome gets the new UTF-16 title.
-        let title = build_extended_title(lp_window_name);
         SetWindowTextW(hwnd, title.as_ptr());
 
         let style: WINDOW_STYLE = match cfg.frame {

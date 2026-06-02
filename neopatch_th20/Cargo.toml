@@ -1,24 +1,22 @@
 [package]
-name = "neopatch_core"
+name = "neopatch_th20"
 version.workspace = true
 authors.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description = "Game-agnostic foundation for neopatch (hooks, pacer, diagnostics)"
+description = "neopatch for Touhou 20"
 readme.workspace = true
 repository.workspace = true
 license.workspace = true
 publish.workspace = true
 
 [lib]
-name = "neopatch_core"
+crate-type = ["cdylib"]
 
 [lints]
 workspace = true
 
 [dependencies]
-png = { workspace = true }
+neopatch_core = { path = "../neopatch_core" }
 tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
-windows = { workspace = true }
 windows-sys = { workspace = true }
