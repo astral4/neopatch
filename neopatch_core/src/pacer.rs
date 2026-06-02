@@ -201,7 +201,7 @@ fn create_waitable_timer() -> HANDLE {
     h
 }
 
-fn qpc() -> i64 {
+pub(crate) fn qpc() -> i64 {
     let mut t = 0;
     unsafe {
         QueryPerformanceCounter(&raw mut t);
@@ -211,7 +211,7 @@ fn qpc() -> i64 {
 
 // `QueryPerformanceFrequency` is documented as fixed at boot, so a single read
 // at `Pacer::new` is enough; the value is then stored as a field.
-fn read_qpc_freq() -> i64 {
+pub(crate) fn read_qpc_freq() -> i64 {
     let mut f = 0;
     unsafe {
         QueryPerformanceFrequency(&raw mut f);

@@ -8,10 +8,12 @@ const REPLAY_STATE: ReplayStateLayout = ReplayStateLayout {
     mgr_ptr_addr: 0x004d_b688,
     mgr_mode_offset: 16,
     input_addr: 0x004d_6878,
+    input_indirect: false,
     viewer_mode: 1,
     input_shoot_bit: 0x1,
     input_focus_bit: 0x8,
     input_skip_bit: 0x200,
+    skip_on_ctrl: false,
 };
 const _: () = REPLAY_STATE.validate();
 
