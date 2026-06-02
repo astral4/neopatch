@@ -1,13 +1,11 @@
 //! Logic for auto-dismissing th18's startup dialog.
 //!
-//! Unlike th14-th17's modeless `CreateDialogParamA`, th18 wraps the dialog in a
-//! self-contained `__stdcall` function (`fcn.00474850`) with its own
-//! `PeekMessageA` loop, so an IAT hook on `CreateDialogParamA` is too late.
-//! We splice the function entry instead and mirror the bytes the OK handler
-//! (`fcn.004747d0`) writes: `[0x4cd00b]` (radio index 0..9 into the array at
-//! `0x4b4280`) and `[0x4cd012]` (scale byte from `0x4b7fbc`), plus a clear of
-//! `[0x56ac70]` bits 0x300 (the dialog-lifecycle flags `WM_INITDIALOG` would
-//! have set; the caller bails out at `0x471758` if either bit is observed).
+//! th18 wraps the dialog in a self-contained `__stdcall` function (`fcn.00474850`) with its own
+//! `PeekMessageA` loop, so an IAT hook on `CreateDialogParamA` is too late. We splice the
+//! function entry instead and mirror the bytes the OK handler (`fcn.004747d0`) writes:
+//! `[0x4cd00b]` (radio index 0..9 into the array at `0x4b4280`) and `[0x4cd012]` (scale byte
+//! from `0x4b7fbc`), plus a clear of `[0x56ac70]` bits 0x300 (the dialog-lifecycle flags
+//! `WM_INITDIALOG` would have set; the caller bails out at `0x471758` if either bit is observed).
 
 use crate::config::CONFIG;
 use neopatch_core::game_addr::GameAddr;

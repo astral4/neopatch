@@ -43,8 +43,7 @@ impl Display for Th18DisplayMode {
     }
 }
 
-/// Back-buffer size for `Windowed`/`Fullscreen`. Ignored under `Borderless`:
-/// `fcn.004734e0`'s monitor-size auto-pick owns the back-buffer there.
+/// Back-buffer size for `Windowed`/`Fullscreen`. Ignored under `Borderless`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum Resolution {
     R640x480,
