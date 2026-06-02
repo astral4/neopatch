@@ -6,7 +6,7 @@
 //! `DialogBoxParamA` to short-circuit without creating any window.
 //!
 //! th12's dialog proc returns `EndDialog(hwnd, 6)` on IDOK regardless of selection;
-//! the selection is a side-write to `[0x004ceacd]`. We replicate it.
+//! the selection is written to `[0x004ceacd]` as a side effect. We replicate that write.
 
 use neopatch_core::config::{self as core_config, DisplayMode};
 use neopatch_core::game_addr::GameAddr;

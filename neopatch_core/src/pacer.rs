@@ -45,7 +45,7 @@ use windows_sys::Win32::System::Threading::{
 /// so we land exactly on the deadline regardless of timer jitter.
 const SAFETY_MARGIN_100NS: i64 = 2_000;
 
-/// Wall-clock threshold beyond which `wait()` resyncs instead of catchup-sprinting.
+/// Wall-clock threshold beyond which `wait()` resyncs instead of running no-sleep catch-up.
 /// Below this gap, missed deadlines are absorbed by skipping the sleep on the next few frames.
 /// Above it, the deadline is reseeded. We go by wall-clock time rather than a period multiple
 /// so the meaning of "absorb hitches up to 50 ms" stays consistent across `game_fps` values.
@@ -123,7 +123,7 @@ impl Pacer {
         let mut deadline = self.deadline_qpc.get(tok);
         if deadline == 0 || now > deadline + self.resync_threshold_qpc {
             // First call or beyond the resync threshold. Below the threshold,
-            // the fall-through path absorbs the gap via catchup-sprint.
+            // the fall-through path absorbs the gap via no-sleep catch-up.
             deadline = now + period;
             self.deadline_qpc.set(tok, deadline);
             return;

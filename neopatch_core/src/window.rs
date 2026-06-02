@@ -254,7 +254,7 @@ unsafe fn apply_deferred(hwnd: HWND, always_on_top: bool, title: &[u16]) {
 
 /// Shared geometry for the main render window, used by both the A and W hooks.
 /// Returns the (width, height) to pass to `CreateWindowEx*`: the framebuffer size
-/// under `State::Restyle` adjusted for chrome, else the game's requested size.
+/// under `State::Restyle` adjusted for the frame, else the game's requested size.
 fn prep_main_window(
     is_main: bool,
     dw_ex_style: u32,
@@ -365,7 +365,7 @@ fn append_suffix(wide: &mut Vec<u16>) {
 fn apply(hwnd: HWND, cfg: &ResolvedWindowCfg, title: &[u16]) {
     unsafe {
         // We do this before `SetWindowPos` so the `SWP_FRAMECHANGED`-driven
-        // first paint of the title chrome gets the new UTF-16 title.
+        // first paint of the title bar gets the new UTF-16 title.
         SetWindowTextW(hwnd, title.as_ptr());
 
         let style: WINDOW_STYLE = match cfg.frame {

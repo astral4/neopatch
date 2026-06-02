@@ -196,7 +196,7 @@ mod tests {
 
     #[test]
     fn radio_index_combines_mode_and_resolution() {
-        // Fullscreen → popup radios 0..2; Windowed → chromed radios 3..5.
+        // Fullscreen -> popup radios 0..2; Windowed -> framed radios 3..5.
         assert_eq!(
             Resolution::R640x480.radio_index(Th18DisplayMode::Fullscreen),
             0,

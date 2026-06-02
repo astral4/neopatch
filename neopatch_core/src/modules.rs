@@ -1,4 +1,4 @@
-//! Loaded-module enumeration and address symbolication.
+//! Loaded-module enumeration and address-to-module resolution.
 
 use std::ptr::null_mut;
 use windows_sys::Win32::Foundation::{HMODULE, MAX_PATH};
@@ -54,7 +54,7 @@ pub(crate) fn module_info(h: HMODULE) -> Option<ModuleRange> {
 }
 
 /// Enumerates every module loaded into the current process.
-/// Each entry carries `base`, `end`, and leaf filename for symbolication.
+/// Each entry carries `base`, `end`, and leaf filename for resolving an address to its module.
 pub(crate) fn walk_modules() -> Vec<Module> {
     // Probably fine for th15.
     const HANDLES_CAP: u32 = 512;

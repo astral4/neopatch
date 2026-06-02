@@ -45,7 +45,7 @@ impl Default for DisplayCfg {
     }
 }
 
-// Window dimensions and chrome default to game-derived values supplied at install time
+// Window dimensions and frame default to game-derived values supplied at install time
 // (matching framebuffer dimensions; `Borderless` in fullscreen, `Frameless` in windowed).
 // Set explicitly to override.
 #[derive(Default)]
@@ -141,7 +141,7 @@ pub enum RefreshRateMode {
     Fixed(NonZero<u32>),
 }
 
-/// Window chrome.
+/// Window frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WindowFrame {
     /// `WS_OVERLAPPED | WS_SYSMENU | WS_VISIBLE | WS_CAPTION | WS_MINIMIZEBOX | WS_MAXIMIZEBOX`.
@@ -152,7 +152,7 @@ pub enum WindowFrame {
     /// No caption or border, but the system menu remains fully functional
     /// (Alt+Space for Move/Minimize/Maximize/Close).
     Frameless,
-    /// `WS_POPUP | WS_VISIBLE`. Pure pixel rectangle; no chrome and no system menu.
+    /// `WS_POPUP | WS_VISIBLE`. Pure pixel rectangle; no frame and no system menu.
     Borderless,
 }
 

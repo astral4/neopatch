@@ -1,8 +1,6 @@
 //! neopatch_th20: latency reductions, optimizations, and other fixes for Touhou 20.
 //!
 //! Shipped as `dinput8.dll` next to `th20.exe`.
-//!
-//! Targets `th20.exe v1.00a`; the in-game title misreports "v1.00c" (copied from th19).
 
 #[cfg(all(not(panic = "abort"), not(test), not(doc)))]
 compile_error!("neopatch_th20 requires `panic = \"abort\"`");

@@ -54,8 +54,8 @@ pub(crate) enum Resolution {
 
 impl Resolution {
     /// Index into `DAT_005ae128` (the OK handler's check-order table); ends up
-    /// in `[0x005c4f80]`. 0..2 fullscreen, 3..5 windowed-chromed, 6..7
-    /// upscaled-windowed (not surfaced), 8 DOT by DOT, 9 smooth-fit (not surfaced).
+    /// in `[0x005c4f80]`. 0..2 fullscreen, 3..5 windowed-framed, 6..7 upscaled-windowed
+    /// (not surfaced), 8 DOT by DOT, 9 smooth-scaled (not surfaced).
     pub(crate) fn radio_index(self, mode: Th20DisplayMode) -> u8 {
         match (mode, self) {
             (Th20DisplayMode::Fullscreen, Self::R640x480) => 0,
