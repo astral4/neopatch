@@ -3,7 +3,7 @@
 //! `main` at `0x0045c389..0x0045c3a7` tests an "Alt held at launch" stack-local bit before
 //! falling through to `DialogBoxParamA` at `0x0045c3a1` (template `0xCB`, proc at `0x0045e910`).
 //! We NOP the Alt-key `je` at `0x0045c390` so the call site is reached on every launch,
-//! then IAT-hook `DialogBoxParamA` to short-circuit without creating any window.
+//! then hook `DialogBoxParamA` to short-circuit without creating any window.
 //!
 //! On the IDOK branch, the real dialog proc returns 6, writes 0..3 to `[0x004dc88f]`
 //! (fullscreen 640x480 / windowed 640x480 / windowed 960x720 / windowed 1280x960),
@@ -46,6 +46,9 @@ const DIALOG_PATCHES: &[Patch] = &[Patch::new(
     "force dialog gate open",
 )];
 
+const DIALOG_BOX_CALL_ADDR: usize = 0x0045_c3a1;
+const DIALOG_BOX_CALL_BYTES: [u8; 6] = [0xff, 0x15, 0xf8, 0x21, 0x4a, 0x00];
+
 iat_hook! {
     REAL_DIALOG_BOX_PARAM_A / real_dialog_box_param_a : "DialogBoxParamA"
         as fn(
@@ -59,7 +62,12 @@ iat_hook! {
 
 pub(crate) unsafe fn install(host: HMODULE) {
     unsafe {
-        REAL_DIALOG_BOX_PARAM_A.install(host, hook_dialog_box_param_a);
+        REAL_DIALOG_BOX_PARAM_A.install_with_call_site(
+            host,
+            hook_dialog_box_param_a,
+            DIALOG_BOX_CALL_ADDR,
+            &DIALOG_BOX_CALL_BYTES,
+        );
         Patch::apply_all(DIALOG_PATCHES);
     }
 }

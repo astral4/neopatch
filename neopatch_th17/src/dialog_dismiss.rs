@@ -1,10 +1,9 @@
 //! Logic for auto-dismissing th17's startup dialog.
 //!
 //! We let the dialog's message pump continue running because th17 folds it into the main loop,
-//! so the game tick advances while the dialog is up. This is done by IAT-hooking
-//! `CreateDialogParamA`, overriding the dialog's selections from our config, and using
-//! `PostMessage` to send an OK click; th17's OK handler (`fcn.00463400`) tears the dialog down
-//! itself, so no pump exit-flag is needed.
+//! so the game tick advances while the dialog is up. This is done by hooking `CreateDialogParamA`,
+//! overriding the dialog's selections from our config, and using `PostMessage` to send an OK click;
+//! th17's OK handler (`fcn.00463400`) tears the dialog down itself, so no pump exit-flag is needed.
 
 use crate::config::CONFIG;
 use neopatch_core::config::{self as core_config, DisplayMode};
@@ -52,6 +51,9 @@ const DIALOG_PATCHES: &[Patch] = &[
     ),
 ];
 
+const CREATE_DIALOG_CALL_ADDR: usize = 0x0046_0bae;
+const CREATE_DIALOG_CALL_BYTES: [u8; 6] = [0xff, 0x15, 0x38, 0xa2, 0x49, 0x00];
+
 iat_hook! {
     REAL_CREATE_DIALOG_PARAM_A / real_create_dialog_param_a : "CreateDialogParamA"
         as fn(
@@ -65,7 +67,12 @@ iat_hook! {
 
 pub(crate) unsafe fn install(host: HMODULE) {
     unsafe {
-        REAL_CREATE_DIALOG_PARAM_A.install(host, hook_create_dialog_param_a);
+        REAL_CREATE_DIALOG_PARAM_A.install_with_call_site(
+            host,
+            hook_create_dialog_param_a,
+            CREATE_DIALOG_CALL_ADDR,
+            &CREATE_DIALOG_CALL_BYTES,
+        );
         Patch::apply_all(DIALOG_PATCHES);
     }
 }

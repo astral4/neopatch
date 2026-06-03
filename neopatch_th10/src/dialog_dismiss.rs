@@ -3,7 +3,7 @@
 //! `fcn.00438ad0` calls `DialogBoxParamA` (template `0xCB`, proc `0x0043a3a0`) when
 //! `[0x491d78] & 0x100` is set. The proc's `EndDialog` value lands in `[0x491d65]`,
 //! which the game later passes as `Windowed` to `CreateDevice`. We NOP the gate so the call
-//! always fires, then short-circuit the IAT to return the value the proc would have for our
+//! always fires, then short-circuit the call to return the value the proc would have for our
 //! own configuration without creating any window.
 
 use neopatch_core::config::{self as core_config, DisplayMode};
@@ -31,6 +31,9 @@ const DIALOG_PATCHES: &[Patch] = &[Patch::new(
     "force dialog gate open",
 )];
 
+const DIALOG_BOX_CALL_ADDR: usize = 0x0043_8b8c;
+const DIALOG_BOX_CALL_BYTES: [u8; 6] = [0xff, 0x15, 0x64, 0x62, 0x46, 0x00];
+
 iat_hook! {
     REAL_DIALOG_BOX_PARAM_A / real_dialog_box_param_a : "DialogBoxParamA"
         as fn(
@@ -44,7 +47,12 @@ iat_hook! {
 
 pub(crate) unsafe fn install(host: HMODULE) {
     unsafe {
-        REAL_DIALOG_BOX_PARAM_A.install(host, hook_dialog_box_param_a);
+        REAL_DIALOG_BOX_PARAM_A.install_with_call_site(
+            host,
+            hook_dialog_box_param_a,
+            DIALOG_BOX_CALL_ADDR,
+            &DIALOG_BOX_CALL_BYTES,
+        );
         Patch::apply_all(DIALOG_PATCHES);
     }
 }

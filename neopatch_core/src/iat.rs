@@ -5,6 +5,7 @@
 //! without transmuting. The install method takes the hook as typed `F`,
 //! so a hook with a mismatched signature is a compile error.
 
+use crate::patches::patch_call;
 use crate::protect::with_writable;
 use crate::vtable::{FnSlot, hook_to_raw, parse_fn_ptr};
 use std::ffi::{CStr, c_char};
@@ -143,6 +144,25 @@ impl<F: Copy + Send + Sync + 'static> IatHook<F> {
             );
             false
         }
+    }
+
+    /// Installs the IAT hook (capturing the original) and also rewrites a single known call site
+    /// of the import to call `hook` directly. Returns whether the IAT hook itself installed.
+    ///
+    /// # Safety
+    /// `host` must be a loaded module handle.
+    /// `call_addr` must be a writable code address holding `expected`.
+    pub unsafe fn install_with_call_site<const N: usize>(
+        &self,
+        host: HMODULE,
+        hook: F,
+        call_addr: usize,
+        expected: &[u8; N],
+    ) -> bool {
+        let installed = unsafe { self.install(host, hook) };
+        let label = format!("{} call-site rewrite", self.name);
+        unsafe { patch_call(call_addr, expected, hook_to_raw(hook), &label) };
+        installed
     }
 }
 

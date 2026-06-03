@@ -1,7 +1,7 @@
 //! Logic for auto-dismissing th15's startup dialog.
 //!
 //! We let the dialog's message pump continue running because the loader thread deadlocks otherwise.
-//! This is done by IAT-hooking `CreateDialogParamA`, overriding the dialog's selections from
+//! This is done by hooking `CreateDialogParamA`, overriding the dialog's selections from
 //! our config, and then using `PostMessage` to send an OK click and set the pump's exit-flag bit.
 
 use crate::config::CONFIG;
@@ -49,6 +49,9 @@ const DIALOG_PATCHES: &[Patch] = &[
     Patch::new(0x0047_1620, &[0x05], &[0x00], "force dialog hidden"),
 ];
 
+const CREATE_DIALOG_CALL_ADDR: usize = 0x0047_1619;
+const CREATE_DIALOG_CALL_BYTES: [u8; 6] = [0xff, 0x15, 0x30, 0xe2, 0x4b, 0x00];
+
 iat_hook! {
     REAL_CREATE_DIALOG_PARAM_A / real_create_dialog_param_a : "CreateDialogParamA"
         as fn(
@@ -62,7 +65,12 @@ iat_hook! {
 
 pub(crate) unsafe fn install(host: HMODULE) {
     unsafe {
-        REAL_CREATE_DIALOG_PARAM_A.install(host, hook_create_dialog_param_a);
+        REAL_CREATE_DIALOG_PARAM_A.install_with_call_site(
+            host,
+            hook_create_dialog_param_a,
+            CREATE_DIALOG_CALL_ADDR,
+            &CREATE_DIALOG_CALL_BYTES,
+        );
         Patch::apply_all(DIALOG_PATCHES);
     }
 }

@@ -4,6 +4,10 @@ All notable changes to neopatch will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- Games now have improved compatibility with [thcrap](https://github.com/thpatch/thcrap) due to reworking startup dialog auto-dismissal.
+
 ## [0.9.0] - 2026-06-02
 
 ### Added

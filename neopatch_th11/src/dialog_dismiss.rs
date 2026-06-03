@@ -2,7 +2,7 @@
 //!
 //! `main` at `0x00445610..0x00445626` gates `DialogBoxParamA` on either the
 //! `[0x4c3480] & 0x100` checkbox or holding Alt at launch. We NOP the Alt-key skip at
-//! `0x00445617` so the call site is reached on every launch, then IAT-hook `DialogBoxParamA`
+//! `0x00445617` so the call site is reached on every launch, then hook `DialogBoxParamA`
 //! to short-circuit without creating any window.
 //!
 //! th11's dialog proc returns `EndDialog(hwnd, 6)` on IDOK regardless of selection;
@@ -37,6 +37,9 @@ const DIALOG_PATCHES: &[Patch] = &[Patch::new(
     "force dialog gate open",
 )];
 
+const DIALOG_BOX_CALL_ADDR: usize = 0x0044_5626;
+const DIALOG_BOX_CALL_BYTES: [u8; 6] = [0xff, 0x15, 0x80, 0xb2, 0x48, 0x00];
+
 iat_hook! {
     REAL_DIALOG_BOX_PARAM_A / real_dialog_box_param_a : "DialogBoxParamA"
         as fn(
@@ -50,7 +53,12 @@ iat_hook! {
 
 pub(crate) unsafe fn install(host: HMODULE) {
     unsafe {
-        REAL_DIALOG_BOX_PARAM_A.install(host, hook_dialog_box_param_a);
+        REAL_DIALOG_BOX_PARAM_A.install_with_call_site(
+            host,
+            hook_dialog_box_param_a,
+            DIALOG_BOX_CALL_ADDR,
+            &DIALOG_BOX_CALL_BYTES,
+        );
         Patch::apply_all(DIALOG_PATCHES);
     }
 }
