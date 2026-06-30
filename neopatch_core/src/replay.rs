@@ -55,8 +55,7 @@ impl ReplayStateLayout {
             "ReplayStateLayout::mgr_mode_offset must be 4-byte aligned",
         );
         let input_addr = match self.input_addr {
-            InputAddr::Direct(addr) => addr,
-            InputAddr::Indirect(addr) => addr,
+            InputAddr::Direct(addr) | InputAddr::Indirect(addr) => addr,
         };
         assert!(
             input_addr != 0,
