@@ -2,7 +2,7 @@
 
 use neopatch_core::MainToken;
 use neopatch_core::d3d9::{ReplayMode, set_replay_mode_fn};
-use neopatch_core::replay::{ReplayStateLayout, read_replay_mode};
+use neopatch_core::replay::{InputAddr, ReplayStateLayout, read_replay_mode};
 use std::sync::OnceLock;
 
 const MANAGER_PTR_VA: usize = 0x005c_60fc;
@@ -20,17 +20,18 @@ const _: () = {
 static REPLAY_STATE: OnceLock<ReplayStateLayout> = OnceLock::new();
 
 pub(crate) fn install(slide: usize) {
-    let _ = REPLAY_STATE.set(ReplayStateLayout {
+    let layout = ReplayStateLayout {
         mgr_ptr_addr: MANAGER_PTR_VA.wrapping_add(slide),
         mgr_mode_offset: MANAGER_MODE_OFFSET,
         viewer_mode: VIEWER_MODE,
-        input_addr: INPUT_PTR_VA.wrapping_add(slide),
-        input_indirect: true,
+        input_addr: InputAddr::Indirect(INPUT_PTR_VA.wrapping_add(slide)),
         input_shoot_bit: 0x1,
         input_focus_bit: 0x8,
         input_skip_bit: 0x200,
         skip_on_ctrl: true,
-    });
+    };
+    layout.validate();
+    let _ = REPLAY_STATE.set(layout);
     set_replay_mode_fn(replay_mode);
 }
 

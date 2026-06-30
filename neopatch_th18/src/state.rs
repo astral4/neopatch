@@ -2,14 +2,13 @@
 
 use neopatch_core::MainToken;
 use neopatch_core::d3d9::ReplayMode;
-use neopatch_core::replay::{ReplayStateLayout, read_replay_mode};
+use neopatch_core::replay::{InputAddr, ReplayStateLayout, read_replay_mode};
 
 const REPLAY_STATE: ReplayStateLayout = ReplayStateLayout {
     mgr_ptr_addr: 0x004c_f418,
     mgr_mode_offset: 12,
     viewer_mode: 1,
-    input_addr: 0x004c_a210,
-    input_indirect: false,
+    input_addr: InputAddr::Direct(0x004c_a210),
     input_shoot_bit: 0x1,
     input_focus_bit: 0x8,
     input_skip_bit: 0x200,

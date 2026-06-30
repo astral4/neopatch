@@ -19,11 +19,8 @@ pub struct ReplayStateLayout {
     pub mgr_mode_offset: usize,
     /// Mode value indicating "viewer" (user is in replay playback).
     pub viewer_mode: i32,
-    /// Address of the game's input bitfield (u32), or, when `input_indirect`, of a pointer to it.
-    pub input_addr: usize,
-    /// If `true`, `input_addr` holds a pointer to the input object and the bitfield
-    /// is its first dword; if `false`, `input_addr` is the bitfield itself.
-    pub input_indirect: bool,
+    /// Address for the game's input bitfield (u32).
+    pub input_addr: InputAddr,
     /// Bit set when "shoot" input is held.
     pub input_shoot_bit: u32,
     /// Bit set when "focus" input is held.
@@ -42,8 +39,13 @@ impl ReplayStateLayout {
     /// from a `const _: () = ...` block at each site declaring a `ReplayStateLayout`.
     ///
     /// # Panics
+    /// Panics if `mgr_ptr_addr` or `input_addr` is 0.
     /// Panics if `mgr_ptr_addr`, `mgr_mode_offset`, or `input_addr` isn't a multiple of 4.
     pub const fn validate(&self) {
+        assert!(
+            self.mgr_ptr_addr != 0,
+            "ReplayStateLayout::mgr_ptr_addr must be nonzero",
+        );
         assert!(
             self.mgr_ptr_addr.is_multiple_of(4),
             "ReplayStateLayout::mgr_ptr_addr must be 4-byte aligned",
@@ -52,11 +54,28 @@ impl ReplayStateLayout {
             self.mgr_mode_offset.is_multiple_of(4),
             "ReplayStateLayout::mgr_mode_offset must be 4-byte aligned",
         );
+        let input_addr = match self.input_addr {
+            InputAddr::Direct(addr) => addr,
+            InputAddr::Indirect(addr) => addr,
+        };
         assert!(
-            self.input_addr.is_multiple_of(4),
+            input_addr != 0,
+            "ReplayStateLayout::input_addr must be nonzero",
+        );
+        assert!(
+            input_addr.is_multiple_of(4),
             "ReplayStateLayout::input_addr must be 4-byte aligned",
         );
     }
+}
+
+/// Input bitfield addressing method.
+#[derive(Clone, Copy)]
+pub enum InputAddr {
+    /// Address of the game's input bitfield.
+    Direct(usize),
+    /// Address of a pointer to the game's input bitfield.
+    Indirect(usize),
 }
 
 /// Classifies the current pacing intent for a game with replay-speed control.
@@ -90,14 +109,15 @@ pub fn read_replay_mode(tok: &MainToken, layout: ReplayStateLayout) -> ReplayMod
 
 /// Reads the held-input bitfield named by `layout`. Returns `None` if the input object isn't live yet.
 fn read_input_bits(layout: ReplayStateLayout) -> Option<u32> {
-    let bits_addr = if layout.input_indirect {
-        let obj: *const u8 = unsafe { read_volatile(with_exposed_provenance(layout.input_addr)) };
-        if obj.is_null() {
-            return None;
+    let bits_addr = match layout.input_addr {
+        InputAddr::Direct(addr) => addr,
+        InputAddr::Indirect(addr) => {
+            let obj: *const u8 = unsafe { read_volatile(with_exposed_provenance(addr)) };
+            if obj.is_null() {
+                return None;
+            }
+            obj.addr()
         }
-        obj.addr()
-    } else {
-        layout.input_addr
     };
     let bits: u32 = unsafe { read_volatile(with_exposed_provenance(bits_addr)) };
     Some(bits)
