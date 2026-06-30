@@ -30,7 +30,7 @@ neopatch is cross-compiled from Linux to `i686-pc-windows-gnu`. Build hosts need
 An example with the [`neopatch_th15`](neopatch_th15/) crate:
 
 ```
-cargo build -p neopatch_th15 --target i686-pc-windows-gnu --release
+cargo build -p neopatch_th15 --release
 ```
 
 See [`justfile`](justfile) for commands you can run via [`just`](https://github.com/casey/just).
