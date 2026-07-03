@@ -4,6 +4,10 @@ All notable changes to neopatch will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- Fullscreen refresh rate selection is now validated for support at the chosen resolution.
+
 ## [0.9.1] - 2026-06-02
 
 ### Fixed

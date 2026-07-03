@@ -129,15 +129,12 @@ pub enum DisplayMode {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RefreshRateMode {
-    /// The desktop's current refresh rate. Note: this is not necessarily the highest
-    /// the monitor supports at the chosen game resolution. We don't enumerate modes;
-    /// see `d3d9::pick_refresh_rate`.
+    /// Highest supported rate not above the desktop's rate at the chosen resolution; otherwise the lowest supported rate.
     Native,
-    /// Highest multiple of 60 less than or equal to the desktop rate.
+    /// Highest supported multiple-of-60 rate not above the desktop's rate at the chosen resolution; otherwise identical to `Native`.
     NativeMultiple,
-    /// Force a specific refresh rate in Hz. We don't validate that this value is
-    /// advertised by the monitor at the chosen back-buffer dimensions.
-    /// If it isn't, then device creation fails.
+    /// Force a specific rate in Hz. Requests the adapter's matching advertised mode (including its NTSC-derived variant,
+    /// e.g. 119 for a `Fixed(120)`) when one exists. Falls back to the game's original rate if rejected at the chosen resolution.
     Fixed(NonZero<u32>),
 }
 

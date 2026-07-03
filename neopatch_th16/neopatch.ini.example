@@ -37,14 +37,12 @@ resolution = 1280x960
 
 ; Fullscreen refresh rate selection. Ignored in windowed mode.
 ; Default: NativeMultiple
-;   Native           - the desktop's current refresh rate
-;   NativeMultiple   - highest multiple of 60 not exceeding the desktop
-;                      refresh rate (e.g. 120 on 144 Hz, 60 on 100 Hz)
-;   <integer>        - force a specific rate in Hz; if your display
-;                      doesn't actually support this refresh rate at
-;                      the chosen resolution, then running the game
-;                      will fail; use Native or NativeMultiple for
-;                      a guaranteed-supported refresh rate
+;   Native           - highest supported rate not above the desktop's rate
+;                      at the chosen resolution; otherwise the lowest supported rate
+;   NativeMultiple   - highest supported multiple-of-60 rate not above the desktop's rate
+;                      at the chosen resolution; otherwise identical to Native
+;   <integer>        - force a specific rate in Hz; falls back to the game's original rate
+;                      if rejected at the chosen resolution
 refresh_rate = NativeMultiple
 
 
