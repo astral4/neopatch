@@ -3,7 +3,7 @@ build game:
     cp target/i686-pc-windows-gnu/release/neopatch_{{game}}.dll sandbox/games/{{game}}/dinput8.dll
 
 _test game:
-    cargo test -p neopatch_{{game}} --release
+    cargo +nightly test -p neopatch_{{game}} --release -Zpanic-abort-tests
 
 test: (_test "core") (_test "th10") (_test "th11") (_test "th12") (_test "th13") (_test "th14") (_test "th15") (_test "th16") (_test "th17") (_test "th18") (_test "th20")
 
