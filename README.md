@@ -2,24 +2,22 @@
 
 neopatch is a Touhou game mod for end-to-end latency reductions, optimizations, and other fixes.
 
-Currently supported: Touhou 10 (`th10.exe v1.00a`), Touhou 11 (`th11.exe v1.00a`), Touhou 12 (`th12.exe v1.00b`), Touhou 13 (`th13.exe v1.00c`), Touhou 14 (`th14.exe v1.00b`), Touhou 15 (`th15.exe v1.00b`), Touhou 16 (`th16.exe v1.00a`), Touhou 17 (`th17.exe v1.00b`), Touhou 18 (`th18.exe v1.00a`), and Touhou 20 (`th20.exe v1.00a`). Support for more games is planned for the near future.
-
 ## Usage
 
 neopatch ships as a DLL file. The file should be named `dinput8.dll` and placed in the game directory alongside the game executable.
 
-neopatch is configured through a `neopatch.ini` file, which should also be placed in the game directory. Please check the per-game example files to see what's possible with neopatch!
+neopatch is configured through a `neopatch.ini` file, which should also be placed in the game directory. Please check the per-game example files to see what's possible with neopatch! Here is a list of supported games and versions; support for more games is planned for the near future.
 
-- Touhou 10: [`neopatch.ini.example`](neopatch_th10/neopatch.ini.example)
-- Touhou 11: [`neopatch.ini.example`](neopatch_th11/neopatch.ini.example)
-- Touhou 12: [`neopatch.ini.example`](neopatch_th12/neopatch.ini.example)
-- Touhou 13: [`neopatch.ini.example`](neopatch_th13/neopatch.ini.example)
-- Touhou 14: [`neopatch.ini.example`](neopatch_th14/neopatch.ini.example)
-- Touhou 15: [`neopatch.ini.example`](neopatch_th15/neopatch.ini.example)
-- Touhou 16: [`neopatch.ini.example`](neopatch_th16/neopatch.ini.example)
-- Touhou 17: [`neopatch.ini.example`](neopatch_th17/neopatch.ini.example)
-- Touhou 18: [`neopatch.ini.example`](neopatch_th18/neopatch.ini.example)
-- Touhou 20: [`neopatch.ini.example`](neopatch_th20/neopatch.ini.example)
+- Touhou 10 (v1.00a): [`neopatch.ini.example`](neopatch_th10/neopatch.ini.example)
+- Touhou 11 (v1.00a): [`neopatch.ini.example`](neopatch_th11/neopatch.ini.example)
+- Touhou 12 (v1.00b): [`neopatch.ini.example`](neopatch_th12/neopatch.ini.example)
+- Touhou 13 (v1.00c): [`neopatch.ini.example`](neopatch_th13/neopatch.ini.example)
+- Touhou 14 (v1.00b): [`neopatch.ini.example`](neopatch_th14/neopatch.ini.example)
+- Touhou 15 (v1.00b): [`neopatch.ini.example`](neopatch_th15/neopatch.ini.example)
+- Touhou 16 (v1.00a): [`neopatch.ini.example`](neopatch_th16/neopatch.ini.example)
+- Touhou 17 (v1.00b): [`neopatch.ini.example`](neopatch_th17/neopatch.ini.example)
+- Touhou 18 (v1.00a): [`neopatch.ini.example`](neopatch_th18/neopatch.ini.example)
+- Touhou 20 (v1.00a): [`neopatch.ini.example`](neopatch_th20/neopatch.ini.example)
 
 neopatch is not compatible with similar mods like vpatch and OpenInputLagPatch (OILP). Attempting to use neopatch with them may cause hard-to-troubleshoot issues.
 
