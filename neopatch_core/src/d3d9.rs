@@ -13,6 +13,9 @@
 //! `CreateTexture` and `CreateVertexBuffer` call because D3D9Ex deprecates
 //! the managed pool and silently translates it on a slow path.
 //!
+//! `D3DCREATE_MULTITHREADED` is OR'd into the device behavior flags
+//! since the games use D3D9 from worker threads without asking for a thread-safe device.
+//!
 //! Instead of per-instance vtable cloning, we do in-place slot patching against
 //! `d3d9.dll`'s `.rdata`. (Some drivers depend on the instance's vtable pointer
 //! being equal to the canonical one.) See `vtable.rs` for the protect/write/restore
@@ -34,16 +37,16 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use tracing::{error, info, warn};
 use windows::Win32::Foundation::{HANDLE, HWND, RECT};
 use windows::Win32::Graphics::Direct3D9::{
-    D3DDEVTYPE, D3DDISPLAYMODEEX, D3DDISPLAYMODEFILTER, D3DDISPLAYROTATION, D3DFMT_A1R5G5B5,
-    D3DFMT_A2B10G10R10, D3DFMT_A2R10G10B10, D3DFMT_A4R4G4B4, D3DFMT_A8, D3DFMT_A8B8G8R8,
-    D3DFMT_A8R3G3B2, D3DFMT_A8R8G8B8, D3DFMT_A16B16G16R16, D3DFMT_D15S1, D3DFMT_D16,
-    D3DFMT_D16_LOCKABLE, D3DFMT_D24FS8, D3DFMT_D24S8, D3DFMT_D24X4S4, D3DFMT_D24X8, D3DFMT_D32,
-    D3DFMT_D32F_LOCKABLE, D3DFMT_G16R16, D3DFMT_R3G3B2, D3DFMT_R5G6B5, D3DFMT_R8G8B8,
-    D3DFMT_UNKNOWN, D3DFMT_X1R5G5B5, D3DFMT_X4R4G4B4, D3DFMT_X8B8G8R8, D3DFMT_X8R8G8B8, D3DFORMAT,
-    D3DPOOL, D3DPOOL_DEFAULT, D3DPOOL_MANAGED, D3DPRESENT_INTERVAL_IMMEDIATE,
-    D3DPRESENT_PARAMETERS, D3DPRESENTFLAG_LOCKABLE_BACKBUFFER, D3DRESOURCETYPE,
-    D3DSCANLINEORDERING_PROGRESSIVE, D3DUSAGE_DYNAMIC, Direct3DCreate9Ex, IDirect3D9Ex_Vtbl,
-    IDirect3DDevice9Ex_Vtbl,
+    D3DCREATE_MULTITHREADED, D3DDEVTYPE, D3DDISPLAYMODEEX, D3DDISPLAYMODEFILTER,
+    D3DDISPLAYROTATION, D3DFMT_A1R5G5B5, D3DFMT_A2B10G10R10, D3DFMT_A2R10G10B10, D3DFMT_A4R4G4B4,
+    D3DFMT_A8, D3DFMT_A8B8G8R8, D3DFMT_A8R3G3B2, D3DFMT_A8R8G8B8, D3DFMT_A16B16G16R16,
+    D3DFMT_D15S1, D3DFMT_D16, D3DFMT_D16_LOCKABLE, D3DFMT_D24FS8, D3DFMT_D24S8, D3DFMT_D24X4S4,
+    D3DFMT_D24X8, D3DFMT_D32, D3DFMT_D32F_LOCKABLE, D3DFMT_G16R16, D3DFMT_R3G3B2, D3DFMT_R5G6B5,
+    D3DFMT_R8G8B8, D3DFMT_UNKNOWN, D3DFMT_X1R5G5B5, D3DFMT_X4R4G4B4, D3DFMT_X8B8G8R8,
+    D3DFMT_X8R8G8B8, D3DFORMAT, D3DPOOL, D3DPOOL_DEFAULT, D3DPOOL_MANAGED,
+    D3DPRESENT_INTERVAL_IMMEDIATE, D3DPRESENT_PARAMETERS, D3DPRESENTFLAG_LOCKABLE_BACKBUFFER,
+    D3DRESOURCETYPE, D3DSCANLINEORDERING_PROGRESSIVE, D3DUSAGE_DYNAMIC, Direct3DCreate9Ex,
+    IDirect3D9Ex_Vtbl, IDirect3DDevice9Ex_Vtbl,
 };
 use windows::Win32::Graphics::Gdi::{HMONITOR, RGNDATA};
 use windows::core::{HRESULT, Interface};
@@ -812,6 +815,14 @@ unsafe extern "system" fn hook_create_device(
 ) -> HRESULT {
     let tok = MainToken::new();
     unsafe {
+        let behavior_flags_in = behavior_flags;
+        let behavior_flags = rewrite_behavior_flags(behavior_flags);
+        info!(
+            kind = "behavior_flags_rewrite",
+            flags_before = format_args!("{behavior_flags_in:#x}"),
+            flags_after = format_args!("{behavior_flags:#x}"),
+        );
+
         let desktop_before = sample_for_degradation_check(this, adapter, pp);
 
         let mut prep = prep_present_params(pp, this, adapter, desktop_before);
@@ -872,6 +883,11 @@ unsafe extern "system" fn hook_create_device(
         }
         hr
     }
+}
+
+/// Adds `D3DCREATE_MULTITHREADED`.
+fn rewrite_behavior_flags(flags: u32) -> u32 {
+    flags | D3DCREATE_MULTITHREADED.cast_unsigned()
 }
 
 /// Reads the display mode of `adapter`. Returns `None` on failure.
@@ -1398,8 +1414,9 @@ mod tests {
     use super::*;
     use std::num::NonZero;
     use windows::Win32::Graphics::Direct3D9::{
-        D3DFMT_R5G6B5, D3DPOOL_SCRATCH, D3DPOOL_SYSTEMMEM, D3DPRESENT_INTERVAL_ONE,
-        D3DPRESENTFLAG_DISCARD_DEPTHSTENCIL, D3DSWAPEFFECT_DISCARD, D3DUSAGE_WRITEONLY,
+        D3DCREATE_HARDWARE_VERTEXPROCESSING, D3DFMT_R5G6B5, D3DPOOL_SCRATCH, D3DPOOL_SYSTEMMEM,
+        D3DPRESENT_INTERVAL_ONE, D3DPRESENTFLAG_DISCARD_DEPTHSTENCIL, D3DSWAPEFFECT_DISCARD,
+        D3DUSAGE_WRITEONLY,
     };
 
     fn nz(n: u32) -> NonZero<u32> {
@@ -1541,6 +1558,16 @@ mod tests {
             assert_eq!(pool, pool_in);
             assert_eq!(usage, 0);
         }
+    }
+
+    #[test]
+    fn rewrite_behavior_flags_adds_multithreaded() {
+        let mt = D3DCREATE_MULTITHREADED.cast_unsigned();
+        let game_flags = D3DCREATE_HARDWARE_VERTEXPROCESSING.cast_unsigned();
+        let out = rewrite_behavior_flags(game_flags);
+        assert_eq!(out & mt, mt);
+        assert_eq!(out & !mt, game_flags);
+        assert_eq!(rewrite_behavior_flags(out), out);
     }
 
     #[test]

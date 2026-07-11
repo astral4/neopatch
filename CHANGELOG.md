@@ -7,6 +7,7 @@ All notable changes to neopatch will be documented in this file.
 ### Fixed
 
 - Fullscreen refresh rate selection is now validated for support at the chosen resolution.
+- D3D9 devices are now created with `D3DCREATE_MULTITHREADED` to prevent graphics-driver crashes at scene transitions, since the games use D3D from worker threads.
 
 ## [0.9.1] - 2026-06-02
 
