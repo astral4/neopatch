@@ -26,7 +26,7 @@ run game:
     set -euo pipefail
     just build {{game}}
     cd sandbox/games/{{game}}
-    WINEDLLOVERRIDES="mscoree=,mshtml=" wine {{game}}.exe
+    WINEDLLOVERRIDES="mscoree=,mshtml=,winemenubuilder.exe=d" wine {{game}}.exe
 
 _release game:
     #!/usr/bin/env bash

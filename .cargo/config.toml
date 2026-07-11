@@ -7,6 +7,6 @@ runner = "wine"
 # Silence noise from the Wine runner used by `cargo test --target i686-pc-windows-gnu`.
 [env]
 WINEDEBUG = "-all"
-WINEDLLOVERRIDES = "mscoree=,mshtml="
+WINEDLLOVERRIDES = "mscoree=,mshtml=,winemenubuilder.exe=d"
 EGL_LOG_LEVEL = "fatal"
 MESA_LOADER_DRIVER_OVERRIDE = "llvmpipe"
