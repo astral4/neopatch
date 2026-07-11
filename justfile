@@ -28,17 +28,17 @@ run game:
     cd sandbox/games/{{game}}
     WINEDLLOVERRIDES="mscoree=,mshtml=,winemenubuilder.exe=d" wine {{game}}.exe
 
-_release game:
+release:
     #!/usr/bin/env bash
     set -euo pipefail
     out="target/release-packages"
-    name="neopatch_{{game}}"
-    cargo build -p ${name} --release
-    rm -rf "${out}/${name}" "${out}/${name}.zip"
-    mkdir -p "${out}/${name}"
-    cp "target/i686-pc-windows-gnu/release/${name}.dll" "${out}/${name}/dinput8.dll"
-    cp ${name}/neopatch.ini.example "${out}/${name}/neopatch.ini"
-    (cd "${out}" && zip -qr "${name}.zip" "${name}/")
-    echo "Created ${out}/${name}.zip"
-
-release: (_release "th10") (_release "th11") (_release "th12") (_release "th13") (_release "th14") (_release "th15") (_release "th16") (_release "th17") (_release "th18") (_release "th20")
+    rm -rf "${out}/neopatch" "${out}/neopatch.zip"
+    for game in th10 th11 th12 th13 th14 th15 th16 th17 th18 th20; do
+        name="neopatch_${game}"
+        cargo build -p "${name}" --release
+        mkdir -p "${out}/neopatch/${game}"
+        cp "target/i686-pc-windows-gnu/release/${name}.dll" "${out}/neopatch/${game}/dinput8.dll"
+        cp "${name}/neopatch.ini.example" "${out}/neopatch/${game}/neopatch.ini"
+    done
+    (cd "${out}" && zip -qr "neopatch.zip" "neopatch/")
+    echo "Created ${out}/neopatch.zip"

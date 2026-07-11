@@ -4,6 +4,10 @@ All notable changes to neopatch will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- Releases are now packaged as a single ZIP archive with one directory per game instead of a separate archive per game.
+
 ### Fixed
 
 - Fullscreen refresh rate selection is now validated for support at the chosen resolution.
