@@ -10,6 +10,7 @@
 //!
 //! We don't use `FlushInstructionCache` because vtable slots are read as data.
 
+use crate::log::log_at;
 use crate::modules::{Module, ModuleRange, annotate_resolved, module_info, walk_modules};
 use crate::protect::with_writable;
 use std::marker::PhantomData;
@@ -17,7 +18,7 @@ use std::mem::transmute_copy;
 use std::ptr::{NonNull, read_unaligned, write_unaligned};
 use std::sync::OnceLock;
 use std::sync::atomic::{Ordering, fence};
-use tracing::{info, warn};
+use tracing::{debug, warn};
 use windows_sys::Win32::Foundation::HMODULE;
 
 /// Declares a typed `static FnSlot<F>` for a vtable slot, plus a typed trampoline
@@ -256,7 +257,7 @@ pub(crate) unsafe fn capture_slot<F, V>(
     if let Some(existing) = dst.try_get() {
         let existing_raw = hook_to_raw(existing);
         if existing_raw == raw {
-            info!(
+            debug!(
                 kind = "capture_slot_skipped",
                 slot = dst.name(),
                 value = format_args!("{existing_raw:p}"),
@@ -369,7 +370,7 @@ impl<V> VtblScope<'_, V> {
             if let Some(existing) = slot.try_get() {
                 let existing_raw = hook_to_raw(existing);
                 if existing_raw == current {
-                    info!(
+                    debug!(
                         kind = "intercept_recapture_skipped",
                         name,
                         offset = format_args!("{offset:#x}"),
@@ -436,25 +437,16 @@ impl<V> VtblScope<'_, V> {
         #[allow(clippy::cast_possible_truncation)]
         let new_u32 = new as u32;
 
-        macro_rules! emit {
-            ($level:ident) => {
-                $level!(
-                    kind = "vtable_patch",
-                    name,
-                    offset = format_args!("{offset:#x}"),
-                    old = format_args!("{original_u32:#010x}"),
-                    new = format_args!("{new_u32:#010x}"),
-                    status,
-                    chain_through = chain,
-                    redirector = is_redirector,
-                );
-            };
-        }
-        if failed {
-            emit!(warn);
-        } else {
-            emit!(info);
-        }
+        log_at!(failed => warn / info,
+            kind = "vtable_patch",
+            name,
+            offset = format_args!("{offset:#x}"),
+            old = format_args!("{original_u32:#010x}"),
+            new = format_args!("{new_u32:#010x}"),
+            status,
+            chain_through = chain,
+            redirector = is_redirector,
+        );
     }
 }
 

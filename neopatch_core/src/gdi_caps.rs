@@ -4,9 +4,7 @@
 //! is independent because our frame pacer drives the cadence of frames and logic ticks.
 
 use crate::iat_hook;
-use crate::log_cap::LogCap;
-use std::num::NonZero;
-use tracing::info;
+use tracing::debug;
 use windows::Win32::Graphics::Gdi::{HDC, VREFRESH as SDK_VREFRESH};
 use windows_sys::Win32::Foundation::HMODULE;
 
@@ -17,8 +15,6 @@ iat_hook! {
     REAL_GET_DEVICE_CAPS / real_get_device_caps : "GetDeviceCaps"
         as fn(hdc: HDC, index: i32) -> i32;
 }
-
-static VREFRESH_LOG: LogCap = LogCap::new(NonZero::new(1).unwrap());
 
 /// IAT-hooks `GetDeviceCaps` against `host`'s import table.
 ///
@@ -33,9 +29,8 @@ pub unsafe fn install(host: HMODULE) {
 unsafe extern "system" fn hook_get_device_caps(hdc: HDC, index: i32) -> i32 {
     unsafe {
         if index == VREFRESH {
-            if VREFRESH_LOG.tick().is_some() {
-                info!(kind = "vrefresh_spoof", spoofed_value = 60);
-            }
+            // This log eevnt proves the spoof fired through our hook.
+            debug!(kind = "vrefresh_spoof", spoofed_value = 60);
             return 60;
         }
         real_get_device_caps(hdc, index)

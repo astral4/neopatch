@@ -28,10 +28,6 @@ iat_hook! {
         as fn(parent: HWND, text: PCWSTR, caption: PCWSTR, flags: u32) -> i32;
 }
 iat_hook! {
-    REAL_RAISE_EXCEPTION / real_raise_exception : "RaiseException"
-        as fn(code: u32, flags: u32, nargs: u32, args: *const u32) -> ();
-}
-iat_hook! {
     REAL_CREATE_THREAD / real_create_thread : "CreateThread"
         as fn(
             sec: *const SECURITY_ATTRIBUTES,
@@ -44,8 +40,10 @@ iat_hook! {
 }
 
 /// IAT-hooks the process-lifetime imports we wrap for diagnostics
-/// (`ExitProcess`, `TerminateProcess`, `MessageBox{A,W}`, `RaiseException`, `CreateThread`)
+/// (`ExitProcess`, `TerminateProcess`, `MessageBox{A,W}`, `CreateThread`)
 /// against `host`'s import table.
+///
+/// `RaiseException` is deliberately not hooked since those are already seen by the vectored handler in `crash.rs`.
 ///
 /// # Safety
 /// `host` must be a loaded module handle.
@@ -55,7 +53,6 @@ pub unsafe fn install(host: HMODULE) {
         REAL_TERMINATE_PROCESS.install(host, hook_terminate_process);
         REAL_MESSAGE_BOX_A.install(host, hook_message_box_a);
         REAL_MESSAGE_BOX_W.install(host, hook_message_box_w);
-        REAL_RAISE_EXCEPTION.install(host, hook_raise_exception);
         REAL_CREATE_THREAD.install(host, hook_create_thread);
     }
 }
@@ -120,23 +117,6 @@ unsafe extern "system" fn hook_message_box_w(
             text = ?text_str,
         );
         real_message_box_w(parent, text, caption, flags)
-    }
-}
-
-unsafe extern "system" fn hook_raise_exception(
-    code: u32,
-    flags: u32,
-    nargs: u32,
-    args: *const u32,
-) {
-    unsafe {
-        info!(
-            kind = "raise_exception_intercepted",
-            code = format_args!("{code:#010x}"),
-            flags = format_args!("{flags:#x}"),
-            nargs,
-        );
-        real_raise_exception(code, flags, nargs, args);
     }
 }
 

@@ -4,17 +4,15 @@
 //! `SetUnhandledExceptionFilter`. The unhandled filter is the fallback path.
 
 use crate::log::{dump_dir, elapsed_ms, flush};
-use crate::log_cap::LogCap;
 use crate::match_named;
 use crate::untrusted::safe_read_stack;
 use std::fmt::Write as _;
 use std::iter::once;
-use std::num::NonZero;
 use std::os::windows::ffi::OsStrExt;
 use std::path::PathBuf;
 use std::ptr::{null, null_mut};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use tracing::{error, info};
+use tracing::{debug, error, info};
 use windows_sys::Win32::Foundation::{
     CloseHandle, DBG_PRINTEXCEPTION_C, DBG_PRINTEXCEPTION_WIDE_C, EXCEPTION_ACCESS_VIOLATION,
     EXCEPTION_ARRAY_BOUNDS_EXCEEDED, EXCEPTION_BREAKPOINT, EXCEPTION_FLT_DENORMAL_OPERAND,
@@ -52,10 +50,6 @@ const MS_VC_CXX_EH: NTSTATUS = 0xE06D_7363_u32.cast_signed();
 /// the OS would re-invoke us and we'd recurse until stack overflow.
 /// This flag is tripped on first entry and never reset.
 static IN_FILTER: AtomicBool = AtomicBool::new(false);
-
-/// Cap log volume from noisy first-chance benign codes
-/// while still preserving the first few entries in case they lead up to a crash.
-static BENIGN_LOG: LogCap = LogCap::new(NonZero::new(16).unwrap());
 
 static DUMP_SEQ: AtomicU32 = AtomicU32::new(0);
 
@@ -173,13 +167,10 @@ unsafe fn log_exception(info: *const EXCEPTION_POINTERS, source: &str) -> bool {
             | MS_VC_THREAD_NAME
             | MS_VC_CXX_EH,
     ) {
-        if let Some(n) = BENIGN_LOG.tick() {
-            let address = exc.ExceptionAddress;
-            let display_n = n + 1;
-            info!(
-                "first-chance ({source}) #{display_n}: code={code:#010x} address={address:p} (benign, continuing)",
-            );
-        }
+        let address = exc.ExceptionAddress;
+        debug!(
+            "first-chance ({source}): code={code:#010x} address={address:p} (benign, continuing)"
+        );
         return false;
     }
 

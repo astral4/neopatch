@@ -22,7 +22,7 @@
 //! mechanics, as well as how we handle idempotency and chain-through.
 
 use crate::config::{CONFIG, RefreshRateMode};
-use crate::log_cap::LogCap;
+use crate::log::log_at;
 use crate::pacer::{PACER, PacingPolicy};
 use crate::patches::patch_call;
 use crate::screenshot::{on_post_create_device, on_pre_present, on_pre_reset};
@@ -30,7 +30,6 @@ use crate::thread::{MainCell, MainToken};
 use crate::vtable::{capture_slot, install_vtable, vtable_sig, vtable_slot, vtbl_field};
 use crate::{fmt_hr, iat_hook, match_named};
 use std::ffi::c_void;
-use std::num::NonZero;
 use std::ptr::{NonNull, null, null_mut};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -83,6 +82,9 @@ pub enum ReplayMode {
     Slow = 2,
 }
 
+// `Pacer::apply_policy` resets the deadline, so call it only on mode change.
+static MODE: MainCell<ReplayMode> = MainCell::new(ReplayMode::Normal);
+
 /// Callback registered by game-specific crates via [`set_replay_mode_fn`].
 /// Defaults to `Normal` before `install` or for games without replay-speed control.
 static REPLAY_MODE_FN: OnceLock<fn(&MainToken) -> ReplayMode> = OnceLock::new();
@@ -98,6 +100,36 @@ fn replay_mode(tok: &MainToken) -> ReplayMode {
         .copied()
         .map_or(ReplayMode::Normal, |f| f(tok))
 }
+
+static PRESENT_COUNT: AtomicU32 = AtomicU32::new(0);
+
+pub(crate) fn present_count() -> u32 {
+    PRESENT_COUNT.load(Ordering::Relaxed)
+}
+
+/// The most recent `Present` result and the frame at which it began.
+#[derive(Clone, Copy)]
+struct PresentState {
+    hr: HRESULT,
+    since_frame: u32,
+}
+
+static LAST_PRESENT: MainCell<PresentState> = MainCell::new(PresentState {
+    hr: HRESULT(0),
+    since_frame: 0,
+});
+
+/// Contains `IDirect3D9Ex*` and `adapter` from the most recent successful `CreateDeviceEx` call.
+/// Needed to re-derive the `D3DDISPLAYMODEEX` arg at `ResetEx` time.
+#[derive(Clone, Copy)]
+struct ResetCtx {
+    // A raw borrow of the object held by the game; valid for the device's lifetime
+    // by D3D9's contract since the device implicitly refs its parent.
+    d3d9: *mut c_void,
+    adapter: u32,
+}
+
+static RESET_CTX: MainCell<Option<ResetCtx>> = MainCell::new(None);
 
 // At most one `IDirect3D9` and one device are alive at a time in the game, so each slot is
 // a single global. Read-only slots are populated via `capture_slot` and never patched.
@@ -230,31 +262,6 @@ vtable_slot! {
 iat_hook! {
     REAL_DIRECT3D_CREATE9 / real_direct3d_create9 : "Direct3DCreate9"
         as fn(sdk_version: u32) -> *mut c_void;
-}
-
-static TEX_LOG: LogCap = LogCap::new(NonZero::new(64).unwrap());
-static VBUF_LOG: LogCap = LogCap::new(NonZero::new(64).unwrap());
-static CHECK_DEVICE_FORMAT_LOG: LogCap = LogCap::new(NonZero::new(64).unwrap());
-static PRESENT_FAIL_LOG: LogCap = LogCap::new(NonZero::new(16).unwrap());
-
-static PRESENT_COUNT: AtomicU32 = AtomicU32::new(0);
-
-// `Pacer::apply_policy` resets the deadline, so call it only on mode change.
-static MODE: MainCell<ReplayMode> = MainCell::new(ReplayMode::Normal);
-
-/// Contains `IDirect3D9Ex*` and `adapter` from the most recent successful
-/// `CreateDeviceEx` call; needed to re-derive the `D3DDISPLAYMODEEX` arg at `ResetEx` time.
-#[derive(Clone, Copy)]
-struct ResetCtx {
-    // A raw borrow of the object held by the game; valid for the device's lifetime
-    // by D3D9's contract since the device implicitly refs its parent.
-    d3d9: *mut c_void,
-    adapter: u32,
-}
-static RESET_CTX: MainCell<Option<ResetCtx>> = MainCell::new(None);
-
-pub(crate) fn present_count() -> u32 {
-    PRESENT_COUNT.load(Ordering::Relaxed)
 }
 
 /// IAT-hook `Direct3DCreate9` against `host`'s import table, forwarding to `Direct3DCreate9Ex`.
@@ -761,6 +768,7 @@ unsafe fn create_device_once(
     adapter: u32,
     device_type: D3DDEVTYPE,
     focus_window: HWND,
+    behavior_flags_in: u32,
     behavior_flags: u32,
     pp: *mut D3DPRESENT_PARAMETERS,
     display_mode_ptr: *mut D3DDISPLAYMODEEX,
@@ -774,6 +782,7 @@ unsafe fn create_device_once(
             this = format_args!("{this:p}"),
             adapter,
             device_type = ?device_type,
+            behavior_flags_in = format_args!("{behavior_flags_in:#x}"),
             behavior_flags = format_args!("{behavior_flags:#x}"),
             focus_window = format_args!("{:p}", focus_window.0),
             pp = ?pp.as_ref(),
@@ -817,11 +826,6 @@ unsafe extern "system" fn hook_create_device(
     unsafe {
         let behavior_flags_in = behavior_flags;
         let behavior_flags = rewrite_behavior_flags(behavior_flags);
-        info!(
-            kind = "behavior_flags_rewrite",
-            flags_before = format_args!("{behavior_flags_in:#x}"),
-            flags_after = format_args!("{behavior_flags:#x}"),
-        );
 
         let desktop_before = sample_for_degradation_check(this, adapter, pp);
 
@@ -839,6 +843,7 @@ unsafe extern "system" fn hook_create_device(
                     adapter,
                     device_type,
                     focus_window,
+                    behavior_flags_in,
                     behavior_flags,
                     pp,
                     display_mode_ptr,
@@ -983,6 +988,7 @@ unsafe extern "system" fn hook_check_device_format(
         } else {
             adapter_format
         };
+
         let substituted = forwarded_adapter_fmt != adapter_format;
 
         let hr = call_real_check_device_format(
@@ -994,29 +1000,29 @@ unsafe extern "system" fn hook_check_device_format(
             rtype,
             check_format,
         );
-        if let Some(n) = CHECK_DEVICE_FORMAT_LOG.tick() {
-            let forwarded_format = if substituted {
-                format_name(forwarded_adapter_fmt)
-            } else {
-                ""
-            };
-            info!(
-                kind = "check_device_format",
-                n = n + 1,
-                adapter,
-                device_type = device_type.0,
-                adapter_format = format_name(adapter_format),
-                adapter_format_n = adapter_format.0,
-                substituted,
-                forwarded_format,
-                forwarded_format_n = forwarded_adapter_fmt.0,
-                usage = format_args!("{usage:#x}"),
-                rtype = rtype.0,
-                check_format = format_name(check_format),
-                check_format_n = check_format.0,
-                hr = fmt_hr!(hr),
-            );
-        }
+
+        let forwarded_format = if substituted {
+            format_name(forwarded_adapter_fmt)
+        } else {
+            ""
+        };
+
+        log_at!(substituted => info / debug,
+            kind = "check_device_format",
+            adapter,
+            device_type = device_type.0,
+            adapter_format = format_name(adapter_format),
+            adapter_format_n = adapter_format.0,
+            substituted,
+            forwarded_format,
+            forwarded_format_n = forwarded_adapter_fmt.0,
+            usage = format_args!("{usage:#x}"),
+            rtype = rtype.0,
+            check_format = format_name(check_format),
+            check_format_n = check_format.0,
+            hr = fmt_hr!(hr),
+        );
+
         hr
     }
 }
@@ -1153,19 +1159,35 @@ unsafe extern "system" fn hook_present(
         PRESENT_COUNT.fetch_add(1, Ordering::Relaxed);
 
         let hr = call_real_present(this, src_rect, dst_rect, dest_window_override, dirty_region);
-
-        if hr.is_err()
-            && let Some(n) = PRESENT_FAIL_LOG.tick()
-        {
-            warn!(
-                kind = "present_failed",
-                n = n + 1,
-                hr = fmt_hr!(hr),
-                frame = PRESENT_COUNT.load(Ordering::Relaxed),
-            );
-        }
+        log_present_outcome(&tok, hr);
         hr
     }
+}
+
+/// Emits a log event whenever the result of `Present` differs from the previous call's result.
+fn log_present_outcome(tok: &MainToken, hr: HRESULT) {
+    let prev = LAST_PRESENT.get(tok);
+    if hr == prev.hr {
+        return;
+    }
+
+    let frame = PRESENT_COUNT.load(Ordering::Relaxed);
+
+    log_at!(hr.is_ok() => info / warn,
+        kind = "present_result_changed",
+        hr = fmt_hr!(hr),
+        prev_hr = fmt_hr!(prev.hr),
+        frames_in_prev = frame.wrapping_sub(prev.since_frame),
+        frame,
+    );
+
+    LAST_PRESENT.set(
+        tok,
+        PresentState {
+            hr,
+            since_frame: frame,
+        },
+    );
 }
 
 unsafe fn reset_once(
@@ -1347,23 +1369,22 @@ unsafe extern "system" fn hook_create_texture(
             pp_texture,
             p_shared_handle,
         );
-        if let Some(n) = TEX_LOG.tick() {
-            let returned = out_ptr(pp_texture);
-            info!(
-                kind = "create_texture",
-                n = n + 1,
-                width,
-                height,
-                levels,
-                format = ?format,
-                pool_in = ?pool_orig,
-                pool_out = ?pool,
-                usage_in = format_args!("{usage_orig:#x}"),
-                usage_out = format_args!("{usage:#x}"),
-                hr = fmt_hr!(hr),
-                ptr = format_args!("{returned:p}"),
-            );
-        }
+        let returned = out_ptr(pp_texture);
+
+        log_at!(hr.is_ok() => debug / warn,
+            kind = "create_texture",
+            width,
+            height,
+            levels,
+            format = ?format,
+            pool_in = ?pool_orig,
+            pool_out = ?pool,
+            usage_in = format_args!("{usage_orig:#x}"),
+            usage_out = format_args!("{usage:#x}"),
+            hr = fmt_hr!(hr),
+            ptr = format_args!("{returned:p}"),
+        );
+
         hr
     }
 }
@@ -1390,21 +1411,20 @@ unsafe extern "system" fn hook_create_vertex_buffer(
             pp_vertex_buffer,
             p_shared_handle,
         );
-        if let Some(n) = VBUF_LOG.tick() {
-            let returned = out_ptr(pp_vertex_buffer);
-            info!(
-                kind = "create_vbuffer",
-                n = n + 1,
-                length,
-                fvf = format_args!("{fvf:#x}"),
-                pool_in = ?pool_orig,
-                pool_out = ?pool,
-                usage_in = format_args!("{usage_orig:#x}"),
-                usage_out = format_args!("{usage:#x}"),
-                hr = fmt_hr!(hr),
-                ptr = format_args!("{returned:p}"),
-            );
-        }
+        let returned = out_ptr(pp_vertex_buffer);
+
+        log_at!(hr.is_ok() => debug / warn,
+            kind = "create_vbuffer",
+            length,
+            fvf = format_args!("{fvf:#x}"),
+            pool_in = ?pool_orig,
+            pool_out = ?pool,
+            usage_in = format_args!("{usage_orig:#x}"),
+            usage_out = format_args!("{usage:#x}"),
+            hr = fmt_hr!(hr),
+            ptr = format_args!("{returned:p}"),
+        );
+
         hr
     }
 }

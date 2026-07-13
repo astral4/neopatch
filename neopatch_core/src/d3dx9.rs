@@ -6,11 +6,9 @@
 //! We do the same translation at the d3dx9 entry points themselves.
 
 use crate::d3d9::{format_name, out_ptr, translate_managed_pool};
-use crate::log_cap::LogCap;
+use crate::log::log_at;
 use crate::{fmt_hr, iat_hook};
 use std::ffi::c_void;
-use std::num::NonZero;
-use tracing::info;
 use windows::Win32::Graphics::Direct3D9::{D3DFORMAT, D3DPOOL};
 use windows::core::HRESULT;
 use windows_sys::Win32::Foundation::HMODULE;
@@ -51,9 +49,6 @@ iat_hook! {
         ) -> HRESULT;
 }
 
-static D3DX_CREATE_TEX_LOG: LogCap = LogCap::new(NonZero::new(32).unwrap());
-static D3DX_CREATE_FROM_MEM_LOG: LogCap = LogCap::new(NonZero::new(32).unwrap());
-
 /// IAT-hooks `D3DXCreateTexture` and `D3DXCreateTextureFromFileInMemoryEx`
 /// against `host`'s import table for every `d3dx9_*.dll` version.
 ///
@@ -85,25 +80,24 @@ unsafe extern "system" fn hook_d3dx_create_texture(
         let hr = real_d3dx_create_texture(
             device, width, height, mip_levels, usage, format, pool, pp_texture,
         );
-        if let Some(n) = D3DX_CREATE_TEX_LOG.tick() {
-            let returned = out_ptr(pp_texture);
-            info!(
-                kind = "d3dx_create_texture",
-                n = n + 1,
-                width,
-                height,
-                mip_levels,
-                format = format_name(format),
-                format_n = format.0,
-                pool_in = pool_orig.0,
-                pool_out = pool.0,
-                usage_in = format_args!("{usage_orig:#x}"),
-                usage_out = format_args!("{usage:#x}"),
-                translated,
-                hr = fmt_hr!(hr),
-                ptr = format_args!("{returned:p}"),
-            );
-        }
+        let returned = out_ptr(pp_texture);
+
+        log_at!(hr.is_ok() => debug / warn,
+            kind = "d3dx_create_texture",
+            width,
+            height,
+            mip_levels,
+            format = format_name(format),
+            format_n = format.0,
+            pool_in = pool_orig.0,
+            pool_out = pool.0,
+            usage_in = format_args!("{usage_orig:#x}"),
+            usage_out = format_args!("{usage:#x}"),
+            translated,
+            hr = fmt_hr!(hr),
+            ptr = format_args!("{returned:p}"),
+        );
+
         hr
     }
 }
@@ -148,27 +142,26 @@ unsafe extern "system" fn hook_d3dx_create_texture_from_file_in_memory_ex(
             palette,
             pp_texture,
         );
-        if let Some(n) = D3DX_CREATE_FROM_MEM_LOG.tick() {
-            let returned = out_ptr(pp_texture);
-            info!(
-                kind = "d3dx_create_texture_from_mem",
-                n = n + 1,
-                src = format_args!("{src_data:p}"),
-                src_size = src_data_size,
-                width,
-                height,
-                mip_levels,
-                format = format_name(format),
-                format_n = format.0,
-                pool_in = pool_orig.0,
-                pool_out = pool.0,
-                usage_in = format_args!("{usage_orig:#x}"),
-                usage_out = format_args!("{usage:#x}"),
-                translated,
-                hr = fmt_hr!(hr),
-                ptr = format_args!("{returned:p}"),
-            );
-        }
+        let returned = out_ptr(pp_texture);
+
+        log_at!(hr.is_ok() => debug / warn,
+            kind = "d3dx_create_texture_from_mem",
+            src = format_args!("{src_data:p}"),
+            src_size = src_data_size,
+            width,
+            height,
+            mip_levels,
+            format = format_name(format),
+            format_n = format.0,
+            pool_in = pool_orig.0,
+            pool_out = pool.0,
+            usage_in = format_args!("{usage_orig:#x}"),
+            usage_out = format_args!("{usage:#x}"),
+            translated,
+            hr = fmt_hr!(hr),
+            ptr = format_args!("{returned:p}"),
+        );
+
         hr
     }
 }

@@ -26,7 +26,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 use tracing::field::{Field, Visit};
 use tracing::subscriber::set_global_default;
-use tracing::{Event, Level, Metadata, Subscriber, info, warn};
+use tracing::{Event, Level, Metadata, Subscriber, info};
 use tracing_subscriber::Layer;
 use tracing_subscriber::layer::{Context, SubscriberExt};
 use tracing_subscriber::registry::LookupSpan;
@@ -34,6 +34,18 @@ use windows_sys::Win32::Foundation::SYSTEMTIME;
 use windows_sys::Win32::Storage::FileSystem::FlushFileBuffers;
 use windows_sys::Win32::System::SystemInformation::GetLocalTime;
 use windows_sys::Win32::System::Threading::{GetCurrentProcessId, GetCurrentThreadId};
+
+/// Emits one `tracing` event, at `$yes` level when `$cond` holds and at `$no` level otherwise.
+macro_rules! log_at {
+    ($cond:expr => $yes:ident / $no:ident, $($fields:tt)+) => {
+        if $cond {
+            ::tracing::$yes!($($fields)+);
+        } else {
+            ::tracing::$no!($($fields)+);
+        }
+    };
+}
+pub(crate) use log_at;
 
 // Each `on_event` write goes straight to the OS via `write_all`. We don't use `BufWriter`
 // so pending event lines won't be silently erased under `panic = "abort"`.
@@ -120,19 +132,11 @@ where
         session_dir = %session_dir.display(),
     );
     for d in decisions {
-        if d.outcome.is_success() {
-            info!(
-                kind = "log_root_decision",
-                candidate = %d.path.display(),
-                outcome = %d.outcome,
-            );
-        } else {
-            warn!(
-                kind = "log_root_decision",
-                candidate = %d.path.display(),
-                outcome = %d.outcome,
-            );
-        }
+        log_at!(d.outcome.is_success() => info / warn,
+            kind = "log_root_decision",
+            candidate = %d.path.display(),
+            outcome = %d.outcome,
+        );
     }
     true
 }
