@@ -75,10 +75,11 @@ pub(crate) fn parse(text: &str) -> (Th14Config, CoreConfig) {
 fn parse_th14_only(text: &str) -> Th14Config {
     let mut cfg = Th14Config::default();
     config::for_each_setting(text, |section, k, v| {
-        if section.eq_ignore_ascii_case("display") && k.eq_ignore_ascii_case("resolution") {
-            if let Some(r) = parse_resolution(v) {
-                cfg.resolution = r;
-            }
+        if section.eq_ignore_ascii_case("display")
+            && k.eq_ignore_ascii_case("resolution")
+            && let Some(r) = parse_resolution(v)
+        {
+            cfg.resolution = r;
         }
     });
     cfg

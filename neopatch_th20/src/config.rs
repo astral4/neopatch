@@ -133,10 +133,10 @@ fn parse_th20_only(text: &str) -> Th20Config {
                 if let Some(m) = parse_display_mode(v) {
                     cfg.display_mode = m;
                 }
-            } else if k.eq_ignore_ascii_case("resolution") {
-                if let Some(r) = parse_resolution(v) {
-                    cfg.resolution = r;
-                }
+            } else if k.eq_ignore_ascii_case("resolution")
+                && let Some(r) = parse_resolution(v)
+            {
+                cfg.resolution = r;
             }
         }
     });
