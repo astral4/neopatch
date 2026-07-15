@@ -3,7 +3,7 @@
 //! Every game crate that ships as `dinput8.dll` should use this to keep the proxy export working even if hook installation fails:
 //! call [`init`] once from `DllMain` and re-export `DirectInput8Create` via the [`dinput8_export!`] macro.
 
-use crate::vtable::{FnSlot, parse_fn_ptr};
+use crate::vtable::{FnSlot, raw_to_fn_ptr};
 use std::ffi::c_void;
 use std::mem::offset_of;
 use std::sync::OnceLock;
@@ -76,7 +76,7 @@ pub fn init() {
         return;
     }
     if let Some(f) = unsafe { GetProcAddress(dll, c"DirectInput8Create".as_ptr().cast()) }
-        && let Some(real) = parse_fn_ptr::<DirectInput8CreateFn>(f as *mut ())
+        && let Some(real) = unsafe { raw_to_fn_ptr::<DirectInput8CreateFn>(f as *mut ()) }
     {
         REAL.store(real);
     }

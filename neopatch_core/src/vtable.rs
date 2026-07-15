@@ -120,6 +120,13 @@ impl<F: Copy + Send + Sync + Unpin + 'static> FnSlot<F> {
         self.slot.get().copied()
     }
 
+    /// Returns the captured pointer as the raw `*mut ()` written by the patcher, or `None` if uncaptured.
+    pub(crate) fn captured_raw(&self) -> Option<*mut ()> {
+        // SAFETY: `FnSlot<F>` is only ever instantiated with a function pointer `F` (by `fn_ptr_to_raw`'s contract)
+        // and only holds values passed to `store`, so the captured value is a valid function pointer.
+        self.try_get().map(|f| unsafe { fn_ptr_to_raw(f) })
+    }
+
     /// Stores `f` in the slot.
     ///
     /// # Panics
@@ -133,10 +140,16 @@ impl<F: Copy + Send + Sync + Unpin + 'static> FnSlot<F> {
     }
 }
 
-/// Reinterprets a raw pointer as a function pointer of type `F`.
-/// Returns `None` for null. Sound when invoked iff `raw` points to
-/// a function with `F`'s signature.
-pub fn parse_fn_ptr<F: Copy>(raw: *mut ()) -> Option<F> {
+/// Reinterprets a raw pointer as a function pointer of type `F`. Returns `None` for null.
+/// Sound when invoked iff `raw` points to a function with `F`'s signature.
+///
+/// # Safety
+/// `F` must be a function pointer. Note that `F` cannot be a function item (ZST) or pointer-sized non-fn-ptr type.
+// TODO: Tighten to `F: FnPtr` if the `fn_ptr_trait` feature stabilizes.
+pub(crate) unsafe fn raw_to_fn_ptr<F>(raw: *mut ()) -> Option<F>
+where
+    F: Copy + Send + Sync + Unpin + 'static,
+{
     const { assert!(size_of::<F>() == size_of::<*mut ()>()) };
     if raw.is_null() {
         return None;
@@ -146,13 +159,15 @@ pub fn parse_fn_ptr<F: Copy>(raw: *mut ()) -> Option<F> {
     Some(unsafe { transmute_copy(&raw) })
 }
 
-/// Converts a typed hook into the raw `*mut ()` written by the patcher.
+/// Converts a function pointer into a raw pointer.
 ///
-/// `F` must be a function pointer (e.g. `unsafe extern "system" fn(...)`),
-/// not a function item (ZST) or pointer-sized non-fn-ptr type
-/// (`*mut T`, `usize`, `NonNull<T>`).
-pub(crate) fn hook_to_raw<F: Copy + 'static>(hook: F) -> *mut () {
-    // TODO: Tighten to `F: FnPtr` if the `fn_ptr_trait` feature stabilizes.
+/// # Safety
+/// `F` must be a function pointer. Note that `F` cannot be a function item (ZST) or pointer-sized non-fn-ptr type.
+// TODO: Tighten to `F: FnPtr` if the `fn_ptr_trait` feature stabilizes.
+pub(crate) unsafe fn fn_ptr_to_raw<F>(f: F) -> *mut ()
+where
+    F: Copy + Send + Sync + Unpin + 'static,
+{
     const { assert!(size_of::<F>() == size_of::<*mut ()>()) };
     // SAFETY: `F` is asserted pointer-sized and is a function-pointer type per the contract above.
     unsafe { transmute_copy(&f) }
@@ -241,11 +256,10 @@ pub(crate) unsafe fn capture_slot<F, V>(
     F: Copy + Send + Sync + 'static,
 {
     let slot_ptr = proj.slot_ptr(vtbl.as_ptr()).cast_const();
-    let raw: *mut () = unsafe { read_unaligned(slot_ptr.cast()) };
+    let current_raw = unsafe { read_unaligned(slot_ptr.cast()) };
 
-    if let Some(existing) = dst.try_get() {
-        let existing_raw = hook_to_raw(existing);
-        if existing_raw == raw {
+    if let Some(existing_raw) = dst.captured_raw() {
+        if existing_raw == current_raw {
             debug!(
                 kind = "capture_slot_skipped",
                 slot = dst.name(),
@@ -256,13 +270,13 @@ pub(crate) unsafe fn capture_slot<F, V>(
                 kind = "capture_slot_divergent",
                 slot = dst.name(),
                 kept = format_args!("{existing_raw:p}"),
-                seen = format_args!("{raw:p}"),
+                seen = format_args!("{current_raw:p}"),
             );
         }
         return;
     }
 
-    if let Some(f) = parse_fn_ptr::<F>(raw) {
+    if let Some(f) = unsafe { raw_to_fn_ptr(current_raw) } {
         dst.store(f);
     } else {
         warn!(kind = "capture_slot_null", slot = dst.name());
@@ -337,10 +351,9 @@ impl<V> VtblScope<'_, V> {
         }
 
         if let Some(slot) = original {
-            // Intercept: we must be able to chain through the displaced original.
-            // A null current slot has no original to capture, so we refuse the install
-            // rather than write our hook over a null slot we can't trampoline through.
-            let Some(f) = parse_fn_ptr::<F>(current) else {
+            // When intercepting, we must be able to chain through the displaced original. A null current slot has no original to capture,
+            // so we refuse the installation rather than write our hook over a null slot we can't trampoline through.
+            let Some(f) = (unsafe { raw_to_fn_ptr(current_raw) }) else {
                 warn!(
                     kind = "vtable_patch",
                     name,
@@ -349,18 +362,14 @@ impl<V> VtblScope<'_, V> {
                 );
                 return;
             };
-            // When `AlreadyOurs` misses because the COM implementation gives us a distinct
-            // vtable allocation (e.g. wine's `IDirectInput8A` is not a `.rdata`-shared vtable
-            // across `DirectInput8Create` instances the way `IDirect3D9Ex_Vtbl` is),
-            // the second visit reads a slot that still holds the real original and we'd panic
-            // in `FnSlot::store`. We skip the store but still patch the slot, so calls through
-            // this distinct vtable route through us. In the case of a divergent value
-            // (a shim layered between our two patches), we keep the original capture.
-            // This means the trampoline skips the shim, but at least we don't silently lose
-            // intercept coverage of this slot.
-            if let Some(existing) = slot.try_get() {
-                let existing_raw = hook_to_raw(existing);
-                if existing_raw == current {
+            // When `PatchOutcome::AlreadyOurs` misses because the COM implementation gives us a distinct vtable allocation
+            // (e.g. Wine's `IDirectInput8A` is not a `.rdata`-shared vtable across `DirectInput8Create` instances the way `IDirect3D9Ex_Vtbl` is),
+            // the second visit reads a slot that still holds the real original and we'd panic in `FnSlot::store`.
+            // We skip the store but still patch the slot so calls through this distinct vtable route through us.
+            // In the case of a divergent value (a shim layered between our two patches), we keep the original capture.
+            // This means the trampoline skips the shim, but at least we don't silently lose intercept coverage of this slot.
+            if let Some(existing_raw) = slot.captured_raw() {
+                if existing_raw == current_raw {
                     debug!(
                         kind = "intercept_recapture_skipped",
                         name,
@@ -380,9 +389,10 @@ impl<V> VtblScope<'_, V> {
                 slot.store(f);
             }
         }
-        let hook_raw = hook_to_raw(hook);
-        // The fence orders `slot.store` before the vtable write so trampolines reading
-        // the new slot value also see the captured `original` via `FnSlot::try_get`.
+        let hook_raw = unsafe { fn_ptr_to_raw(hook) };
+        // Trampolines reading the new slot value must also see the captured `original` via `FnSlot::try_get`.
+        // The vtable write below is a plain store, so the release fence formally only acts as a compiler barrier.
+        // Cross-thread ordering rests on x86 TSO and the hardware atomicity of an aligned 4-byte store.
         fence(Ordering::Release);
         // SAFETY: see above.
         unsafe { write_unaligned(slot_raw, hook_raw) };

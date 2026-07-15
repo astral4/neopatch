@@ -5,7 +5,7 @@
 
 use crate::patches::patch_call;
 use crate::protect::with_writable;
-use crate::vtable::{FnSlot, hook_to_raw, parse_fn_ptr};
+use crate::vtable::{FnSlot, fn_ptr_to_raw, raw_to_fn_ptr};
 use std::ffi::{CStr, c_char};
 use std::mem::offset_of;
 use std::ptr::{NonNull, read_unaligned, write_unaligned};
@@ -86,7 +86,7 @@ impl<F: Copy + Send + Sync + Unpin + 'static> IatHook<F> {
     /// # Safety
     /// `host` must be a loaded module handle.
     pub unsafe fn install(&self, host: HMODULE, hook: F) -> bool {
-        let hook_raw = hook_to_raw(hook);
+        let hook_raw = unsafe { fn_ptr_to_raw(hook) };
         let slot_ptr = match unsafe { find_iat_slot(host, self.name) } {
             Ok(p) => p,
             Err(miss) => {
@@ -100,30 +100,28 @@ impl<F: Copy + Send + Sync + Unpin + 'static> IatHook<F> {
             }
         };
         let slot_raw = slot_ptr.as_ptr();
-        // `install` runs single-threaded under the OS loader lock. The first trampoline call
-        // comes from `DllMain` and returns before other threads resume,
-        // so plain reads and writes don't need fences.
-        let raw_current = unsafe { read_unaligned(slot_raw) };
-        if raw_current == hook_raw && self.slot.try_get().is_some() {
+        // `install` runs during `DllMain(PROCESS_ATTACH)` while the process is effectively single-threaded.
+        // The first call through the slot comes from game code after `DllMain` returns, so plain reads and writes don't need fences.
+        let current_raw = unsafe { read_unaligned(slot_raw) };
+        if current_raw == hook_raw && self.slot.try_get().is_some() {
             info!(kind = "iat_hook", name = self.name, status = "IDEMPOTENT");
             return true;
         }
-        let Some(original) = parse_fn_ptr::<F>(raw_current) else {
+
+        let Some(original) = (unsafe { raw_to_fn_ptr(current_raw) }) else {
             warn!(kind = "iat_hook", name = self.name, status = "NULL_SLOT");
             return false;
         };
-        // The slot can be already populated by a different pointer if third-party code
-        // rebinds the IAT between two installations. In this situation, we refuse installation
-        // to avoid silently bypassing the layered shim on the next trampoline call.
-        if let Some(existing) = self.slot.try_get() {
-            let existing_raw = hook_to_raw(existing);
-            if existing_raw != raw_current {
+        // The slot can be already populated by a different pointer if third-party code rebinds the IAT between two installations.
+        // In this situation, we refuse installation to avoid silently bypassing the layered shim on the next trampoline call.
+        if let Some(existing_raw) = self.slot.captured_raw() {
+            if existing_raw != current_raw {
                 warn!(
                     kind = "iat_hook",
                     name = self.name,
                     status = "RECAPTURE_DIVERGENT",
                     kept = format_args!("{existing_raw:p}"),
-                    seen = format_args!("{raw_current:p}"),
+                    seen = format_args!("{current_raw:p}"),
                 );
                 return false;
             }
@@ -163,7 +161,7 @@ impl<F: Copy + Send + Sync + Unpin + 'static> IatHook<F> {
     ) -> bool {
         let installed = unsafe { self.install(host, hook) };
         let label = format!("{} call-site rewrite", self.name);
-        unsafe { patch_call(call_addr, expected, hook_to_raw(hook), &label) };
+        unsafe { patch_call(call_addr, expected, fn_ptr_to_raw(hook), &label) };
         installed
     }
 }
