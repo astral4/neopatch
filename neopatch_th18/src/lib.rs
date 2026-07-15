@@ -89,6 +89,7 @@ unsafe fn install_hooks() {
 
         timer_period::install(host_exe);
         gdi_caps::install(host_exe);
+        state::install(host_exe);
         window::install(
             host_exe,
             &core_cfg.window,

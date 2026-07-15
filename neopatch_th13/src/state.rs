@@ -12,10 +12,9 @@ const REPLAY_STATE: ReplayStateLayout = ReplayStateLayout {
     input_shoot_bit: 0x1,
     input_focus_bit: 0x8,
     input_skip_bit: 0x200,
-    skip_on_ctrl: false,
 };
 const _: () = REPLAY_STATE.validate();
 
 pub(crate) fn replay_mode(tok: &MainToken) -> ReplayMode {
-    read_replay_mode(tok, REPLAY_STATE)
+    read_replay_mode(tok, REPLAY_STATE, || false)
 }

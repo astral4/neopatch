@@ -2,7 +2,11 @@
 
 use neopatch_core::MainToken;
 use neopatch_core::d3d9::ReplayMode;
+use neopatch_core::iat_hook;
 use neopatch_core::replay::{InputAddr, ReplayStateLayout, read_replay_mode};
+use std::sync::atomic::{AtomicBool, Ordering};
+use windows_sys::Win32::Foundation::HMODULE;
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::VK_CONTROL;
 
 const REPLAY_STATE: ReplayStateLayout = ReplayStateLayout {
     mgr_ptr_addr: 0x004c_f418,
@@ -12,10 +16,35 @@ const REPLAY_STATE: ReplayStateLayout = ReplayStateLayout {
     input_shoot_bit: 0x1,
     input_focus_bit: 0x8,
     input_skip_bit: 0x200,
-    skip_on_ctrl: true,
 };
 const _: () = REPLAY_STATE.validate();
 
+iat_hook! {
+    REAL_GET_KEYBOARD_STATE / real_get_keyboard_state : "GetKeyboardState"
+        as fn(lp_key_state: *mut u8) -> i32;
+}
+
+static CTRL_HELD: AtomicBool = AtomicBool::new(false);
+
 pub(crate) fn replay_mode(tok: &MainToken) -> ReplayMode {
-    read_replay_mode(tok, REPLAY_STATE)
+    read_replay_mode(tok, REPLAY_STATE, || CTRL_HELD.load(Ordering::Relaxed))
+}
+
+/// IAT-hooks `GetKeyboardState` against `host`'s import table.
+///
+/// # Safety
+/// `host` must be a loaded module handle.
+pub(crate) unsafe fn install(host: HMODULE) {
+    unsafe {
+        REAL_GET_KEYBOARD_STATE.install(host, hook_get_keyboard_state);
+    }
+}
+
+unsafe extern "system" fn hook_get_keyboard_state(lp_key_state: *mut u8) -> i32 {
+    let ok = unsafe { real_get_keyboard_state(lp_key_state) };
+    if ok != 0 && !lp_key_state.is_null() {
+        let byte = unsafe { *lp_key_state.add(usize::from(VK_CONTROL)) };
+        CTRL_HELD.store(byte & 0x80 != 0, Ordering::Relaxed);
+    }
+    ok
 }
