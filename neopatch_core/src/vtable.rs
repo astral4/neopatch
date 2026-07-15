@@ -330,24 +330,23 @@ impl<V> VtblScope<'_, V> {
     {
         let slot_ptr = proj.slot_ptr(self.vtbl.as_ptr());
         let slot_raw: *mut *mut () = slot_ptr.cast();
-        // SAFETY: writable window open for the scope; the projection's const assert
-        // guarantees the slot lies within the `size_of::<V>()` protected range.
-        let current = unsafe { read_unaligned(slot_raw) };
-        #[allow(clippy::cast_possible_truncation)]
-        let current_addr = current as u32;
+        // SAFETY: The writable window is open for the scope, and the projection's const assert
+        // guarantees that the slot lies within the `size_of::<V>()` protected range.
+        let current_raw = unsafe { read_unaligned(slot_raw) };
         let offset = proj.offset();
 
         let is_redirector = original.is_none();
 
+        #[allow(clippy::cast_possible_truncation)]
         if let Some(ours) = self.our_range
-            && ours.contains(current_addr)
+            && ours.contains(current_raw.addr() as u32)
         {
             self.log_outcome(
                 name,
                 offset,
-                current,
-                current,
-                Outcome::AlreadyOurs,
+                current_raw,
+                current_raw,
+                PatchOutcome::AlreadyOurs,
                 is_redirector,
             );
             return;
@@ -385,7 +384,7 @@ impl<V> VtblScope<'_, V> {
                         name,
                         offset = format_args!("{offset:#x}"),
                         kept = format_args!("{existing_raw:p}"),
-                        seen = format_args!("{current:p}"),
+                        seen = format_args!("{current_raw:p}"),
                     );
                 }
             } else {
@@ -403,11 +402,11 @@ impl<V> VtblScope<'_, V> {
         // SAFETY: see above.
         let verify = unsafe { read_unaligned(slot_raw) };
         let outcome = if verify == hook_raw {
-            Outcome::Applied
+            PatchOutcome::Applied
         } else {
-            Outcome::Mismatch
+            PatchOutcome::Mismatch
         };
-        self.log_outcome(name, offset, current, hook_raw, outcome, is_redirector);
+        self.log_outcome(name, offset, current_raw, hook_raw, outcome, is_redirector);
     }
 
     fn log_outcome(
@@ -416,46 +415,46 @@ impl<V> VtblScope<'_, V> {
         offset: usize,
         original: *mut (),
         new: *mut (),
-        outcome: Outcome,
+        outcome: PatchOutcome,
         is_redirector: bool,
     ) {
-        let (status, failed) = match outcome {
-            Outcome::AlreadyOurs => ("IDEMPOTENT", false),
-            Outcome::Applied => ("OK", false),
-            Outcome::Mismatch => ("MISMATCH", true),
-        };
-        // Chain-through annotation when the original didn't come from
-        // the vtable's home module, surfacing the shim layer we're stacked on.
         #[allow(clippy::cast_possible_truncation)]
-        let original_u32 = original as u32;
-        let chain_through = if matches!(outcome, Outcome::Applied)
+        let original_addr = original.addr() as u32;
+        #[allow(clippy::cast_possible_truncation)]
+        let new_addr = new.addr() as u32;
+
+        let (status, failed) = match outcome {
+            PatchOutcome::AlreadyOurs => ("IDEMPOTENT", false),
+            PatchOutcome::Applied => ("OK", false),
+            PatchOutcome::Mismatch => ("MISMATCH", true),
+        };
+
+        let chain_through = if matches!(outcome, PatchOutcome::Applied)
             && self
                 .expected_range
-                .is_none_or(|r| !r.contains(original_u32))
+                .is_none_or(|r| !r.contains(original_addr))
         {
-            annotate_resolved(original_u32, self.modules)
+            annotate_resolved(original_addr, self.modules)
         } else {
             None
         };
-        let chain = chain_through.as_deref().unwrap_or("");
-        #[allow(clippy::cast_possible_truncation)]
-        let new_u32 = new as u32;
+        let chain_through = chain_through.as_deref().unwrap_or("");
 
         log_at!(failed => warn / info,
             kind = "vtable_patch",
             name,
             offset = format_args!("{offset:#x}"),
-            old = format_args!("{original_u32:#010x}"),
-            new = format_args!("{new_u32:#010x}"),
+            old = format_args!("{original_addr:#010x}"),
+            new = format_args!("{new_addr:#010x}"),
             status,
-            chain_through = chain,
+            chain_through,
             redirector = is_redirector,
         );
     }
 }
 
 #[derive(Clone, Copy)]
-enum Outcome {
+enum PatchOutcome {
     Applied,
     AlreadyOurs,
     Mismatch,
@@ -488,7 +487,7 @@ pub(crate) unsafe fn install_vtable<V, R>(
     let result = unsafe {
         with_writable(region_start, size, |_| {
             let s = VtblScope {
-                vtbl: vtbl.as_ptr(),
+                vtbl,
                 modules: &modules,
                 our_range,
                 expected_range,
