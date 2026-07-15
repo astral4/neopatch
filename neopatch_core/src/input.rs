@@ -6,7 +6,7 @@
 //! When the D-pad is in a cardinal direction, we zero the perpendicular axis to account for stick drift.
 //! Diagonals (POV at 45/135/225/315 degrees) set both axes. POV-centered passes the buffer through unchanged.
 
-use crate::vtable::{install_vtable, vtable_slot, vtbl_field};
+use crate::vtable::{install_vtable, vtable_field, vtable_slot};
 use std::ffi::c_void;
 use std::mem::offset_of;
 use std::ptr::NonNull;
@@ -71,7 +71,7 @@ unsafe fn on_directinput_created(di: *mut c_void) {
         install_vtable(vtbl, |scope| {
             scope.intercept(
                 &REAL_DI_CREATE_DEVICE,
-                vtbl_field!(IDirectInput8A_Vtbl, CreateDevice),
+                vtable_field!(IDirectInput8A_Vtbl, CreateDevice),
                 "IDirectInput8::CreateDevice",
                 hook_di_create_device,
             );
@@ -113,7 +113,7 @@ unsafe fn patch_device_vtable(dev: *mut c_void) {
         install_vtable(vtbl, |scope| {
             scope.intercept(
                 &REAL_GET_DEVICE_STATE,
-                vtbl_field!(IDirectInputDevice8A_Vtbl, GetDeviceState),
+                vtable_field!(IDirectInputDevice8A_Vtbl, GetDeviceState),
                 "IDirectInputDevice8::GetDeviceState",
                 hook_get_device_state,
             );

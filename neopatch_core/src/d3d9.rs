@@ -21,7 +21,7 @@ use crate::pacer::{PACER, PacingPolicy};
 use crate::patches::patch_call;
 use crate::screenshot::{on_post_create_device, on_pre_present, on_pre_reset};
 use crate::thread::{MainCell, MainToken};
-use crate::vtable::{capture_slot, install_vtable, vtable_sig, vtable_slot, vtbl_field};
+use crate::vtable::{capture_slot, install_vtable, vtable_field, vtable_sig, vtable_slot};
 use crate::{fmt_hr, iat_hook, match_named};
 use std::ffi::c_void;
 use std::ptr::{NonNull, null, null_mut};
@@ -324,27 +324,27 @@ unsafe fn install_d3d9_hooks(d3d9_ex: NonNull<c_void>) {
 
         capture_slot(
             vtbl,
-            vtbl_field!(IDirect3D9Ex_Vtbl, CreateDeviceEx),
+            vtable_field!(IDirect3D9Ex_Vtbl, CreateDeviceEx),
             &REAL_CREATE_DEVICE_EX,
         );
         capture_slot(
             vtbl,
-            vtbl_field!(IDirect3D9Ex_Vtbl, GetAdapterDisplayModeEx),
+            vtable_field!(IDirect3D9Ex_Vtbl, GetAdapterDisplayModeEx),
             &REAL_GET_ADAPTER_DISPLAY_MODE_EX,
         );
         capture_slot(
             vtbl,
-            vtbl_field!(IDirect3D9Ex_Vtbl, GetAdapterModeCountEx),
+            vtable_field!(IDirect3D9Ex_Vtbl, GetAdapterModeCountEx),
             &REAL_GET_ADAPTER_MODE_COUNT_EX,
         );
         capture_slot(
             vtbl,
-            vtbl_field!(IDirect3D9Ex_Vtbl, EnumAdapterModesEx),
+            vtable_field!(IDirect3D9Ex_Vtbl, EnumAdapterModesEx),
             &REAL_ENUM_ADAPTER_MODES_EX,
         );
         capture_slot(
             vtbl,
-            vtbl_field!(IDirect3D9Ex_Vtbl, base__.GetAdapterMonitor),
+            vtable_field!(IDirect3D9Ex_Vtbl, base__.GetAdapterMonitor),
             &REAL_GET_ADAPTER_MONITOR,
         );
 
@@ -353,13 +353,13 @@ unsafe fn install_d3d9_hooks(d3d9_ex: NonNull<c_void>) {
             // rather than chaining through to the displaced `CreateDevice`.
             scope.redirect(
                 &REDIRECT_CREATE_DEVICE,
-                vtbl_field!(IDirect3D9Ex_Vtbl, base__.CreateDevice),
+                vtable_field!(IDirect3D9Ex_Vtbl, base__.CreateDevice),
                 "IDirect3D9::CreateDevice",
                 hook_create_device,
             );
             scope.intercept(
                 &REAL_CHECK_DEVICE_FORMAT,
-                vtbl_field!(IDirect3D9Ex_Vtbl, base__.CheckDeviceFormat),
+                vtable_field!(IDirect3D9Ex_Vtbl, base__.CheckDeviceFormat),
                 "IDirect3D9::CheckDeviceFormat",
                 hook_check_device_format,
             );
@@ -1013,42 +1013,42 @@ unsafe fn install_device_hooks(dev: NonNull<c_void>) {
 
         capture_slot(
             vtbl,
-            vtbl_field!(IDirect3DDevice9Ex_Vtbl, ResetEx),
+            vtable_field!(IDirect3DDevice9Ex_Vtbl, ResetEx),
             &REAL_RESET_EX,
         );
         capture_slot(
             vtbl,
-            vtbl_field!(IDirect3DDevice9Ex_Vtbl, SetMaximumFrameLatency),
+            vtable_field!(IDirect3DDevice9Ex_Vtbl, SetMaximumFrameLatency),
             &REAL_SET_MAX_FRAME_LATENCY,
         );
         capture_slot(
             vtbl,
-            vtbl_field!(IDirect3DDevice9Ex_Vtbl, SetGPUThreadPriority),
+            vtable_field!(IDirect3DDevice9Ex_Vtbl, SetGPUThreadPriority),
             &REAL_SET_GPU_THREAD_PRIORITY,
         );
 
         let result = install_vtable(vtbl, |scope| {
             scope.intercept(
                 &REAL_RESET,
-                vtbl_field!(IDirect3DDevice9Ex_Vtbl, base__.Reset),
+                vtable_field!(IDirect3DDevice9Ex_Vtbl, base__.Reset),
                 "Reset",
                 hook_reset,
             );
             scope.intercept(
                 &REAL_PRESENT,
-                vtbl_field!(IDirect3DDevice9Ex_Vtbl, base__.Present),
+                vtable_field!(IDirect3DDevice9Ex_Vtbl, base__.Present),
                 "Present",
                 hook_present,
             );
             scope.intercept(
                 &REAL_CREATE_TEXTURE,
-                vtbl_field!(IDirect3DDevice9Ex_Vtbl, base__.CreateTexture),
+                vtable_field!(IDirect3DDevice9Ex_Vtbl, base__.CreateTexture),
                 "CreateTexture",
                 hook_create_texture,
             );
             scope.intercept(
                 &REAL_CREATE_VERTEX_BUFFER,
-                vtbl_field!(IDirect3DDevice9Ex_Vtbl, base__.CreateVertexBuffer),
+                vtable_field!(IDirect3DDevice9Ex_Vtbl, base__.CreateVertexBuffer),
                 "CreateVertexBuffer",
                 hook_create_vertex_buffer,
             );

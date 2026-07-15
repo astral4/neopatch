@@ -14,7 +14,7 @@
 use crate::fmt_hr;
 use crate::thread::{MainCell, MainToken};
 use crate::untrusted::Untrusted;
-use crate::vtable::vtbl_field;
+use crate::vtable::vtable_field;
 use png::{BitDepth, ColorType, Encoder};
 use std::ffi::c_void;
 use std::mem::zeroed;
@@ -69,14 +69,14 @@ unsafe fn set_active_device(tok: &MainToken, new_dev: *mut c_void) {
         if !new_dev.is_null() {
             let vtbl: *mut IDirect3DDevice9Ex_Vtbl = *new_dev.cast();
             let add_ref: AddRefFn =
-                vtbl_field!(IDirect3DDevice9Ex_Vtbl, base__.base__.AddRef).read(vtbl);
+                vtable_field!(IDirect3DDevice9Ex_Vtbl, base__.base__.AddRef).read(vtbl);
             add_ref(new_dev);
         }
         ACTIVE_DEVICE.set(tok, new_dev);
         if !prev.is_null() {
             let vtbl: *mut IDirect3DDevice9Ex_Vtbl = *prev.cast();
             let release: ReleaseFn =
-                vtbl_field!(IDirect3DDevice9Ex_Vtbl, base__.base__.Release).read(vtbl);
+                vtable_field!(IDirect3DDevice9Ex_Vtbl, base__.base__.Release).read(vtbl);
             release(prev);
         }
     }

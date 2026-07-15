@@ -52,16 +52,15 @@ macro_rules! vtable_sig {
 }
 pub(crate) use vtable_sig;
 
-/// Constructs a `SlotProjection<V, F>` for a field path in vtable type `V`.
-/// `F` is inferred from the context.
-macro_rules! vtbl_field {
+/// Constructs a [`SlotProjection<V, F>`] for a field path in vtable type `V`. `F` is inferred from the context.
+macro_rules! vtable_field {
     ($vtbl_ty:ty, $($field:tt).+) => {
         $crate::vtable::SlotProjection::<$vtbl_ty, _>::at(
             ::core::mem::offset_of!($vtbl_ty, $($field).+),
         )
     };
 }
-pub(crate) use vtbl_field;
+pub(crate) use vtable_field;
 
 // Set exactly once from `DllMain` and read lock-free thereafter. We want the OS's authoritative `hinst`
 // rather than guessing via `GetModuleHandleW("dinput8.dll")`, which would collide with the real `System32\dinput8.dll`.
@@ -171,8 +170,8 @@ fn our_dll_range() -> Option<ModuleRange> {
 
 /// Projection into a vtable `V` for a function-pointer slot of type `F`.
 ///
-/// Construct via `vtbl_field!`. Writes through this projection are guaranteed to land
-/// inside the protect window opened by `install_vtable` over `size_of::<V>()` bytes.
+/// Construct via [`vtable_field!`]. Writes through this projection are guaranteed to land inside
+/// the protect window opened by [`install_vtable`] over `size_of::<V>()` bytes.
 pub(crate) struct SlotProjection<V, F> {
     offset: usize,
     _phantom: PhantomData<(*mut V, F)>,
