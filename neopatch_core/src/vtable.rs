@@ -476,10 +476,9 @@ pub(crate) unsafe fn install_vtable<V, R>(
     let modules = walk_modules();
     let our_range = our_dll_range();
     #[allow(clippy::cast_possible_truncation)]
-    let vtbl_addr = vtbl.as_ptr() as u32;
     let expected_range = modules
         .iter()
-        .find(|m| m.range.contains(vtbl_addr))
+        .find(|m| m.range.contains(vtbl.addr().get() as u32))
         .map(|m| m.range);
 
     let size = size_of::<V>();

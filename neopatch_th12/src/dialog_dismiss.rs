@@ -71,7 +71,7 @@ unsafe extern "system" fn hook_dialog_box_param_a(
     proc: DLGPROC,
     init_param: LPARAM,
 ) -> isize {
-    let template_id = template as usize;
+    let template_id = template.addr();
     let proc_va = proc.map_or(0usize, |f| f as usize);
 
     if template_id != DIALOG_TEMPLATE_ID || proc_va != DIALOG_PROC_VA {

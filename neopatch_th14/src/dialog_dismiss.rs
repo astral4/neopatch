@@ -85,7 +85,7 @@ unsafe extern "system" fn hook_create_dialog_param_a(
     unsafe {
         let hwnd = real_create_dialog_param_a(hinst, template, parent, proc, init_param);
 
-        let template_id = template as usize;
+        let template_id = template.addr();
         let proc_va = proc.map_or(0usize, |f| f as usize);
         info!(
             kind = "create_dialog_param_a",

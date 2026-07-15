@@ -98,7 +98,7 @@ unsafe fn write_relative_branch<const N: usize>(
     const { assert!(N >= 5, "rel32 branch needs at least 5 bytes") };
     const { assert!(N <= MAX_PATCH_LEN, "patch length exceeds MAX_PATCH_LEN") };
     #[allow(clippy::cast_possible_truncation)]
-    let (target_u32, hook_u32) = (target as u32, hook as u32);
+    let (target_u32, hook_u32) = (target as u32, hook.addr() as u32);
 
     let disp = hook_u32.wrapping_sub(target_u32.wrapping_add(5));
     let mut bytes = [0x90u8; MAX_PATCH_LEN];

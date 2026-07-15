@@ -89,9 +89,9 @@ fn lookup_handle_type(handle: NonZero<u32>) -> Option<String> {
         if header.length == 0 || header.buffer.is_null() {
             return None;
         }
-        let buf_start = buf.as_ptr() as usize;
+        let buf_start = buf.as_ptr().addr();
         let buf_end = buf_start.saturating_add(buf.len());
-        let name_start = header.buffer as usize;
+        let name_start = header.buffer.addr();
         let name_end = name_start.saturating_add(usize::from(header.length));
         if name_start < buf_start || name_end > buf_end || name_start & 1 != 0 {
             return None;
