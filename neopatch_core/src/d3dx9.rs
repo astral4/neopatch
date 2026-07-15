@@ -1,9 +1,8 @@
 //! Hooks for `d3dx9_43.dll` texture-creation entries.
 //!
-//! d3dx9 validates `Pool` against the D3D9Ex device internally
-//! before dispatching to `CreateTexture`, so the `MANAGED` -> `DEFAULT` translation
-//! in our `CreateTexture` vtable hook never fires for the d3dx9 path.
-//! We do the same translation at the d3dx9 entry points themselves.
+//! D3DX9 validates `Pool` against the D3D9Ex device internally before dispatching to `CreateTexture`,
+//! so the `MANAGED` -> `DEFAULT` translation in our `CreateTexture` vtable hook never fires for the D3DX9 path.
+//! We do the same translation at the D3DX9 entry points themselves.
 
 use crate::d3d9::{format_name, out_ptr, translate_managed_pool};
 use crate::log::log_at;
@@ -26,7 +25,6 @@ iat_hook! {
             pp_texture: *mut *mut c_void,
         ) -> HRESULT;
 }
-
 iat_hook! {
     REAL_D3DX_CREATE_TEX_FROM_FILE_IN_MEM_EX / real_d3dx_create_texture_from_file_in_memory_ex
         : "D3DXCreateTextureFromFileInMemoryEx"
@@ -49,8 +47,9 @@ iat_hook! {
         ) -> HRESULT;
 }
 
-/// IAT-hooks `D3DXCreateTexture` and `D3DXCreateTextureFromFileInMemoryEx`
-/// against `host`'s import table for every `d3dx9_*.dll` version.
+/// IAT-hooks `D3DXCreateTexture` and `D3DXCreateTextureFromFileInMemoryEx` against `host`'s import table.
+/// The slot lookup matches by function name and patches the first hit,
+/// so this works with whichever single `d3dx9_*.dll` version the game imports.
 ///
 /// # Safety
 /// `host` must be a loaded module handle.

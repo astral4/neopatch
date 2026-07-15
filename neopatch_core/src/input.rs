@@ -1,12 +1,10 @@
 //! DirectInput hooks for controller input.
 //!
-//! The games read `lX` and `lY` from `DIJOYSTATE`/`DIJOYSTATE2` for direction input,
-//! but not `rgdwPOV`, which is for the D-pad on controllers. We convert POV into X/Y values
-//! so D-pad input translates into direction bits.
+//! The games read `lX` and `lY` from `DIJOYSTATE` / `DIJOYSTATE2` for direction input, but not `rgdwPOV`,
+//! which is for the D-pad on controllers. We convert POV into X/Y values so D-pad input translates into direction bits.
 //!
-//! When the D-pad is in a cardinal direction, we zero the perpendicular axis
-//! to account for stick drift. Diagonals (POV at 45/135/225/315 degrees) set both axes.
-//! POV-centered passes the buffer through unchanged.
+//! When the D-pad is in a cardinal direction, we zero the perpendicular axis to account for stick drift.
+//! Diagonals (POV at 45/135/225/315 degrees) set both axes. POV-centered passes the buffer through unchanged.
 
 use crate::vtable::{install_vtable, vtable_slot, vtbl_field};
 use std::ffi::c_void;
@@ -18,7 +16,6 @@ use windows::Win32::Devices::HumanInterfaceDevice::{
 };
 use windows::core::{GUID, HRESULT};
 
-// `cb_data` discriminants for `GetDeviceState`.
 #[allow(clippy::cast_possible_truncation)]
 const DIJOYSTATE_SIZE: u32 = size_of::<DIJOYSTATE>() as u32;
 #[allow(clippy::cast_possible_truncation)]
@@ -35,8 +32,7 @@ const _: () = {
 };
 
 // 36000 centidegrees = 360 degrees. The DirectInput spec uses `0xFFFFFFFF` for centered,
-// but some drivers report `0xFFFF` or other out-of-range values,
-// so anything past a full revolution is treated as centered.
+// but some drivers report `0xFFFF` or other out-of-range values, so anything past a full revolution is treated as centered.
 const POV_FULL_REVOLUTION: u32 = 36000;
 
 vtable_slot! {
@@ -58,7 +54,7 @@ vtable_slot! {
 }
 
 /// Registers a post-`DirectInput8Create` callback with the dinput8 proxy.
-/// This should be called from `install_hooks` before the game calls `DirectInput8Create`.
+/// This must be called from `install_hooks` before the game calls `DirectInput8Create`.
 pub fn install() {
     crate::dinput8::set_on_created(on_directinput_created);
 }
@@ -95,16 +91,13 @@ unsafe extern "system" fn hook_di_create_device(
 ) -> HRESULT {
     let hr = unsafe { call_real_di_create_device(this, rguid, pp_device, p_unk_outer) };
     if hr.is_ok() && !pp_device.is_null() {
-        // SAFETY: DirectInput guarantees `pp_device` is non-null and points at the new device.
+        // SAFETY: `hr` is a success code, so the real `CreateDevice` wrote the new device's pointer to `*pp_device`.
         let dev = unsafe { *pp_device };
         unsafe { patch_device_vtable(dev) };
     }
     hr
 }
 
-/// Patches the class-shared `IDirectInputDevice8A` vtable. Called for every
-/// device created through our hook (keyboard then joystick on TH15, similar on
-/// TH10); `install_vtable`'s idempotency makes second-and-later calls no-ops.
 unsafe fn patch_device_vtable(dev: *mut c_void) {
     let Some(dev) = NonNull::new(dev) else { return };
     // SAFETY: `dev` points to an `IDirectInputDevice8A` whose first slot is the vtable pointer.
@@ -153,10 +146,8 @@ unsafe extern "system" fn hook_get_device_state(
     hr
 }
 
-/// Converts a POV value into `(lX, lY)` axis values.
-///
-/// `pov` is the centidegree angle from `rgdwPOV[0]`: `0` for N, `9000` for E,
-/// `18000` for S, `27000` for W; `36000` or more for centered.
+/// Converts a POV value into `(lX, lY)` axis values. `pov` is the centidegree angle from `rgdwPOV[0]`:
+/// `0` for N; `9000` for E; `18000` for S; `27000` for W; `36000` or more for centered.
 #[must_use]
 #[allow(clippy::similar_names)]
 fn convert_pov(pov: u32, lx: i32, ly: i32) -> (i32, i32) {

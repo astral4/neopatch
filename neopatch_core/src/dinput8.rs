@@ -1,8 +1,7 @@
 //! Generic `dinput8.dll` proxy that loads the real System32 export and forwards calls.
 //!
-//! Every game crate that ships as `dinput8.dll` should use this to keep the proxy export
-//! working even if hook installation fails: call `init` once from `DllMain`
-//! and re-export `DirectInput8Create` via the [`dinput8_export!`] macro.
+//! Every game crate that ships as `dinput8.dll` should use this to keep the proxy export working even if hook installation fails:
+//! call [`init`] once from `DllMain` and re-export `DirectInput8Create` via the [`dinput8_export!`] macro.
 
 use crate::vtable::{FnSlot, parse_fn_ptr};
 use std::ffi::c_void;
@@ -13,14 +12,13 @@ use windows::Win32::Devices::HumanInterfaceDevice::{
     IDirectInput8A, IDirectInput8A_Vtbl, IDirectInput8W, IDirectInput8W_Vtbl,
     IDirectInputDevice8A_Vtbl, IDirectInputDevice8W_Vtbl,
 };
-use windows::core::Interface;
+use windows::core::{GUID as WinGUID, Interface};
 use windows_sys::Win32::Foundation::{E_FAIL, HINSTANCE, MAX_PATH};
 use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 use windows_sys::Win32::System::SystemInformation::GetSystemDirectoryW;
 use windows_sys::core::{GUID, HRESULT};
 
-// `forward` depends on patched slots (`CreateDevice`, `GetDeviceState`)
-// being at the same vtable offset in both the A and W vtables.
+// `forward` depends on patched slots (`CreateDevice`, `GetDeviceState`) being at the same vtable offset in both the A and W vtables.
 const _: () = {
     assert!(
         offset_of!(IDirectInput8A_Vtbl, CreateDevice)
@@ -42,19 +40,18 @@ type DirectInput8CreateFn = unsafe extern "system" fn(
 
 static REAL: FnSlot<DirectInput8CreateFn> = FnSlot::new("REAL_DIRECT_INPUT_8_CREATE");
 
-/// Optional callback run with the new `IDirectInput8` after each successful
-/// `DirectInput8Create`. Set by [`set_on_created`]; first caller wins.
+/// Optional callback run with the new `IDirectInput8` after each successful `DirectInput8Create`.
+/// Set by [`set_on_created`]; first caller wins.
 static ON_CREATED: OnceLock<unsafe fn(*mut c_void)> = OnceLock::new();
 
-/// Registers a hook to run after `DirectInput8Create` returns a new `IDirectInput8`;
-/// first caller wins. This should be called before any DirectInput call from the game.
+/// Registers a hook to run after `DirectInput8Create` returns a new `IDirectInput8`; first caller wins.
+/// This must be called before any DirectInput call from the game.
 pub(crate) fn set_on_created(f: unsafe fn(*mut c_void)) {
     let _ = ON_CREATED.set(f);
 }
 
-/// Loads System32's `dinput8.dll` by full path so the bare name doesn't resolve back to us
-/// via the same DLL search order that put us here, and caches the real `DirectInput8Create`.
-/// Idempotent; subsequent calls are no-ops.
+/// Loads System32's `dinput8.dll` by full path so the bare name doesn't resolve back to us via the same DLL search order
+/// that put us here, and caches the real `DirectInput8Create`. Idempotent; subsequent calls are no-ops.
 pub fn init() {
     const SUFFIX: [u16; 13] = {
         let s = b"\\dinput8.dll";
@@ -85,11 +82,9 @@ pub fn init() {
     }
 }
 
-/// Forwards to the cached real `DirectInput8Create`. Returns `E_FAIL` if `init` hasn't run
-/// or System32's `dinput8.dll` cannot be resolved.
-///
-/// On success, hands the returned `IDirectInput8` to any callback registered
-/// via [`set_on_created`]. If no callback is registered, the call simply passes through.
+/// Forwards to the cached real `DirectInput8Create`. Returns `E_FAIL` if [`init`] hasn't run
+/// or System32's `dinput8.dll` cannot be resolved. On success, hands the returned `IDirectInput8` to any callback
+/// registered via [`set_on_created`]. If no callback is registered, the call simply passes through.
 ///
 /// # Safety
 /// The caller must obey the dinput8 export's published contract for the pointer arguments.
@@ -105,11 +100,9 @@ pub unsafe fn forward(
     };
     let hr = unsafe { real(hinst, dw_version, riidltf, ppv_out, punk_outer) };
     if hr >= 0 && !ppv_out.is_null() && !riidltf.is_null() {
-        // SAFETY: `windows_sys::core::GUID` and `windows::core::GUID`
-        // are both `#[repr(C)]` with identical fields, so they share layout.
-        let iid = unsafe { &*riidltf.cast::<windows::core::GUID>() };
-        // This is fine because A/W vtables coincide at the patched slots.
-        // th10-th18 provide the A IID; th20 provides the W IID.
+        // SAFETY: `windows_sys::core::GUID` and `windows::core::GUID` are both `#[repr(C)]` with identical fields, so they share layout.
+        let iid = unsafe { &*riidltf.cast::<WinGUID>() };
+        // This is fine because A/W vtables coincide at the patched slots. th10–th18 provide the A IID; th20 provides the W IID.
         if *iid == IDirectInput8A::IID || *iid == IDirectInput8W::IID {
             if let Some(on_created) = ON_CREATED.get() {
                 let di = unsafe { *ppv_out };

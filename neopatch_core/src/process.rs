@@ -15,8 +15,7 @@ pub fn apply(cfg: &ProcessCfg) {
     if let Some(pc) = priority_class(cfg.priority) {
         let ok = unsafe { SetPriorityClass(GetCurrentProcess(), pc) };
         // We snapshot `GetLastError` eagerly because `format_args!` is lazy
-        // and the tracing layer evaluates fields after other Win32 calls
-        // that may clobber errors here.
+        // and the tracing layer evaluates fields after other Win32 calls that may clobber errors here.
         let os_error = last_error_if(ok == 0);
         info!(
             kind = "set_priority_class",

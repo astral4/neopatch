@@ -1,9 +1,7 @@
 //! Utilities for walking a loaded module's import directory and replacing IAT slots.
 //!
-//! `IatHook<F>` carries the import's function-pointer type through
-//! the install/capture/call chain. The trampoline calls the captured original directly
-//! without transmuting. The install method takes the hook as typed `F`,
-//! so a hook with a mismatched signature is a compile error.
+//! [`IatHook<F>`] carries the import's function-pointer type `F` through the install/capture/call chain.
+//! The trampoline calls the captured original directly without transmuting.
 
 use crate::patches::patch_call;
 use crate::protect::with_writable;
@@ -21,19 +19,17 @@ use windows_sys::Win32::System::SystemServices::{
 };
 use windows_sys::Win32::System::WindowsProgramming::IMAGE_THUNK_DATA32;
 
-/// Declares a typed IAT hook plus a typed trampoline calling through it.
+/// Declares a typed IAT hook and a typed trampoline calling through it.
 ///
-/// ```text
+/// ```ignore
 /// iat_hook! {
 ///     REAL_GET_DEVICE_CAPS / real_get_device_caps : "GetDeviceCaps"
 ///         as fn(hdc: HDC, index: i32) -> i32;
 /// }
 /// ```
 ///
-/// The example above expands to a
-/// `static REAL_GET_DEVICE_CAPS: IatHook<unsafe extern "system" fn(HDC, i32) -> i32>`
-/// plus a typed `real_get_device_caps` trampoline. The signature lives once, in the
-/// macro invocation. Hook bodies installed against this slot are typechecked against `F`.
+/// The example above expands to `static REAL_GET_DEVICE_CAPS: IatHook<unsafe extern "system" fn(HDC, i32) -> i32>`
+/// and a typed `real_get_device_caps` trampoline. Hook bodies installed against this slot are typechecked.
 #[macro_export]
 macro_rules! iat_hook {
     (
@@ -58,15 +54,14 @@ struct ImageImportByName {
     name: [u8; 1],
 }
 
-/// Set-once-with-non-null storage for an IAT hook's import name and displaced original pointer.
-/// Use through `iat_hook!`. `IatHook::original` panics if `install` was never called or missed,
-/// so an uncaptured trampoline fires a named panic instead of dispatching through null.
-pub struct IatHook<F: Copy + Send + Sync + 'static> {
+/// Set-once-with-non-null storage for an IAT hook's import name and displaced original pointer. Use through [`iat_hook!`].
+pub struct IatHook<F> {
     slot: FnSlot<F>,
     name: &'static str,
 }
 
-impl<F: Copy + Send + Sync + 'static> IatHook<F> {
+// TODO: Tighten to `F: FnPtr` if the `fn_ptr_trait` feature stabilizes.
+impl<F: Copy + Send + Sync + Unpin + 'static> IatHook<F> {
     #[must_use]
     pub const fn new(name: &'static str, slot_name: &'static str) -> Self {
         Self {
@@ -85,9 +80,8 @@ impl<F: Copy + Send + Sync + 'static> IatHook<F> {
             .unwrap_or_else(|| panic!("IAT hook {:?} not installed", self.name))
     }
 
-    /// Walks `host`'s IAT, displaces the slot, and captures the original.
-    /// Returns `true` on hit and `false` on failure. Failures are logged.
-    /// The trampoline panics on first call if the slot was never captured.
+    /// Walks `host`'s IAT, displaces the slot, and captures the original. Returns `true` on hit and `false` on failure.
+    /// Failures are logged. The trampoline panics on first call if the slot was never captured.
     ///
     /// # Safety
     /// `host` must be a loaded module handle.
@@ -136,6 +130,7 @@ impl<F: Copy + Send + Sync + 'static> IatHook<F> {
         } else {
             self.slot.store(original);
         }
+
         let written = unsafe {
             with_writable(slot_raw.cast::<u8>(), size_of::<*mut ()>(), |_| {
                 write_unaligned(slot_raw, hook_raw);
@@ -158,8 +153,7 @@ impl<F: Copy + Send + Sync + 'static> IatHook<F> {
     /// of the import to call `hook` directly. Returns whether the IAT hook itself installed.
     ///
     /// # Safety
-    /// `host` must be a loaded module handle.
-    /// `call_addr` must be a writable code address holding `expected`.
+    /// `host` must be a loaded module handle. `call_addr` must be a writable code address holding `expected`.
     pub unsafe fn install_with_call_site<const N: usize>(
         &self,
         host: HMODULE,
@@ -181,7 +175,7 @@ unsafe fn data_directory(module: HMODULE, idx: usize) -> Option<(*const u8, u32)
         if e_magic != IMAGE_DOS_SIGNATURE {
             return None;
         }
-        // Treat negative `e_lfanew` as malformed rather than wrapping.
+        // We treat negative `e_lfanew` as malformed rather than wrapping.
         let e_lfanew: i32 = read_unaligned(base.add(offset_of!(IMAGE_DOS_HEADER, e_lfanew)).cast());
         let nt_base = base.add(usize::try_from(e_lfanew).ok()?);
         let signature: u32 = read_unaligned(
@@ -220,7 +214,7 @@ struct IatMiss {
     descriptors: u32,
 }
 
-/// Walks `module`'s import directory (case-insensitive match on `import_name`).
+/// Walks `module`'s import directory for a case-insensitive match on `import_name`.
 /// Returns a pointer to the `FirstThunk` slot on hit, or the count of descriptors that couldn't be searched on miss.
 /// `module` should always be the game (e.g. th15.exe via `GetModuleHandleW(NULL)`), never our own DLL.
 unsafe fn find_iat_slot(module: HMODULE, import_name: &str) -> Result<NonNull<*mut ()>, IatMiss> {
@@ -244,8 +238,8 @@ unsafe fn find_iat_slot(module: HMODULE, import_name: &str) -> Result<NonNull<*m
                 return Err(IatMiss { descriptors });
             }
 
-            // OFT holds name RVAs (`Anonymous` union aliases it). FT holds bound function VAs
-            // after the loader runs. We can't fall back from OFT to FT after binding.
+            // OFT holds name RVAs (`Anonymous` union aliases it). FT holds bound function VAs after the loader runs.
+            // We can't fall back from OFT to FT after binding.
             let oft: u32 = read_unaligned(
                 imp_dir
                     .add(desc_offset + offset_of!(IMAGE_IMPORT_DESCRIPTOR, Anonymous))
@@ -274,14 +268,14 @@ unsafe fn find_iat_slot(module: HMODULE, import_name: &str) -> Result<NonNull<*m
                 }
                 let ord_flag = 0x8000_0000;
                 if entry & ord_flag == 0 {
-                    // By-name import: `entry` is the RVA of `IMAGE_IMPORT_BY_NAME`.
+                    // By-name import; `entry` is the RVA of `IMAGE_IMPORT_BY_NAME`.
                     let name_offset = entry as usize + offset_of!(ImageImportByName, name);
                     let name_ptr = base.add(name_offset).cast::<c_char>();
                     let imp_name = CStr::from_ptr(name_ptr).to_bytes();
                     if imp_name.eq_ignore_ascii_case(import_name.as_bytes()) {
                         let slot_offset = ft as usize + i * size_of::<IMAGE_THUNK_DATA32>();
-                        // All accesses through the returned pointer occur via `read_unaligned`
-                        // and `write_unaligned`, so the alignment bump from `*mut u8` is fine.
+                        // All accesses through the returned pointer occur via `read_unaligned` and `write_unaligned`,
+                        // so the alignment bump from `*mut u8` is fine.
                         #[allow(clippy::cast_ptr_alignment)]
                         let slot = base_mut.add(slot_offset).cast::<*mut ()>();
                         return NonNull::new(slot).ok_or(IatMiss { descriptors });

@@ -8,9 +8,7 @@ use windows_sys::Win32::System::ProcessStatus::{
 use windows_sys::Win32::System::Threading::GetCurrentProcess;
 
 /// Half-open range `[base, end)` of a loaded module.
-///
-/// `Copy` is implemented so it can be stored in a `OnceLock`
-/// and be passed by value to the patcher.
+// `Copy` is implemented so the value can be taken out of a `OnceLock` by value (`.copied()`) and passed to the patcher.
 #[derive(Clone, Copy)]
 pub(crate) struct ModuleRange {
     pub base: u32,
@@ -23,7 +21,7 @@ impl ModuleRange {
     }
 }
 
-/// `ModuleRange` plus the leaf filename, for `name+0xoffset` annotations.
+/// [`ModuleRange`] plus the leaf filename, for `name+0xoffset` annotations.
 pub(crate) struct Module {
     pub(crate) range: ModuleRange,
     pub(crate) name: String,
@@ -56,7 +54,6 @@ pub(crate) fn module_info(h: HMODULE) -> Option<ModuleRange> {
 /// Enumerates every module loaded into the current process.
 /// Each entry carries `base`, `end`, and leaf filename for resolving an address to its module.
 pub(crate) fn walk_modules() -> Vec<Module> {
-    // Probably fine for th15.
     const HANDLES_CAP: u32 = 512;
     const HANDLES_LEN: usize = HANDLES_CAP as usize;
     #[allow(clippy::cast_possible_truncation)]
@@ -96,8 +93,7 @@ pub(crate) fn annotate(addr: u32, modules: &[Module]) -> String {
     annotate_resolved(addr, modules).unwrap_or_else(|| format!("{addr:#010x}"))
 }
 
-/// Like `annotate`, but returns `None` for unresolved addresses
-/// so callers can skip them entirely.
+/// Like [`annotate`], but returns `None` for unresolved addresses.
 pub(crate) fn annotate_resolved(addr: u32, modules: &[Module]) -> Option<String> {
     if addr == 0 {
         return None;

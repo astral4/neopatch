@@ -1,9 +1,8 @@
 //! neopatch_core: game-agnostic foundation for neopatch.
 //!
-//! Provides patching, hooking, and trampoline primitives; D3D9/D3D9Ex shims; the frame pacer;
-//! per-session logging; crash and watchdog instrumentation; and Win32 process tunables.
-//! Game-specific crates depend on this crate and wire game-specific behavior
-//! through the registered callbacks documented on each module.
+//! Provides patching, hooking, and trampoline primitives; D3D9/D3D9Ex shims; the frame pacer; per-session logging;
+//! crash and watchdog instrumentation; and Win32 process tunables. Game-specific crates depend on this crate
+//! and wire game-specific behavior through the registered callbacks documented on each module.
 
 #[cfg(all(not(target_arch = "x86"), not(test), not(doc)))]
 compile_error!("neopatch is x86-only");
@@ -36,8 +35,7 @@ pub mod window;
 pub use thread::MainToken;
 
 /// Match `$v` against a list of `const` identifiers, returning the literal identifier name
-/// (via `stringify!`) on hit and `"?"` on miss. This lets the printed name and value
-/// share a single source.
+/// (via `stringify!`) on hit and `"?"` on miss. This lets the printed name and value share a single source.
 macro_rules! match_named {
     ($v:expr, $($name:ident),* $(,)?) => {
         match $v {

@@ -1,11 +1,8 @@
 //! Per-session logging.
 //!
-//! Each session writes `events.log`, `manifest.txt`, and any crash minidumps into a new
-//! `<log_root>/<session_id>/` directory. Candidate roots are tried in order:
-//! `<install_dir>\neopatch_logs\`, then `%LOCALAPPDATA%\neopatch_logs\`, then
-//! `%TEMP%\neopatch_logs\`. The first fails on read-only installs (e.g. `Program Files`
-//! for a manifested process). The second one fails on UAC-redirected writes into
-//! `%LOCALAPPDATA%\VirtualStore\...`. The third should always be writable.
+//! Each session writes `events.log`, `manifest.txt`, and any crash minidumps into a new `<log_root>/<session_id>/` directory.
+//! Candidate roots are tried in order: `<install_dir>\neopatch_logs\`, then `%LOCALAPPDATA%\neopatch_logs\`,
+//! then `%TEMP%\neopatch_logs\`. The first fails for read-only installs (e.g. `Program Files`), but the others should be writable.
 
 use crate::config::{CoreConfig, write_manifest_common};
 use std::cell::{Cell, RefCell};
@@ -35,7 +32,7 @@ use windows_sys::Win32::Storage::FileSystem::FlushFileBuffers;
 use windows_sys::Win32::System::SystemInformation::GetLocalTime;
 use windows_sys::Win32::System::Threading::{GetCurrentProcessId, GetCurrentThreadId};
 
-/// Emits one `tracing` event, at `$yes` level when `$cond` holds and at `$no` level otherwise.
+/// Emits one `tracing` event at `$yes` level when `$cond` holds and at `$no` level otherwise.
 macro_rules! log_at {
     ($cond:expr => $yes:ident / $no:ident, $($fields:tt)+) => {
         if $cond {
@@ -47,9 +44,8 @@ macro_rules! log_at {
 }
 pub(crate) use log_at;
 
-// Each `on_event` write goes straight to the OS via `write_all`. We don't use `BufWriter`
-// so pending event lines won't be silently erased under `panic = "abort"`.
-// The mutex serializes concurrent writers.
+// Each `on_event` write goes straight to the OS via `write_all`. We don't use `BufWriter`, so pending event lines
+// won't be silently erased under `panic = "abort"`. The mutex serializes concurrent writers.
 static FILE_WRITER: Mutex<Option<File>> = Mutex::new(None);
 // `FILE_HANDLE` is used by `flush` for `FlushFileBuffers` without taking the mutex,
 // so the crash path can fsync even when the panicking thread holds the writer mutex.
@@ -58,11 +54,7 @@ static SESSION_DIR: OnceLock<PathBuf> = OnceLock::new();
 static START: OnceLock<Instant> = OnceLock::new();
 
 /// Sets up the per-session log directory, opens `events.log`, writes `manifest.txt`,
-/// and installs the global tracing layer. No-op if logging is off or already initialized.
-///
-/// The shared neopatch-version / build-target / host-exe / log-root / log preamble and the
-/// `[display]` / `[window]` / `[framerate]` / `[process]` keys from `core_cfg` are written
-/// automatically; `extra_manifest` writes any genuinely game-specific lines after them.
+/// and installs the global tracing layer. This is a no-op if logging is off or already initialized.
 pub fn init<F>(
     install_dir: &Path,
     core_cfg: &CoreConfig,
@@ -92,7 +84,6 @@ where
         return false;
     }
 
-    // Retention runs first so we don't sweep our own new directory.
     apply_retention(&log_root, core_cfg.log.sessions_to_keep, &session_id);
 
     drop(write_manifest(
@@ -112,8 +103,7 @@ where
     else {
         return false;
     };
-    // We publish `FILE_HANDLE` inside the same lock as `FILE_WRITER`
-    // so `flush` never sees one without the other.
+    // We publish `FILE_HANDLE` inside the same lock as `FILE_WRITER` so `flush` never sees one without the other.
     let raw_handle: *mut c_void = file.as_raw_handle().cast();
     if let Ok(mut guard) = FILE_WRITER.lock() {
         *guard = Some(file);
@@ -141,11 +131,10 @@ where
     true
 }
 
-/// Forces pending log writes to disk. Safe to call from crash and exit hooks.
+/// Forces pending log writes to disk. This is safe to call from crash and exit hooks.
 pub(crate) fn flush() {
     // `on_event` writes through `File::write_all`, which directly lands in the OS file cache.
-    // `FlushFileBuffers` requests the OS to commit that cache to physical disk,
-    // which matters for power-off/hard-crash scenarios.
+    // `FlushFileBuffers` requests the OS to commit that cache to physical disk, which matters for power-off/hard-crash scenarios.
     let raw = FILE_HANDLE.load(Ordering::Acquire);
     if !raw.is_null() {
         unsafe {
@@ -154,20 +143,17 @@ pub(crate) fn flush() {
     }
 }
 
-/// Returns the per-session directory where crash handlers should write minidumps.
-/// Returns `None` before `init` has run.
+/// Returns the per-session directory where crash handlers should write minidumps. Returns `None` before `init` has run.
 pub(crate) fn dump_dir() -> Option<&'static Path> {
     SESSION_DIR.get().map(PathBuf::as_path)
 }
 
-/// Returns the number of seconds since `init`.
-/// Returns `0.0` before `init`.
+/// Returns the number of seconds since `init`. Returns `0.0` before `init`.
 fn elapsed_secs() -> f64 {
     START.get().map_or(0.0, |s| s.elapsed().as_secs_f64())
 }
 
-/// Returns the number of milliseconds since `init`.
-/// Returns `0` before `init`.
+/// Returns the number of milliseconds since `init`. Returns `0` before `init`.
 pub(crate) fn elapsed_ms() -> u64 {
     START.get().map_or(0, |s| {
         u64::try_from(s.elapsed().as_millis()).unwrap_or(u64::MAX)
@@ -209,8 +195,6 @@ struct LogRootDecision {
 }
 
 /// Picks a writable log root and returns the trace of candidates considered.
-/// The caller emits one `log_root_decision` event per entry post-subscriber-initialization
-/// so a user can see why their logs landed where they did.
 fn pick_log_root(
     install_dir: &Path,
     override_dir: Option<&Path>,
@@ -234,7 +218,7 @@ fn pick_log_root(
         appdata_subdir("LOCALAPPDATA"),
         appdata_subdir("TEMP"),
     ] {
-        // Empty path means the source env var is unset; skip silently.
+        // An empty path means the source env var is unset, so we skip it.
         if candidate.as_os_str().is_empty() {
             continue;
         }
@@ -264,8 +248,7 @@ fn try_use_dir(dir: &Path) -> LogRootOutcome {
         return LogRootOutcome::CreateFailed;
     }
     let Ok(canonical) = canonicalize(dir) else {
-        // `remove_dir` only removes empty directories, so the cleanup is
-        // safe even if another process has already populated the leaf.
+        // `remove_dir` only removes empty directories, so the cleanup is safe even if another process has already populated the leaf.
         drop(remove_dir(dir));
         return LogRootOutcome::CanonicalizeFailed;
     };
@@ -284,8 +267,7 @@ fn make_session_id() -> String {
     unsafe {
         GetLocalTime(&raw mut st);
     }
-    // PID disambiguates concurrent same-second launches that would otherwise
-    // share a directory and clobber each other's logs.
+    // PID disambiguates concurrent same-second launches that would otherwise share a directory and clobber each other's logs.
     let pid = unsafe { GetCurrentProcessId() };
     format!(
         "{:04}{:02}{:02}_{:02}{:02}{:02}_p{pid}",
@@ -318,8 +300,7 @@ fn apply_retention(log_root: &Path, keep: NonZero<u32>, current: &str) {
     }
 }
 
-/// Returns true if `name` matches the `YYYYMMDD_HHMMSS_pPID` format of make_session_id`;
-/// false otherwise.
+/// Returns true if `name` matches the `YYYYMMDD_HHMMSS_pPID` format of `make_session_id`; false otherwise.
 fn is_session_id(name: &str) -> bool {
     let bytes = name.as_bytes();
     // 15 ("YYYYMMDD_HHMMSS") + 2 ("_p") + at least one PID digit.
@@ -377,18 +358,17 @@ where
     S: Subscriber + for<'lookup> LookupSpan<'lookup>,
 {
     fn enabled(&self, metadata: &Metadata<'_>, _ctx: Context<'_, S>) -> bool {
-        // Lower ordering = higher priority; e.g. `Level::ERROR < Level::INFO`.
+        // Lower ordering = higher priority (e.g. `Level::ERROR < Level::INFO`).
         metadata.level() <= &self.level
     }
 
     fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
-        // Per-thread line buffer to avoid per-event allocation, plus a re-entry guard.
-        // The guard prevents deadlock from recursion into `FILE_WRITER.lock()`
-        // when this thread is inside `on_event` holding `FILE_WRITER`
-        // while a crash handler fires `error!` on the same thread.
-        // When this happens, the guard drops the inner line instead.
         thread_local! {
+            // Per-thread line buffer to avoid per-event allocation.
             static LINE_BUF: RefCell<String> = RefCell::new(String::with_capacity(512));
+            // Re-entry guard. Prevents deadlock from recursion into `FILE_WRITER.lock()` when this thread is inside `on_event`
+            // holding `FILE_WRITER` while a crash handler fires `error!` on the same thread.
+            // When this happens, the guard drops the inner line instead.
             static IN_EVENT: Cell<bool> = const { Cell::new(false) };
         }
         IN_EVENT.with(|in_event| {
@@ -408,8 +388,7 @@ where
                 if let Ok(mut guard) = FILE_WRITER.lock()
                     && let Some(writer) = guard.as_mut()
                 {
-                    // No per-line flush; watchdog ticks and crash/exit hooks
-                    // are responsible for durability.
+                    // We don't flush for each line since watchdog ticks and crash/exit hooks are responsible for durability.
                     drop(writer.write_all(line.as_bytes()));
                 }
             });
@@ -423,9 +402,6 @@ struct FieldVisitor<'a> {
 }
 
 impl Visit for FieldVisitor<'_> {
-    // The typed `record_i64`/`record_u64`/`record_bool`/`record_f64`/`record_str`
-    // default impls in `tracing-core`'s `Visit` trait delegate to `record_debug`,
-    // which is the only override we need.
     fn record_debug(&mut self, field: &Field, value: &dyn Debug) {
         // `message` is the synthetic field for free-form `info!("...")` text.
         // We render this without a key, but everything else is in "key=value" form.

@@ -1,7 +1,7 @@
 //! Watchdog for thread snapshots and hang diagnostics.
 //!
-//! The watchdog suspends every thread in the process except itself, captures `CONTEXT`
-//! and the top of the stack, walks EBP frames, and emits an annotated log line per thread.
+//! The watchdog suspends every thread in the process except itself, captures `CONTEXT` and the top of the stack,
+//! walks EBP frames, and emits an annotated log line per thread.
 
 use crate::d3d9::present_count;
 use crate::log::flush;
@@ -32,13 +32,12 @@ use windows_sys::Win32::System::Threading::{
     THREAD_GET_CONTEXT, THREAD_QUERY_INFORMATION, THREAD_SUSPEND_RESUME,
 };
 
-/// Subset of `CONTEXT_*` flags we actually need: integer (eax..edi)
-/// and control (eip/esp/ebp/eflags/cs/ss). This is distinct from the SDK's `CONTEXT_FULL_X86`
-/// which also pulls in `CONTEXT_SEGMENTS_X86`. We don't read ds/es/fs/gs.
+/// Subset of `CONTEXT_*` flags we actually need: integer (eax..edi) and control (eip/esp/ebp/eflags/cs/ss).
+/// This is distinct from the SDK's `CONTEXT_FULL_X86` which also pulls in `CONTEXT_SEGMENTS_X86`. We don't read ds/es/fs/gs.
 const CONTEXT_FULL_X86_NO_SEGMENTS: u32 = CONTEXT_X86 | CONTEXT_CONTROL_X86 | CONTEXT_INTEGER_X86;
 
-/// Leading `UNICODE_STRING` of `ObjectTypeInformation`. The kernel writes the name
-/// into the trailing area of our buffer and sets `buffer` to point at it.
+/// Leading `UNICODE_STRING` of `ObjectTypeInformation`.
+/// The kernel writes the name into the trailing area of our buffer and sets `buffer` to point at it.
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct UnicodeStringHeader {
@@ -47,17 +46,16 @@ struct UnicodeStringHeader {
     buffer: *mut u16,
 }
 
-/// Per-thread sample. EBP drives `walk_ebp_frames`.
-/// In case the EBP walk terminates early, we fall back to the 64-word stack window.
+/// Per-thread sample. EBP drives [`walk_ebp_frames`].
+/// The 64-word stack window is always emitted alongside, supplementing the EBP walk in case it terminates early.
 struct ThreadSample {
-    // Windows TIDs are non-zero by convention.
+    // Windows TIDs are nonzero by convention.
     tid: NonZero<u32>,
     eip: u32,
     esp: u32,
     ebp: u32,
-    // `NtQueryInformationThread` returns the user-mode entry point
-    // passed to `CreateThread`. A zero result means the query failed
-    // or the thread is in a state where the address isn't yet recorded.
+    // `NtQueryInformationThread` returns the user-mode entry point passed to `CreateThread`.
+    // A zero result means the query failed or the thread is in a state where the address isn't yet recorded.
     start_addr: Option<NonZero<u32>>,
     stack: [u32; 64],
 }
@@ -69,8 +67,7 @@ pub fn install() {
         .ok();
 }
 
-/// Returns the kernel-object type name (`Event`, `Mutex`, `Thread`, etc.)
-/// for `handle`, or `None` on any failure.
+/// Returns the kernel-object type name (`Event`, `Mutex`, `Thread`, etc.) for `handle`, or `None` on any failure.
 fn lookup_handle_type(handle: NonZero<u32>) -> Option<String> {
     unsafe {
         let mut buf = [0u8; 1024];
@@ -86,9 +83,9 @@ fn lookup_handle_type(handle: NonZero<u32>) -> Option<String> {
         if status < 0 {
             return None;
         }
-        // The kernel writes the name string into the trailing area of our buffer and sets
-        // `TypeName.Buffer` to point at it. We check the bounds of the kernel-supplied pointer
-        // against our own buffer so a malformed reply can't redirect us at arbitrary kernel memory.
+        // The kernel writes the name string into the trailing area of our buffer and sets `TypeName.Buffer` to point at it.
+        // We check the bounds of the kernel-supplied pointer against our own buffer
+        // so a malformed reply can't redirect us at arbitrary process memory or an unmapped address.
         let header: UnicodeStringHeader = read_unaligned(buf.as_ptr().cast());
         if header.length == 0 || header.buffer.is_null() {
             return None;
@@ -109,9 +106,8 @@ fn lookup_handle_type(handle: NonZero<u32>) -> Option<String> {
 /// Run `f` with `h` suspended. The body runs between `SuspendThread` and `ResumeThread`.
 ///
 /// # Safety
-/// `h` must be a valid thread handle with `THREAD_SUSPEND_RESUME` access.
-/// `f` must not allocate or otherwise take a lock the suspended thread may hold;
-/// if `h` is inside that critical section, the closure deadlocks against it.
+/// `h` must be a valid thread handle with `THREAD_SUSPEND_RESUME` access. `f` must not allocate or otherwise take a lock
+/// that the suspended thread may hold; if `h` is inside that critical section, then the closure deadlocks against it.
 unsafe fn with_suspended<R>(h: HANDLE, f: impl FnOnce() -> R) -> R {
     // We don't use a RAII guard because we have `panic = "abort"`.
     unsafe {
@@ -147,22 +143,20 @@ fn lookup_thread_start(thread_handle: HANDLE) -> Option<NonZero<u32>> {
 }
 
 /// Opens `tid`, suspends it, snapshots its `CONTEXT` and the top of its stack, then resumes.
-/// Returns `None` for `tid = 0`, a thread that cannot be opened, or a thread whose context
-/// cannot be read.
+/// Returns `None` for `tid = 0`, a thread that cannot be opened, or a thread whose context cannot be read.
 fn sample_thread(tid: u32) -> Option<ThreadSample> {
     let tid = NonZero::new(tid)?;
-    // SAFETY: `with_suspended` requires `h` valid (non-null after `OpenThread`)
-    // and a non-allocating closure; ours only reads thread context into stack locals.
+    // SAFETY: `with_suspended` requires `h` valid (non-null after `OpenThread`) and a non-allocating closure.
+    // Ours only reads thread context into stack locals.
     unsafe {
         let access = THREAD_GET_CONTEXT | THREAD_SUSPEND_RESUME | THREAD_QUERY_INFORMATION;
         let h = OpenThread(access, 0, tid.get());
         if h.is_null() {
             return None;
         }
-        // `SuspendThread` can transiently fail (e.g., target thread is terminating).
-        // We don't check the returned value because a redundant `ResumeThread`
-        // on a thread we never successfully suspended is harmless, and `GetThreadContext`
-        // below fails on its own if the thread is gone, falling through to the `None` branch.
+        // `SuspendThread` can transiently fail (e.g. target thread is terminating). We don't check the returned value
+        // because a redundant `ResumeThread`on a thread we never successfully suspended is harmless,
+        // and `GetThreadContext` below fails on its own if the thread is gone, falling through to the `None` branch.
         let sampled = with_suspended(h, || {
             let mut ctx: CONTEXT = zeroed();
             ctx.ContextFlags = CONTEXT_FULL_X86_NO_SEGMENTS;
@@ -173,8 +167,7 @@ fn sample_thread(tid: u32) -> Option<ThreadSample> {
             safe_read_stack(ctx.Esp, &mut stack);
             Some((ctx.Eip, ctx.Esp, ctx.Ebp, stack))
         });
-        // The start address is fixed at thread creation,
-        // so reading it outside of the suspension window is sound.
+        // The start address is fixed at thread creation, so reading it outside of the suspension window is sound.
         let start_addr = lookup_thread_start(h);
         CloseHandle(h);
         sampled.map(|(eip, esp, ebp, stack)| ThreadSample {
@@ -229,13 +222,11 @@ fn watchdog_loop() -> ! {
     loop {
         sleep(Duration::from_secs(1));
         iter += 1;
-        // Make the last tick's events durable before the next sleep
-        // so a crash between wakes doesn't lose `BufWriter` contents.
+        // We make the last tick's events durable before the next sleep.
         flush();
         let frame = present_count();
         // If there was no `Present` since the last tick, then `main` isn't advancing,
-        // which is when the diagnostic snapshot is interesting.
-        // On the happy path, we just emit a liveness-only tick instead.
+        // which is when the diagnostic snapshot is interesting. On the happy path, we just emit a liveness-only tick instead.
         let stuck = prev_frame == Some(frame);
         prev_frame = Some(frame);
         if !stuck {
@@ -246,14 +237,12 @@ fn watchdog_loop() -> ! {
     }
 }
 
-/// Walks all loaded modules, samples `main` and every other thread, and walks EBP chains
-/// and stack words. This is a heavyweight diagnostic and is only called
-/// when the frame counter hasn't advanced for ~1 second.
+/// Walks all loaded modules, samples `main` and every other thread, and walks EBP chains and stack words.
+/// This is a heavyweight diagnostic and is only called when the frame counter hasn't advanced for ~1 second.
 fn snapshot_stuck(iter: u64, frame: u32) {
     let modules = walk_modules();
     let main_tid = main_id();
-    // Before the first hook triggers, we don't know which thread is the renderer,
-    // so we log all threads.
+    // Before the first hook triggers, we don't know which thread is the renderer, so we log all threads.
     if main_tid == 0 {
         info!("watchdog #{iter} frame={frame}: (render thread not yet identified)");
         for sample in enumerate_thread_samples(0) {
@@ -271,10 +260,8 @@ fn snapshot_stuck(iter: u64, frame: u32) {
         s.esp,
         annotate(s.ebp, &modules),
     );
-    // `[esp+4]` is the first arg of the innermost wait wrapper;
-    // typically the `HANDLE` for `WaitForSingleObject*`. If it's a `Thread`,
-    // then that's what `main` is blocked on, so we stack-walk that thread specifically
-    // and emit only headers for the rest.
+    // `[esp+4]` is the first arg of the innermost wait wrapper; typically the `HANDLE` for `WaitForSingleObject*`.
+    // If it's a `Thread`, then `main` is blocked on it, so we stack-walk that thread specifically and emit only headers for the rest.
     let handle_value = s.stack[1];
     let mut wait_target_tid: Option<NonZero<u32>> = None;
     if let Some(handle) = NonZero::new(handle_value)
@@ -293,8 +280,7 @@ fn snapshot_stuck(iter: u64, frame: u32) {
     for (i, frame) in main_frames.iter().enumerate() {
         info!("  frame {i}: {frame}");
     }
-    // Resolved-only stack-window context, which covers
-    // FPO frames the EBP walk can't traverse and non-return-address values.
+    // Resolved-only stack-window context, which covers FPO frames the EBP walk can't traverse and non-return-address values.
     for (i, &w) in s.stack.iter().enumerate() {
         if let Some(label) = annotate_resolved(w, &modules) {
             info!("  [esp+{:#x}] = {label}", i * 4,);
@@ -318,8 +304,7 @@ fn snapshot_stuck(iter: u64, frame: u32) {
     }
 }
 
-/// Logs a summary of a non-main thread sample: tid, eip, start address,
-/// and (if applicable) the kernel object the thread is waiting on.
+/// Logs a summary of a non-main thread sample: tid, eip, start address, and (if applicable) the kernel object the thread is waiting on.
 fn log_thread_header(sample: &ThreadSample, modules: &[Module]) {
     let start_label = sample.start_addr.map_or_else(
         || String::from("<unavailable>"),
@@ -338,8 +323,7 @@ fn log_thread_header(sample: &ThreadSample, modules: &[Module]) {
 }
 
 /// Walks the saved-EBP linked list and returns up to `MAX_FRAMES` annotated return addresses.
-/// Stops when EBP leaves the heuristic stack range, becomes misaligned,
-/// or stops strictly increasing.
+/// Stops when EBP leaves the heuristic stack range, becomes misaligned, or stops strictly increasing.
 fn walk_ebp_frames(initial_ebp: u32, esp: u32, modules: &[Module]) -> Vec<String> {
     const MAX_FRAMES: usize = 32;
     const MAX_STACK_SPAN: u32 = 0x0010_0000;
@@ -357,8 +341,7 @@ fn walk_ebp_frames(initial_ebp: u32, esp: u32, modules: &[Module]) -> Vec<String
         }
         prev = ebp;
         // The range and alignment heuristic doesn't guarantee `ebp` is on a committed page.
-        // We use `safe_read_stack` to return a partial copy at a guard-page boundary
-        // instead of AVing.
+        // We use `safe_read_stack` to return a partial copy at a guard-page boundary instead of AVing.
         let mut pair = [0u32; 2];
         let words = safe_read_stack(ebp, &mut pair);
         if words < 2 {

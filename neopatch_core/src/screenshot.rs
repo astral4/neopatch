@@ -1,18 +1,15 @@
 //! Screenshot capture primitives.
 //!
-//! We strip `D3DPRESENTFLAG_LOCKABLE_BACKBUFFER` in `rewrite_present_params` for performance
-//! and to avoid a flip-model presentation bug on native NVIDIA D3D9Ex. However, this breaks
-//! screenshot functionality in the games, since they use `IDirect3DSurface9::LockRect`.
-//! We restore functionality via `GetRenderTargetData` into a `D3DPOOL_SYSTEMMEM`
-//! offscreen surface, which is lockable regardless of presentation flags.
+//! We strip `D3DPRESENTFLAG_LOCKABLE_BACKBUFFER` in `rewrite_present_params` for performance and correctness.
+//! However, this breaks screenshot functionality in the games, since they use `IDirect3DSurface9::LockRect`.
+//! We restore functionality via `GetRenderTargetData` into a `D3DPOOL_SYSTEMMEM` offscreen surface,
+//! which is lockable regardless of presentation flags.
 //!
 //! A game's screenshot save function runs either before or after `Present`:
-//! - th11-th18 (`save_screenshot_live_bmp`), th20 (`save_screenshot_live_png`):
-//!   before `Present`, so the back buffer is still fresh and we capture synchronously,
-//!   matching vanilla frame timing.
-//! - th10 calls `save_screenshot_deferred_bmp`: after `Present`, where the back buffer is
-//!   undefined under D3D9Ex flip-model. We stash the filename, and the next
-//!   `on_pre_present` captures the live back buffer one frame later.
+//! - th11–th18 ([`save_screenshot_live_bmp`]), th20 ([`save_screenshot_live_png`]): before `Present`,
+//!   so the back buffer is still fresh and we capture synchronously, matching vanilla frame timing.
+//! - th10 ([`save_screenshot_deferred_bmp`]): after `Present`, where the back buffer is undefined under D3D9Ex.
+//!   We stash the filename, and the next `on_pre_present` captures the live back buffer one frame later.
 
 use crate::fmt_hr;
 use crate::thread::{MainCell, MainToken};
@@ -38,9 +35,12 @@ use windows_sys::Win32::Storage::FileSystem::{
     MOVEFILE_REPLACE_EXISTING, MoveFileExA, WriteFile,
 };
 
-/// The device returned by the most recent successful `CreateDeviceEx` call.
-/// Mirrors the device pointer the games hold in their own globals. Held with our own `AddRef`
-/// so the vtable pointer stays dereferenceable across the game's `Release` calls.
+/// Encodes a captured frame into an in-memory image (BMP or PNG). The parameters are `(width, height, pitch, src)`,
+/// where `src` points to `height` rows of `width` 32-bit BGRX/BGRA pixels with `pitch` bytes between rows.
+type ImageEncoder = unsafe fn(u32, u32, i32, *const u8) -> Result<Vec<u8>, String>;
+
+/// The device returned by the most recent successful `CreateDeviceEx` call. Mirrors the device pointer the games hold
+/// in their own globals. Held with our own `AddRef` so the vtable pointer stays dereferenceable across the game's `Release` calls.
 static ACTIVE_DEVICE: MainCell<*mut c_void> = MainCell::new(null_mut());
 
 // Idempotent when the device pointer is unchanged; `Reset` preserves the device instance.
@@ -48,21 +48,19 @@ pub(crate) fn on_post_create_device(tok: &MainToken, dev: *mut c_void) {
     unsafe { set_active_device(tok, dev) };
 }
 
-/// Updates `ACTIVE_DEVICE` to `new_dev`, calling `AddRef` on the new device
-/// and `Release` on the prior one.
+/// Updates [`ACTIVE_DEVICE`] to `new_dev`, calling `AddRef` on the new device and `Release` on the prior one.
 ///
-/// If a `Release` call in game code brings the COM object's refcount to 0, the object is
-/// destroyed and the vtable memory is freed. A subsequent `ACTIVE_DEVICE` query would be a
-/// use-after-free. Holding our own ref keeps the vtable pointer dereferenceable for as long as
-/// we might dereference it, even after the game drops its refs.
+/// If a `Release` call in game code brings the COM object's refcount to 0, the object is destroyed and the vtable memory is freed.
+/// A subsequent `ACTIVE_DEVICE` query would be a use-after-free. Holding our own ref keeps the vtable pointer dereferenceable
+/// for as long as we might dereference it, even after the game drops its refs.
 ///
-/// There is no code path that nulls `ACTIVE_DEVICE` and calls `Release` on our held ref, so
-/// this is a leak. This is fine for the games' shutdown sequences, which call `Release`
-/// on their device and then `ExitProcess` immediately after. Nothing changes from the game's
-/// perspective. This would only be an issue if we wanted to cleanly unload neopatch.
+/// There is no code path that nulls `ACTIVE_DEVICE` and calls `Release` on our held ref, so this is a leak. However, this is fine
+/// for the games' shutdown sequences, which call `Release` on their device and then `ExitProcess` immediately after.
+/// Nothing changes from the game's perspective. This would only be an issue if we wanted to cleanly unload neopatch.
 unsafe fn set_active_device(tok: &MainToken, new_dev: *mut c_void) {
     type AddRefFn = unsafe extern "system" fn(*mut c_void) -> u32;
     type ReleaseFn = unsafe extern "system" fn(*mut c_void) -> u32;
+
     let prev = ACTIVE_DEVICE.get(tok);
     if prev == new_dev {
         return;
@@ -84,8 +82,8 @@ unsafe fn set_active_device(tok: &MainToken, new_dev: *mut c_void) {
     }
 }
 
-/// Synchronously saves a screenshot as BMP. Use this for games whose save function trampoline
-/// runs before `Present`. Returns 0 on success, 1 on failure. Callers must be on the render thread.
+/// Synchronously saves a screenshot as BMP. Use this for games whose save function trampoline runs before `Present`.
+/// Returns 0 on success, 1 on failure. Callers must be on the render thread.
 ///
 /// # Safety
 /// `filename_ptr` must be valid.
@@ -94,8 +92,8 @@ pub unsafe extern "C" fn save_screenshot_live_bmp(filename_ptr: *const u8) -> u3
     live_save(filename_ptr, build_bmp_24bpp, "live")
 }
 
-/// Synchronously saves a screenshot as PNG. Use this for games whose save function trampoline
-/// runs before `Present`. Returns 0 on success, 1 on failure. Callers must be on the render thread.
+/// Synchronously saves a screenshot as PNG. Use this for games whose save function trampoline runs before `Present`.
+/// Returns 0 on success, 1 on failure. Callers must be on the render thread.
 ///
 /// # Safety
 /// `filename_ptr` must be valid.
@@ -122,9 +120,9 @@ fn live_save(filename_ptr: *const u8, encoder: ImageEncoder, source: &'static st
     }
 }
 
-/// Saves a screenshot, deferring capture to when `on_pre_present` is called next.
-/// Use this for games whose save function trampoline runs after `Present` (th10).
-/// Returns 0 on successful stash, 1 on failure. Callers must be on the render thread.
+/// Saves a screenshot, deferring capture to when `on_pre_present` is called next. Use this for games
+/// whose save function trampoline runs after `Present`. Returns 0 if the filename was stashed for deferred capture, 1 if rejected.
+/// The capture itself runs on the next `on_pre_present`. Callers must be on the render thread.
 ///
 /// # Safety
 /// `filename_ptr` must be valid.
@@ -160,8 +158,8 @@ struct PendingCapture {
     path: PendingPath,
 }
 
-/// th10's screenshot save runs after `Present`, where the live back buffer is undefined
-/// under D3D9Ex flip-model. We stash here and capture one frame later from `on_pre_present`.
+// th10's screenshot save runs after `Present`, where the live back buffer is undefined under D3D9Ex.
+// We stash here and capture one frame later from `on_pre_present`.
 static PENDING_CAPTURE: MainCell<Option<PendingCapture>> = MainCell::new(None);
 
 /// Stashes a filename for capture on the next `hook_present`.
@@ -202,8 +200,7 @@ pub(crate) fn on_pre_present(tok: &MainToken) {
         );
         return;
     }
-    // SAFETY: `active` matches the stash-time device and is non-null.
-    // Otherwise, `set_pending_cached_save` would have refused the stash.
+    // SAFETY: `active` matches the stash-time device and is non-null. Otherwise, `set_pending_cached_save` would have refused the stash.
     unsafe { save_pending_cached(active, pending.path.as_slice()) };
 }
 
@@ -217,12 +214,10 @@ pub(crate) fn on_pre_reset(tok: &MainToken) {
     }
 }
 
-/// Capture the live back buffer to `path` as a BMP. Called from `on_pre_present`
-/// when a th10-style cached save is pending.
+/// Capture the live back buffer to `path` as a BMP. Called from [`on_pre_present`] when a th10-style cached save is pending.
 ///
 /// # Safety
-/// `device` must be a valid `IDirect3DDevice9Ex*` for the current render context.
-/// The caller must be on the render thread.
+/// `device` must be a valid `IDirect3DDevice9Ex*` for the current render context. The caller must be on the render thread.
 unsafe fn save_pending_cached(device: *mut c_void, path: &[u8]) {
     ensure_parent(path);
     match unsafe { capture_live_and_write(device, path, build_bmp_24bpp) } {
@@ -231,9 +226,8 @@ unsafe fn save_pending_cached(device: *mut c_void, path: &[u8]) {
     }
 }
 
-/// Captures the live back buffer to `path`, encoding it with `encode`.
-/// Returns `(width, height)` on success, or an error string if no `CreateDeviceEx` call
-/// has succeeded yet or a Windows API call fails.
+/// Captures the live back buffer to `path`, encoding it with `encode`. Returns `(width, height)` on success,
+/// or an error string if no `CreateDeviceEx` call has succeeded yet or a Windows API call fails.
 fn save_live(tok: &MainToken, path: &[u8], encode: ImageEncoder) -> Result<(u32, u32), String> {
     let device = ACTIVE_DEVICE.get(tok);
     if device.is_null() {
@@ -243,15 +237,13 @@ fn save_live(tok: &MainToken, path: &[u8], encode: ImageEncoder) -> Result<(u32,
     unsafe { capture_live_and_write(device, path, encode) }
 }
 
-/// Gets the live back buffer, allocates a sysmem surface,
-/// calls `GetRenderTargetData`, and delegates to `lock_and_write`.
+/// Gets the live back buffer, allocates a sysmem surface, calls `GetRenderTargetData`, and delegates to [`lock_and_write`].
 unsafe fn capture_live_and_write(
     device: *mut c_void,
     path: &[u8],
     encode: ImageEncoder,
 ) -> Result<(u32, u32), String> {
-    // Surface handles are dropped on function exit due to
-    // `IDirect3DSurface9`'s implementation of `Drop` calling `Release`.
+    // Surface handles are dropped on function exit due to `IDirect3DSurface9`'s implementation of `Drop` calling `Release`.
     let dev = unsafe { IDirect3DDevice9Ex::from_raw_borrowed(&device) }
         .ok_or_else(|| "null device".to_string())?;
     let back_buffer = unsafe { dev.GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO) }
@@ -340,16 +332,10 @@ fn ensure_parent(path: &[u8]) {
     }
 }
 
-/// Encodes a captured frame into an in-memory image (BMP or PNG).
-/// Args are `(width, height, pitch, src)`, where `src` points to
-/// `height` rows of `width` 32-bit BGRX/BGRA pixels with `pitch` bytes between rows.
-type ImageEncoder = unsafe fn(u32, u32, i32, *const u8) -> Result<Vec<u8>, String>;
-
 /// Constructs a 24bpp BGR Windows BMP byte stream.
 ///
 /// # Safety
-/// `src` must point to `height` rows of `width` 32-bit BGRX/BGRA pixels,
-/// with `pitch` bytes between row starts.
+/// `src` must point to `height` rows of `width` 32-bit BGRX/BGRA pixels, with `pitch` bytes between row starts.
 unsafe fn build_bmp_24bpp(
     width: u32,
     height: u32,
@@ -387,9 +373,8 @@ unsafe fn build_bmp_24bpp(
     buf.extend_from_slice(&0u32.to_le_bytes()); // important colors
 
     let pad_zeros = [0u8; 3];
-    // We write rows bottom-up. Each source row is `pitch` bytes
-    // (signed; for our sysmem provided by `GetRenderTargetData`, it's always positive).
-    // Each pixel is 4 bytes BGRX/BGRA. We copy BGR and discard X/A components.
+    // We write rows bottom-up. Rows start `pitch` bytes apart (signed; always positive for our `CreateOffscreenPlainSurface`
+    // sysmem surface). Each pixel is 4 bytes BGRX/BGRA. We copy BGR and discard X/A components.
     for y in (0..height).rev() {
         let row_off = isize::try_from(y).map_err(|e| e.to_string())?
             * isize::try_from(pitch).map_err(|e| e.to_string())?;
@@ -410,8 +395,7 @@ unsafe fn build_bmp_24bpp(
 /// Constructs an 8-bit truecolor (24bpp RGB) PNG.
 ///
 /// # Safety
-/// `src` must point to `height` rows of `width` 32-bit BGRX/BGRA pixels,
-/// with `pitch` bytes between row starts.
+/// `src` must point to `height` rows of `width` 32-bit BGRX/BGRA pixels, with `pitch` bytes between row starts.
 unsafe fn build_png_24bpp(
     width: u32,
     height: u32,
@@ -447,9 +431,8 @@ unsafe fn build_png_24bpp(
     Ok(out)
 }
 
-/// Writes `data` to `tmp` via `CreateFileA + WriteFile`, then renames `tmp` to `dst` using
-/// `MoveFileExA(MOVEFILE_REPLACE_EXISTING)`. On any failure, the partial `tmp` is removed.
-/// Both path arguments should be raw (not NUL-terminated) ANSI bytes.
+/// Writes `data` to `tmp` via `CreateFileA + WriteFile`, then renames `tmp` to `dst` using `MoveFileExA(MOVEFILE_REPLACE_EXISTING)`.
+/// On any failure, the partial `tmp` is removed. Both path arguments should be raw (not NUL-terminated) ANSI bytes.
 fn write_atomic(tmp: &[u8], dst: &[u8], data: &[u8]) -> Result<(), String> {
     let tmp_c = nul_terminate(tmp);
     let dst_c = nul_terminate(dst);
@@ -524,7 +507,7 @@ fn nul_terminate(bytes: &[u8]) -> Vec<u8> {
 }
 
 /// Reads a NUL-terminated ASCII/ANSI filename from a caller-controlled pointer.
-/// Null pointers, empty paths, and non-terminating NULs are rejected.
+/// Null pointers, empty paths, and strings with no NUL terminator within `MAX_PATH` bytes are rejected.
 fn sanitize_filename(filename_ptr: *const u8) -> Option<PendingPath> {
     let untrusted = Untrusted::from_raw(filename_ptr);
     let mut buf = [0u8; MAX_PATH as usize];
@@ -590,7 +573,6 @@ mod tests {
         assert_eq!((info.width, info.height), (2, 2));
         assert_eq!(info.color_type, ColorType::Rgb);
         assert_eq!(info.bit_depth, BitDepth::Eight);
-        // Decoded RGB, top-down, row-major: BGR->RGB swap and row order preserved.
         assert_eq!(&buf[0..3], &[0x00, 0x00, 0xff], "(0,0) blue");
         assert_eq!(&buf[3..6], &[0x00, 0xff, 0x00], "(1,0) green");
         assert_eq!(&buf[6..9], &[0xff, 0x00, 0x00], "(0,1) red");
@@ -599,8 +581,7 @@ mod tests {
 
     #[test]
     fn build_png_24bpp_handles_padded_pitch() {
-        // 2x3 source, 32bpp BGRX, pitch = 12 bytes/row, top-down.
-        // The 0xAA row-tail padding must be skipped by the stride math.
+        // 2x3 source, 32bpp BGRX, pitch = 12 bytes/row, top-down. The 0xAA row-tail padding must be skipped by the stride math.
         // If it leaked into the output, then the decoded pixels below would be wrong.
         #[rustfmt::skip]
         let src: [u8; 36] = [

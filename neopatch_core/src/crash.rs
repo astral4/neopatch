@@ -1,7 +1,7 @@
 //! Crash-time capture. Includes a vectored exception handler, unhandled filter, and minidump.
 //!
-//! Vectored runs before the SEH chain and can't be overwritten by a later
-//! `SetUnhandledExceptionFilter`. The unhandled filter is the fallback path.
+//! Vectored runs before the SEH chain and can't be overwritten by a later `SetUnhandledExceptionFilter`.
+//! The unhandled filter is the fallback path.
 
 use crate::log::{dump_dir, elapsed_ms, flush};
 use crate::match_named;
@@ -39,16 +39,16 @@ use windows_sys::Win32::System::Threading::{
     GetCurrentProcess, GetCurrentProcessId, GetCurrentThreadId,
 };
 
-/// Cap dumps per session in case of a re-entrant crash.
+/// Cap dumps per session in case of repeated crashes.
 const DUMP_LIMIT: u32 = 8;
 
 // VC++ runtime conventions.
 const MS_VC_THREAD_NAME: NTSTATUS = 0x406D_1388_u32.cast_signed();
 const MS_VC_CXX_EH: NTSTATUS = 0xE06D_7363_u32.cast_signed();
 
-/// Re-entry guard. If our filter itself crashes (e.g. dereferencing an invalid context),
-/// the OS would re-invoke us and we'd recurse until stack overflow.
-/// This flag is tripped on first entry and never reset.
+/// Re-entry guard. If our filter itself crashes (e.g. dereferencing an invalid context), the OS would re-invoke us
+/// and we'd recurse until stack overflow. This is tripped on entry and released after first-chance (vectored) handling;
+/// the last-chance path leaves it set for good.
 static IN_FILTER: AtomicBool = AtomicBool::new(false);
 
 static DUMP_SEQ: AtomicU32 = AtomicU32::new(0);
@@ -69,8 +69,8 @@ unsafe fn write_minidump(info: *const EXCEPTION_POINTERS, label: &str) -> Option
     let filename = format!("neopatch_dump_{n}_{label}_tid{tid}_t{elapsed_ms}.dmp");
     let path = dir.join(&filename);
 
-    // MiniDumpWriteDump takes a raw `HANDLE`,
-    // so we use `CreateFileW` instead of `std::fs::File`.
+    // MiniDumpWriteDump takes a raw `HANDLE`, so we open one directly with `CreateFileW`
+    // rather than wrapping through `std::fs::File` just to unwrap it again.
     let wide: Vec<u16> = path.as_os_str().encode_wide().chain(once(0)).collect();
     let file = unsafe {
         CreateFileW(
@@ -199,9 +199,8 @@ unsafe fn log_exception(info: *const EXCEPTION_POINTERS, source: &str) -> bool {
         ctx.Eax, ctx.Ebx, ctx.Ecx, ctx.Edx, ctx.Esi, ctx.Edi, ctx.Ebp, ctx.Esp, ctx.Eip, ctx.EFlags,
     );
     error!("{msg}");
-    // For an indirect-call fault (`call ecx`), `[esp]` is the return address,
-    // which pinpoints the call site to the byte. The stack peek is last
-    // so register data is already flushed if this read itself faults.
+    // For an indirect-call fault (`call ecx`), `[esp]` is the return address, which pinpoints the call site to the byte.
+    // The stack peek is last so the register line is already written out if anything below misbehaves.
     let esp = ctx.Esp;
     let mut stack = [0u32; 8];
     safe_read_stack(esp, &mut stack);
@@ -212,11 +211,10 @@ unsafe fn log_exception(info: *const EXCEPTION_POINTERS, source: &str) -> bool {
     true
 }
 
-/// Vectored runs "first-chance": we re-arm `IN_FILTER` after handling
-/// so the next exception can be processed, and we also skip the minidump
-/// for benign codes since the log line is enough.
-/// Unhandled runs "last-chance": the process is about to die,
-/// so we don't bother re-arming and dump even on benign codes since we want all the details.
+/// Vectored runs "first-chance": we re-arm `IN_FILTER` after handling so the next exception can be processed,
+/// and we also skip the minidump for benign codes since the log line is enough.
+/// Unhandled runs "last-chance": the process is about to die, so we don't bother re-arming
+/// and dump even on benign codes since we want all the details.
 #[derive(Clone, Copy)]
 enum ExceptionSource {
     Vectored,

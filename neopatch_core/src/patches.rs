@@ -1,8 +1,7 @@
 //! In-process byte patching primitives.
 //!
-//! Before writing, every patch primitive checks that the bytes currently at
-//! the target address match the expected pattern. In the case of a mismatch,
-//! the patch is not applied and the mismatch is logged.
+//! Before writing, every patch primitive checks that the bytes currently at the target address match the expected pattern.
+//! In the case of a mismatch, the patch is not applied and the mismatch is logged.
 
 use crate::protect::with_writable;
 use std::fmt::Write as _;
@@ -37,7 +36,7 @@ impl Patch {
     }
 
     /// # Safety
-    /// `self.addr` must be a writable code address.
+    /// `self.addr` must be a valid, committed, readable code address with protection that `VirtualProtect` can modify.
     pub unsafe fn apply(&self) {
         unsafe {
             if !pre_check(self.addr, self.expected, self.name) {
@@ -49,7 +48,7 @@ impl Patch {
     }
 
     /// # Safety
-    /// Each patch's `addr` must be a writable code address.
+    /// Each patch's `addr` must satisfy the safety contract for `apply`.
     pub unsafe fn apply_all(patches: &[Self]) {
         for p in patches {
             unsafe { p.apply() };
@@ -57,12 +56,12 @@ impl Patch {
     }
 }
 
-/// Writes a 5-byte relative `e9 disp32` jmp at `target` to `hook`. `expected` is the full
-/// displaced-instruction byte sequence (at least 5 bytes). Verifies every byte of `expected`
-/// matches the current site before the write proceeds. Bytes past offset 4 are NOP-padded.
+/// Writes a 5-byte relative `e9 disp32` jmp at `target` to `hook`. `expected` is the full displaced-instruction byte sequence
+/// (at least 5 bytes). Verifies every byte of `expected` matches the current site before the write proceeds.
+/// Bytes past offset 4 are NOP-padded.
 ///
 /// # Safety
-/// `target` must be a writable code address holding `expected`.
+/// `target` must be a valid, committed, readable code address holding `expected`, with protection that `VirtualProtect` can modify.
 pub unsafe fn patch_jmp<const N: usize>(
     target: usize,
     expected: &[u8; N],
@@ -72,15 +71,14 @@ pub unsafe fn patch_jmp<const N: usize>(
     unsafe { write_relative_branch::<N>(target, expected, hook, 0xe9, name) };
 }
 
-/// Rewrites a direct-call or indirect-call site so it targets `hook` instead of the original
-/// callee. `expected` is the full displaced-instruction byte sequence: 5 bytes for an
-/// `E8 disp32` direct call, 6 bytes for a `FF 15 disp32` indirect call. Bytes past offset 4
-/// are NOP-padded so the call's return address (`target + 5`) lands on a NOP that
-/// falls through to the original next instruction at `target + N`. The wrapper at `hook`
-/// is responsible for calling the original callee if forwarding is desired.
+/// Rewrites a direct-call or indirect-call site so it targets `hook` instead of the original callee.
+/// `expected` is the full displaced-instruction byte sequence: 5 bytes for an `E8 disp32` direct call,
+/// 6 bytes for a `FF 15 disp32` indirect call. Bytes past offset 4 are NOP-padded so the call's return address (`target + 5`)
+/// lands on a NOP that falls through to the original next instruction at `target + N`.
+/// The wrapper at `hook` is responsible for calling the original callee if forwarding is desired.
 ///
 /// # Safety
-/// `target` must be a writable code address holding `expected`.
+/// `target` must be a valid, committed, readable code address holding `expected`, with protection that `VirtualProtect` can modify.
 pub(crate) unsafe fn patch_call<const N: usize>(
     target: usize,
     expected: &[u8; N],
@@ -102,9 +100,6 @@ unsafe fn write_relative_branch<const N: usize>(
     #[allow(clippy::cast_possible_truncation)]
     let (target_u32, hook_u32) = (target as u32, hook as u32);
 
-    // The displacement is relative to `target + 5`, the byte after the 5-byte `e8/e9 disp32`.
-    // Bytes at offsets 5..N are NOP-padded so a returning CALL lands on a NOP
-    // that falls through to the original next instruction.
     let disp = hook_u32.wrapping_sub(target_u32.wrapping_add(5));
     let mut bytes = [0x90u8; MAX_PATCH_LEN];
     bytes[0] = opcode;

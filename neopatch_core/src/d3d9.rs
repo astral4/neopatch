@@ -1,25 +1,19 @@
 //! Hooks for `IDirect3D9Ex` and `IDirect3DDevice9Ex`.
 //!
-//! We IAT-hook `Direct3DCreate9` and forward to `Direct3DCreate9Ex`.
-//! The Ex object is binary-compatible with `IDirect3D9` for its first 17 vtable slots,
-//! so the game can keep using it as plain `IDirect3D9` while we get the Ex methods.
+//! We IAT-hook `Direct3DCreate9` and forward to `Direct3DCreate9Ex`. The Ex object is binary-compatible with `IDirect3D9`
+//! for its first 17 vtable slots, so the game can keep using it as plain `IDirect3D9` while we get the Ex methods.
 //!
-//! The Ex device's flip-model present path honors `D3DPRESENT_INTERVAL_IMMEDIATE` even in
-//! fullscreen exclusive, which makes our pacer the sole timing source on every display mode.
-//! The legacy D3D9 path silently re-enables driver vsync in fullscreen exclusive.
-//! (Aside: this is why vpatch only works in windowed mode!)
+//! We force `D3DPRESENT_INTERVAL_IMMEDIATE` in both windowed and fullscreen exclusive,
+//! so `Present` never blocks on vblank and our pacer is the sole timing source, assuming no driver override.
 //!
-//! `D3DPOOL_MANAGED` is forced to `D3DPOOL_DEFAULT` + `D3DUSAGE_DYNAMIC` on every
-//! `CreateTexture` and `CreateVertexBuffer` call because D3D9Ex deprecates
-//! the managed pool and silently translates it on a slow path.
+//! `D3DPOOL_MANAGED` is forced to `D3DPOOL_DEFAULT` + `D3DUSAGE_DYNAMIC` on every `CreateTexture` and `CreateVertexBuffer` call
+//! because D3D9Ex removes managed pools and otherwise rejects calls with `D3DERR_INVALIDCALL`.
 //!
-//! `D3DCREATE_MULTITHREADED` is OR'd into the device behavior flags
-//! since the games use D3D9 from worker threads without asking for a thread-safe device.
+//! `D3DCREATE_MULTITHREADED` is OR'd into the device behavior flags since the games use D3D9 from worker threads
+//! without asking for a thread-safe device.
 //!
-//! Instead of per-instance vtable cloning, we do in-place slot patching against
-//! `d3d9.dll`'s `.rdata`. (Some drivers depend on the instance's vtable pointer
-//! being equal to the canonical one.) See `vtable.rs` for the protect/write/restore
-//! mechanics, as well as how we handle idempotency and chain-through.
+//! Instead of per-instance vtable cloning, we do in-place slot patching against `d3d9.dll`'s `.rdata`.
+//! Per-instance clones break because `d3d9.dll` dispatches through private vtable slots beyond the public COM footprint.
 
 use crate::config::{CONFIG, RefreshRateMode};
 use crate::log::log_at;
@@ -72,8 +66,7 @@ const D3DERR_DEVICEREMOVED: HRESULT = HRESULT(0x8876_0870_u32.cast_signed());
 const D3DERR_DEVICEHUNG: HRESULT = HRESULT(0x8876_0874_u32.cast_signed());
 const D3DERR_OUTOFVIDEOMEMORY: HRESULT = HRESULT(0x8876_017C_u32.cast_signed());
 
-/// Replay-speed state observed by game-specific crates, queried each `Present`
-/// to decide whether to switch the pacer policy.
+/// Replay-speed state observed by game-specific crates, queried each `Present` to decide whether to switch the pacer policy.
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReplayMode {
@@ -123,7 +116,7 @@ static LAST_PRESENT: MainCell<PresentState> = MainCell::new(PresentState {
 /// Needed to re-derive the `D3DDISPLAYMODEEX` arg at `ResetEx` time.
 #[derive(Clone, Copy)]
 struct ResetCtx {
-    // A raw borrow of the object held by the game; valid for the device's lifetime
+    // A raw borrow of the object held by the game. This is valid for the device's lifetime
     // by D3D9's contract since the device implicitly refs its parent.
     d3d9: *mut c_void,
     adapter: u32,
@@ -131,9 +124,8 @@ struct ResetCtx {
 
 static RESET_CTX: MainCell<Option<ResetCtx>> = MainCell::new(None);
 
-// At most one `IDirect3D9` and one device are alive at a time in the game, so each slot is
-// a single global. Read-only slots are populated via `capture_slot` and never patched.
-// The trampolines exist so call sites don't have to manually transmute.
+// At most one `IDirect3D9` and one device are alive at a time in the game, so each slot is a single global. Read-only slots
+// are populated via `capture_slot` and never patched. The trampolines exist so call sites don't have to manually transmute.
 vtable_slot! {
     REAL_CREATE_DEVICE_EX / call_real_create_device_ex :
         as fn(
@@ -264,10 +256,9 @@ iat_hook! {
         as fn(sdk_version: u32) -> *mut c_void;
 }
 
-/// IAT-hook `Direct3DCreate9` against `host`'s import table, forwarding to `Direct3DCreate9Ex`.
-/// For defense against tools that IAT-hook the same import after us, game-specific crates
-/// should additionally call [`install_call_site_rewrite`] for each known live call site.
-/// Rewritten sites bypass the IAT entirely.
+/// IAT-hooks `Direct3DCreate9` against `host`'s import table, forwarding to `Direct3DCreate9Ex`.
+/// For defense against tools that IAT-hook the same import after us, game-specific crates should additionally call
+/// [`install_call_site_rewrite`] for each known live call site. Rewritten sites bypass the IAT entirely.
 ///
 /// # Safety
 /// `host` must be a loaded module handle.
@@ -278,14 +269,14 @@ pub unsafe fn install(host: HMODULE) {
 }
 
 /// Rewrites a `Direct3DCreate9` call site to a 5-byte direct call to our hook.
-/// Accepts both 5-byte `E8 disp32` direct-call sites (TH10/TH11/TH12, where the original
-/// call goes through a thunk) and 6-byte `FF 15 disp32` indirect-call sites (TH13/TH15,
-/// where the original call dispatches through the IAT). The replacement is always a 5-byte
-/// `E8 disp32`; the 6-byte variant gets a trailing NOP. This bypasses any downstream IAT
-/// hook (e.g. thcrap) that would otherwise intercept `Direct3DCreate9` from us.
+/// Accepts both 5-byte `E8 disp32` direct-call sites (TH10–TH12 + TH20, where the original call goes through a thunk)
+/// and 6-byte `FF 15 disp32` indirect-call sites (TH13-TH18, where the original call dispatches through the IAT).
+/// The replacement is a 5-byte `E8 disp32`; the 6-byte variant gets a trailing NOP.
+/// This bypasses any downstream IAT hook (e.g. thcrap) that would otherwise intercept `Direct3DCreate9` from us.
 ///
 /// # Safety
-/// `addr` must be a writable code address holding a call whose bytes equal `expected`.
+/// `addr` must be a valid, committed, readable code address holding a call whose bytes equal `expected`,
+/// with protection that `VirtualProtect` can modify.
 pub unsafe fn install_call_site_rewrite<const N: usize>(addr: usize, expected: &[u8; N]) {
     unsafe {
         patch_call(
@@ -300,8 +291,7 @@ pub unsafe fn install_call_site_rewrite<const N: usize>(addr: usize, expected: &
 unsafe extern "system" fn hook_direct3dcreate9(sdk_version: u32) -> *mut c_void {
     unsafe {
         // The Ex object's first 17 vtable slots are the `IDirect3D9` vtable,
-        // so the game can keep using the returned pointer as plain `IDirect3D9`
-        // while we get the Ex methods.
+        // so the game can keep using the returned pointer as plain `IDirect3D9` while we get the Ex methods.
         let ex = match Direct3DCreate9Ex(sdk_version) {
             Ok(ex) => ex,
             Err(e) => {
@@ -397,8 +387,7 @@ impl PresentParams {
         )
     }
 
-    /// Raw pointer to the fullscreen display mode for the Ex calls.
-    /// This is populated for exclusive fullscreen and null for windowed.
+    /// Raw pointer to the fullscreen display mode for the Ex calls. This is populated for exclusive fullscreen and null for windowed.
     fn display_mode_ptr(&mut self) -> *mut D3DDISPLAYMODEEX {
         self.display_mode
             .as_mut()
@@ -439,16 +428,10 @@ unsafe fn prep_present_params(
     }
 }
 
-// On D3D9Ex with `SWAPEFFECT_DISCARD`, `D3DPRESENTFLAG_LOCKABLE_BACKBUFFER`
-// breaks flip-model presentation on native NVIDIA: window opens; black screen; exit.
-// DXVK doesn't trip on it because Vulkan has no equivalent concept.
-//
-// In fullscreen, `A8R8G8B8` for `BackBufferFormat` is substituted with `X8R8G8B8`.
-// `A8R8G8B8` isn't a valid adapter format, so `CreateDeviceEx` would fail.
 fn rewrite_present_params(pp: &mut D3DPRESENT_PARAMETERS) {
-    // `cast_unsigned` preserves the bit pattern.
     pp.PresentationInterval = D3DPRESENT_INTERVAL_IMMEDIATE.cast_unsigned();
     pp.Flags &= !D3DPRESENTFLAG_LOCKABLE_BACKBUFFER;
+    // `CreateDeviceEx` rejects `A8R8G8B8` in fullscreen because it isn't scanout-compatible, so we substitute with `X8R8G8B8`.
     if pp.Windowed.0 == 0 && pp.BackBufferFormat == D3DFMT_A8R8G8B8 {
         let original_format = pp.BackBufferFormat;
         pp.BackBufferFormat = D3DFMT_X8R8G8B8;
@@ -462,8 +445,8 @@ fn rewrite_present_params(pp: &mut D3DPRESENT_PARAMETERS) {
     }
 }
 
-/// Override the game's hard-coded 60 Hz in `pp.FullScreen_RefreshRateInHz`
-/// with the result of `pick_refresh_rate`, validated against the back-buffer format/dimensions.
+/// Overrides the game's hard-coded 60 Hz in `pp.FullScreen_RefreshRateInHz` with the result of [`pick_refresh_rate`],
+/// validated against the back-buffer format/dimensions.
 unsafe fn apply_refresh_override(
     pp: &mut D3DPRESENT_PARAMETERS,
     d3d9: *mut c_void,
@@ -484,9 +467,9 @@ unsafe fn apply_refresh_override(
     };
 }
 
-/// Returns the distinct refresh rates advertised by the adapter at exactly `width` x `height` in `format`,
+/// Returns the distinct refresh rates advertised by the adapter at exactly `width` × `height` in `format`,
 /// plus the count of valid entries. The count is 0 on any failure.
-/// At most `MAX_ENUM_SCAN` modes are scanned and at most `MAX_ENUM_RATES` distinct rates are kept.
+/// At most [`MAX_ENUM_SCAN`] modes are scanned and at most [`MAX_ENUM_RATES`] distinct rates are kept.
 unsafe fn enumerate_supported_rates(
     this: *mut c_void,
     adapter: u32,
@@ -647,7 +630,7 @@ fn native_rate(supported: &[u32], desktop_rate: u32) -> u32 {
         .unwrap_or(desktop_rate)
 }
 
-/// 0 and 1 are magic values meaning "hardware default rate," not real refresh rates.
+// 0 and 1 are magic values meaning "hardware default rate," not real refresh rates.
 fn is_real_refresh_rate(rate: u32) -> bool {
     rate > 1
 }
@@ -691,9 +674,9 @@ fn win32_current_refresh_rate(device: Option<&[u16; 32]>) -> Option<u32> {
     is_real_refresh_rate(hz).then_some(hz)
 }
 
-/// Populates a `D3DDISPLAYMODEEX` from the present-params back buffer
-/// plus an explicit refresh rate. The Ex `CreateDevice` and `Reset` signatures
-/// require a fully-filled struct for exclusive fullscreen and ignore it for windowed.
+/// Populates a `D3DDISPLAYMODEEX` from the present-params back buffer and an explicit refresh rate.
+/// The Ex `CreateDevice` and `Reset` signatures require a fully-filled struct for exclusive fullscreen and a null pointer for windowed
+/// (a non-null struct there is `D3DERR_INVALIDCALL`), so callers should only use this when `Windowed == FALSE` holds.
 fn build_display_mode_ex(pp: &D3DPRESENT_PARAMETERS, refresh: u32) -> D3DDISPLAYMODEEX {
     D3DDISPLAYMODEEX {
         Size: D3DDISPLAYMODEEX_SIZE,
@@ -705,10 +688,8 @@ fn build_display_mode_ex(pp: &D3DPRESENT_PARAMETERS, refresh: u32) -> D3DDISPLAY
     }
 }
 
-/// D3D9Ex rejects `D3DPOOL_MANAGED` with `INVALIDCALL`, so we substitute
-/// the closest valid pair on every `Create*Texture` and `CreateVertexBuffer` path
-/// where the game or d3dx9 hands us `MANAGED`. Returns whether a translation happened.
-/// OILP also does this substitution.
+/// D3D9Ex rejects `D3DPOOL_MANAGED` with `INVALIDCALL`, so we substitute the closest valid pair on every `Create*Texture`
+/// and `CreateVertexBuffer` path where the game or D3DX9 hands us `MANAGED`. Returns whether a translation happened.
 pub(crate) fn translate_managed_pool(pool: &mut D3DPOOL, usage: &mut u32) -> bool {
     if *pool == D3DPOOL_MANAGED {
         *pool = D3DPOOL_DEFAULT;
@@ -719,8 +700,7 @@ pub(crate) fn translate_managed_pool(pool: &mut D3DPOOL, usage: &mut u32) -> boo
     }
 }
 
-/// Reads the object pointer from a `Create*`-style `*mut *mut c_void` out param,
-/// returning null when the out param itself is null.
+/// Reads the object pointer from a `Create*`-style `*mut *mut c_void` out param, returning null when the out param itself is null.
 pub(crate) unsafe fn out_ptr(pp: *mut *mut c_void) -> *const c_void {
     if pp.is_null() {
         null()
@@ -860,7 +840,6 @@ unsafe extern "system" fn hook_create_device(
         {
             // Apparently D3D9Ex breaks the window style on `CreateDeviceEx`.
             // OILP's `CreateDevice_hook` applies the same `SWP_SHOWWINDOW` fix.
-            // Without it, the game's main pump doesn't run properly.
             SetWindowPos(
                 focus_window.0,
                 null_mut(),
@@ -907,9 +886,8 @@ unsafe fn sample_adapter_display_mode(d3d9: *mut c_void, adapter: u32) -> Option
     }
 }
 
-/// Captures the adapter mode before a `CreateDevice`/`Reset` call,
-/// but only when exclusive fullscreen is requested (`pp.Windowed == FALSE`).
-/// Returns `None` if no sample is needed or the read failed.
+/// Captures the adapter mode before a `CreateDevice` or `Reset` call, but only when exclusive fullscreen is requested
+/// (i.e. `pp.Windowed == FALSE`). Returns `None` if no sample is needed or the read failed.
 unsafe fn sample_for_degradation_check(
     d3d9: *mut c_void,
     adapter: u32,
@@ -922,13 +900,12 @@ unsafe fn sample_for_degradation_check(
     unsafe { sample_adapter_display_mode(d3d9, adapter) }
 }
 
-/// Heuristic warning for situations where exclusive-fullscreen is silently degraded to
-/// windowed presentation. It's possible for an adapter to not actually move to the requested
-/// mode even if `CreateDeviceEx` returns `S_OK`. We check by comparing the desktop mode
-/// before and after device creation.
+/// Heuristic warning for situations where exclusive fullscreen is silently degraded to windowed presentation.
+/// It's possible for an adapter to not actually move to the requested mode even if `CreateDeviceEx` returns `S_OK`,
+/// so we compare the desktop mode before and after device creation.
 ///
 /// The check is skipped when the requested presentation parameters matches the desktop mode:
-/// no mode switch was needed, and exclusive vs. windowed are indistinguishable in this case.
+/// no mode switch was needed, and exclusive fullscreen vs. windowed are indistinguishable in this case.
 unsafe fn warn_if_exclusive_degraded(
     d3d9: *mut c_void,
     adapter: u32,
@@ -969,10 +946,9 @@ unsafe fn warn_if_exclusive_degraded(
 
 /// Substitutes `X8R8G8B8` for `A8R8G8B8` when a game passes the latter as `AdapterFormat`.
 ///
-/// `A8R8G8B8` isn't a displayable format. Vanilla D3D9 silently accepts it and returns
-/// `D3D_OK`; D3D9Ex is strict and returns `D3DERR_NOTAVAILABLE`. Games written against
-/// the lenient behavior can fall down a reduced-color-mode path that fails subsequent
-/// resource creation. The substitution gives the call its intended meaning.
+/// `A8R8G8B8` isn't a displayable format. Vanilla D3D9 silently accepts it and returns `D3D_OK`,
+/// but D3D9Ex is strict and returns `D3DERR_NOTAVAILABLE`. Games written against the lenient behavior can fall down
+/// a reduced-color-mode path that fails subsequent resource creation. The substitution gives the call its intended meaning.
 unsafe extern "system" fn hook_check_device_format(
     this: *mut c_void,
     adapter: u32,
@@ -1084,10 +1060,9 @@ unsafe fn install_device_hooks(dev: NonNull<c_void>) {
     }
 }
 
-/// `SetMaximumFrameLatency(1)` caps the GPU input queue at 1 (default 3) so frames spend
-/// less time enqueued before display, shaving up to two frames of end-to-end latency.
-/// `SetGPUThreadPriority(7)` reduces CPU-scheduler jitter on a contended D3D9Ex worker thread
-/// marshalling `Present`.
+/// `SetMaximumFrameLatency(1)` caps the GPU input queue at 1 (default 3) so frames spend less time enqueued before display,
+/// shaving up to two frames of end-to-end latency. `SetGPUThreadPriority(7)` raises the device's WDDM GPU-scheduling priority
+/// so its command submissions are preferred over other processes' GPU work.
 unsafe fn apply_device_ex_tunables(dev: NonNull<c_void>) {
     unsafe {
         let latency_hr = call_real_set_max_frame_latency(dev.as_ptr(), 1);
@@ -1105,9 +1080,8 @@ unsafe fn apply_device_ex_tunables(dev: NonNull<c_void>) {
     }
 }
 
-/// Re-applies the device tunables, since D3D9Ex preserves them across `Reset` but a
-/// translation layer might not. Also refreshes `ACTIVE_DEVICE`.
-/// Fires after both successful `CreateDeviceEx` and successful `Reset(Ex)`.
+/// Re-applies the device tunables, since D3D9Ex preserves them across `Reset` but a translation layer might not.
+/// Also refreshes `ACTIVE_DEVICE`. Fires after successful `CreateDeviceEx` and successful `Reset` / `ResetEx`.
 unsafe fn post_device_alive(tok: &MainToken, dev: NonNull<c_void>) {
     unsafe { apply_device_ex_tunables(dev) };
     on_post_create_device(tok, dev.as_ptr());
@@ -1125,8 +1099,6 @@ unsafe extern "system" fn hook_present(
         let pacer = PACER.get().unwrap();
         let observed_mode = replay_mode(&tok);
 
-        // Load-then-conditional-store gates the heavier `apply_policy` call
-        // behind an actual mode change.
         if MODE.get(&tok) != observed_mode {
             MODE.set(&tok, observed_mode);
             let cfg = CONFIG.get().unwrap();
@@ -1153,9 +1125,8 @@ unsafe extern "system" fn hook_present(
 
         on_pre_present(&tok);
 
-        // We increment before `Present` so `PRESENT_COUNT` names the in-flight frame.
-        // This way, a crash inside `Present` leaves the count at the attempted frame,
-        // not the last completed.
+        // We increment before `Present` so `PRESENT_COUNT` uses the in-flight frame.
+        // This way, a crash inside `Present` leaves the count at the attempted frame, not the last completed.
         PRESENT_COUNT.fetch_add(1, Ordering::Relaxed);
 
         let hr = call_real_present(this, src_rect, dst_rect, dest_window_override, dirty_region);
@@ -1217,10 +1188,6 @@ unsafe fn reset_once(
     }
 }
 
-// `post_device_alive` reapplies device tunables on success. The fix involving `SetWindowPos`
-// with `SWP_SHOWWINDOW` style stays in `hook_create_device` because focus-window reassociation
-// is specific to `CreateDeviceEx`. `pick_refresh_rate` is reapplied so runtime refresh-rate
-// toggles take effect at the next `Reset`.
 unsafe extern "system" fn hook_reset(this: *mut c_void, pp: *mut D3DPRESENT_PARAMETERS) -> HRESULT {
     let tok = MainToken::new();
     on_pre_reset(&tok);
@@ -1229,6 +1196,7 @@ unsafe extern "system" fn hook_reset(this: *mut c_void, pp: *mut D3DPRESENT_PARA
             .get(&tok)
             .expect("hook_reset fired before hook_create_device populated RESET_CTX");
         let desktop_before = sample_for_degradation_check(ctx.d3d9, ctx.adapter, pp);
+        // We reapply refresh rate selection so runtime rate toggles take effect at the next `Reset`.
         let mut prep = prep_present_params(pp, ctx.d3d9, ctx.adapter, desktop_before);
         let use_reset_ex = REAL_RESET_EX.try_get().is_some();
 
@@ -1243,8 +1211,7 @@ unsafe extern "system" fn hook_reset(this: *mut c_void, pp: *mut D3DPRESENT_PARA
         );
 
         if hr.is_ok() {
-            // SAFETY: `this` was already dereferenced by
-            // `call_real_reset`/`call_real_reset_ex` above.
+            // SAFETY: `this` was already dereferenced by `call_real_reset` / `call_real_reset_ex` above.
             let dev = NonNull::new_unchecked(this);
             post_device_alive(&tok, dev);
             if let Some(before) = desktop_before {
@@ -1482,11 +1449,8 @@ mod tests {
 
     #[test]
     fn rewrite_present_params_preserves_other_fields() {
-        // Locks in the current contract of only touching interval,
-        // lockable flag, and back buffer format.
-        //
-        // TODO: The FLIPEX-direct backlog item will modify `SwapEffect`
-        // and `BackBufferCount` here, so this test should be updated.
+        // Locks in the current contract of only touching interval, lockable flag, and back buffer format.
+        // TODO: The FLIPEX-direct backlog item will modify `SwapEffect` and `BackBufferCount` here, so this test should be updated.
         let baseline = D3DPRESENT_PARAMETERS {
             BackBufferWidth: 1280,
             BackBufferHeight: 960,
@@ -1517,18 +1481,14 @@ mod tests {
 
     #[test]
     fn rewrite_present_params_substitutes_only_fullscreen_a8r8g8b8() {
-        // (BackBufferFormat in, Windowed, expected BackBufferFormat out).
         let cases: &[(D3DFORMAT, bool, D3DFORMAT)] = &[
-            // A8R8G8B8 is a valid windowed back buffer (th15's loading screen relies on this)
-            // but an invalid fullscreen adapter format.
+            // A8R8G8B8 is a valid windowed back buffer but an invalid fullscreen adapter format.
             (D3DFMT_A8R8G8B8, true, D3DFMT_A8R8G8B8),
             (D3DFMT_A8R8G8B8, false, D3DFMT_X8R8G8B8),
-            // X8R8G8B8 is always passed through.
+            // X8R8G8B8 is passed through.
             (D3DFMT_X8R8G8B8, true, D3DFMT_X8R8G8B8),
             (D3DFMT_X8R8G8B8, false, D3DFMT_X8R8G8B8),
-            // 16-bit formats pass through unchanged: upgrading them is
-            // opinion, not correctness, and structurally mirrors the windowed
-            // A8R8G8B8 override that broke th15.
+            // 16-bit formats are passed through.
             (D3DFMT_R5G6B5, true, D3DFMT_R5G6B5),
             (D3DFMT_R5G6B5, false, D3DFMT_R5G6B5),
             (D3DFMT_X1R5G5B5, true, D3DFMT_X1R5G5B5),
@@ -1596,8 +1556,7 @@ mod tests {
             BackBufferWidth: 1280,
             BackBufferHeight: 960,
             BackBufferFormat: D3DFMT_X8R8G8B8,
-            // This is deliberately wrong on `pp`.
-            // `build_display_mode_ex` must use the explicit `refresh` arg, not this field.
+            // This is deliberately wrong on `pp`. `build_display_mode_ex` must use the explicit `refresh` arg, not this field.
             FullScreen_RefreshRateInHz: 999,
             ..Default::default()
         };

@@ -1,8 +1,7 @@
 //! Logic for pinning the scheduler timer resolution at 1 ms.
 //!
-//! The game's per-frame `timeBeginPeriod(1)` / `timeEndPeriod(1)` round-trip
-//! makes the resolution flap each frame, so we bump it once and stub the game's calls.
-//! OILP also does this.
+//! The game's per-frame `timeBeginPeriod(1)` / `timeEndPeriod(1)` round-trip makes the resolution flap each frame,
+//! so we bump it once and stub the game's calls.
 
 use crate::iat_hook;
 use windows_sys::Win32::Foundation::HMODULE;
@@ -25,8 +24,8 @@ extern "system" fn stub_time_end_period(_period: u32) -> u32 {
     MMSYSERR_NOERROR
 }
 
-/// Pins the multimedia timer resolution at 1 ms and stubs out the host's own
-/// `timeBeginPeriod` / `timeEndPeriod` calls so they can't change it.
+/// Pins the multimedia timer resolution at 1 ms and stubs out
+/// the host's own `timeBeginPeriod` / `timeEndPeriod` calls so they can't change it.
 ///
 /// # Safety
 /// `host` must be a loaded module handle.

@@ -40,9 +40,7 @@ iat_hook! {
 }
 
 /// IAT-hooks the process-lifetime imports we wrap for diagnostics
-/// (`ExitProcess`, `TerminateProcess`, `MessageBox{A,W}`, `CreateThread`)
-/// against `host`'s import table.
-///
+/// (`ExitProcess`, `TerminateProcess`, `MessageBox{A,W}`, `CreateThread`) against `host`'s import table.
 /// `RaiseException` is deliberately not hooked since those are already seen by the vectored handler in `crash.rs`.
 ///
 /// # Safety

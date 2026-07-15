@@ -46,7 +46,7 @@ All notable changes to neopatch will be documented in this file.
 ### Changed
 
 - D3D9 hooks now defend against downstream IAT hijacks of `Direct3DCreate9` for Touhou 10, 11, and 12. Previously, only Touhou 13 and 15 had this protection.
-- D3D9 device tunables (frame latency cap, GPU thread priority) are now reapplied after a successful `Reset`/`ResetEx` invocation. Previously, they were assumed to persist across swap chain reinitialization, which holds for D3D9Ex but isn't guaranteed across translation layers.
+- D3D9 device tunables (frame latency cap, GPU thread priority) are now reapplied after a successful `Reset` / `ResetEx` invocation. Previously, they were assumed to persist across swap chain reinitialization, which holds for D3D9Ex but isn't guaranteed across translation layers.
 
 ### Fixed
 

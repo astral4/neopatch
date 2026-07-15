@@ -18,11 +18,11 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WS_MINIMIZEBOX, WS_OVERLAPPED, WS_POPUP, WS_SYSMENU, WS_VISIBLE,
 };
 
-/// What `install` does with the game's render window. `Restyle` rewrites
-/// size/position/style/title/Z-order from `[window]`. `DeferToGame` is for th18 specifically
-/// and leaves geometry and style to the game; only the title rewrite and `always_on_top`
-/// still apply. th18's borderless path resets `GWL_STYLE` and reorders the window with `HWND_TOP`,
-/// but neither removes `WS_EX_TOPMOST`, so `always_on_top` is preserved
+static APPLIED: AtomicBool = AtomicBool::new(false);
+static STATE: OnceLock<State> = OnceLock::new();
+
+/// What `install` does with the game's render window. `Restyle` rewrites size/position/style/title/Z-order from `[window]`.
+/// `DeferToGame` rewrites title/Z-order but leaves geometry and style to the game.
 #[derive(Clone, Copy)]
 pub enum WindowPolicy {
     Restyle {
@@ -49,7 +49,6 @@ iat_hook! {
             lp_param: *mut c_void,
         ) -> HWND;
 }
-
 iat_hook! {
     REAL_CREATEWINDOWEXW / real_create_window_ex_w : "CreateWindowExW"
         as fn(
@@ -67,9 +66,6 @@ iat_hook! {
             lp_param: *mut c_void,
         ) -> HWND;
 }
-
-static APPLIED: AtomicBool = AtomicBool::new(false);
-static STATE: OnceLock<State> = OnceLock::new();
 
 /// Installation-time resolution of `WindowCfg`.
 struct ResolvedWindowCfg {
@@ -107,16 +103,15 @@ enum State {
     },
 }
 
-/// Picks the IAT slot `install` hooks. th11-th18 use Ansi; th20 uses Wide.
+/// Picks the IAT slot [`install`] hooks. th10-th18 use Ansi; th20 uses Wide.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WindowApi {
     Ansi,
     Wide,
 }
 
-/// Caches the resolved `WindowCfg` and IAT-hooks `CreateWindowExA`/`CreateWindowExW`
-/// based on `api`. The hook acts on the game's main render window (class `"BASE"`)
-/// based on `WindowPolicy`.
+/// Caches the resolved [`WindowCfg`] and IAT-hooks `CreateWindowExA` / `CreateWindowExW` based on `api`.
+/// The hook acts on the game's main render window (class `"BASE"`) based on [`WindowPolicy`].
 ///
 /// # Safety
 /// `host` must be a loaded module handle.
@@ -161,9 +156,8 @@ unsafe extern "system" fn hook_create_window_ex_a(
     lp_param: *mut c_void,
 ) -> HWND {
     unsafe {
-        // IME and sound-thread helpers also use this import, but we only want the game's
-        // render window. We match by class name "BASE" to catch both fullscreen (`WS_POPUP`)
-        // and windowed (no `WS_POPUP`) branches.
+        // IME and sound-thread helpers also use this import, but we only want the game's render window.
+        // We match by class name "BASE" to catch both fullscreen (`WS_POPUP`) and windowed (no `WS_POPUP`) branches.
         let is_main = !APPLIED.load(Ordering::Acquire)
             && h_wnd_parent.is_null()
             && Untrusted::from_raw(lp_class_name).matches_nul_terminated(b"BASE");
@@ -234,27 +228,8 @@ unsafe extern "system" fn hook_create_window_ex_w(
     }
 }
 
-/// `apply` without geometry/style modifications.
-unsafe fn apply_deferred(hwnd: HWND, always_on_top: bool, title: &[u16]) {
-    unsafe {
-        SetWindowTextW(hwnd, title.as_ptr());
-        if always_on_top {
-            SetWindowPos(
-                hwnd,
-                HWND_TOPMOST,
-                0,
-                0,
-                0,
-                0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER,
-            );
-        }
-    }
-}
-
-/// Shared geometry for the main render window, used by both the A and W hooks.
-/// Returns the (width, height) to pass to `CreateWindowEx*`: the framebuffer size
-/// under `State::Restyle` adjusted for the frame, else the game's requested size.
+/// Geometry for the main render window. Returns the `(width, height)` to pass to `CreateWindowEx*`.
+/// This is the framebuffer size under [`State::Restyle`] adjusted for the frame, else the game's requested size.
 fn prep_main_window(
     is_main: bool,
     dw_ex_style: u32,
@@ -297,9 +272,8 @@ fn prep_main_window(
     (use_w, use_h)
 }
 
-/// Shared post-creation handling, run once on the first successful creation
-/// of the main window. `State::Restyle` rewrites geometry/style and title;
-/// `State::DeferToGame` applies only the title and `always_on_top`.
+/// Post-creation handling, run once on the first successful creation of the main window.
+/// [`State::Restyle`] rewrites geometry/style/title. [`State::DeferToGame`] applies only the title and `always_on_top`.
 fn finish_main_window(hwnd: HWND, is_main: bool, build_title: impl FnOnce() -> Vec<u16>) {
     if is_main
         && !hwnd.is_null()
@@ -317,14 +291,31 @@ fn finish_main_window(hwnd: HWND, is_main: bool, build_title: impl FnOnce() -> V
     }
 }
 
-/// Reads the game's Shift-JIS title bytes, transcodes through `CP_SHIFT_JIS` to UTF-16,
-/// and appends a version identifier for this project.
+/// [`apply`] without geometry/style modifications.
+unsafe fn apply_deferred(hwnd: HWND, always_on_top: bool, title: &[u16]) {
+    unsafe {
+        SetWindowTextW(hwnd, title.as_ptr());
+        if always_on_top {
+            SetWindowPos(
+                hwnd,
+                HWND_TOPMOST,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER,
+            );
+        }
+    }
+}
+
+/// Reads the game's Shift-JIS title bytes, transcodes through `CP_SHIFT_JIS` to UTF-16, and appends a version identifier for this project.
 ///
-/// This is independent of locale because we use the literal Shift-JIS code page,
-/// not the system ANSI code page.
+/// This is independent of locale because we use the literal Shift-JIS code page, not the system ANSI code page.
 fn build_extended_title_from_sjis(original: Untrusted<u8>) -> Vec<u16> {
     const CP_SHIFT_JIS: u32 = 932;
     const BUF_LEN: usize = 512;
+
     let mut buf = [0u8; BUF_LEN];
     let sjis = original.safe_read_until(&mut buf, 0);
 
@@ -364,8 +355,7 @@ fn append_suffix(wide: &mut Vec<u16>) {
 
 fn apply(hwnd: HWND, cfg: &ResolvedWindowCfg, title: &[u16]) {
     unsafe {
-        // We do this before `SetWindowPos` so the `SWP_FRAMECHANGED`-driven
-        // first paint of the title bar gets the new UTF-16 title.
+        // We do this before `SetWindowPos` so the `SWP_FRAMECHANGED`-driven first paint of the title bar gets the new UTF-16 title.
         SetWindowTextW(hwnd, title.as_ptr());
 
         let style: WINDOW_STYLE = match cfg.frame {

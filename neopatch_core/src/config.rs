@@ -1,8 +1,7 @@
 //! Shared configuration schema and INI parsing helpers.
 //!
-//! `CoreConfig` represents the game-agnostic settings. Each per-game crate defines
-//! its own config struct that embeds `CoreConfig` plus game-specific fields
-//! (e.g. `Resolution`) and specifies its own parsing logic.
+//! [`CoreConfig`] represents the game-agnostic settings. Each per-game crate defines its own config struct
+//! for game-specific fields (e.g. `Resolution`) and parses it alongside `CoreConfig`.
 
 use std::fmt::{Display, Formatter, Result as FmtResult};
 use std::io::{Result as IoResult, Write};
@@ -16,8 +15,7 @@ const DEFAULT_REPLAY_SKIP_FPS: u32 = 240;
 const DEFAULT_REPLAY_SLOW_FPS: u32 = 30;
 const DEFAULT_SESSIONS_TO_KEEP: NonZero<u32> = NonZero::new(10).unwrap();
 
-/// Process-wide handle to the active core configuration.
-/// Set by the game crate at install time, before any hook that reads it.
+/// Process-wide handle to the active core configuration. Set by the game crate at install time, before any hook that reads it.
 pub static CONFIG: OnceLock<CoreConfig> = OnceLock::new();
 
 #[derive(Default)]
@@ -46,8 +44,7 @@ impl Default for DisplayCfg {
 }
 
 // Window dimensions and frame default to game-derived values supplied at install time
-// (matching framebuffer dimensions; `Borderless` in fullscreen, `Frameless` in windowed).
-// Set explicitly to override.
+// (matching framebuffer dimensions; `Borderless` in fullscreen, `Frameless` in windowed). Set explicitly to override.
 #[derive(Default)]
 pub struct WindowCfg {
     pub x: i32,
@@ -58,9 +55,8 @@ pub struct WindowCfg {
     pub always_on_top: bool,
 }
 
-// Game logic is frame-locked at one tick per `Present`, so higher rates
-// speed everything up. A field set to `0` disengages the pacer for that mode,
-// making `Present` run as fast as the CPU/GPU allows.
+// Game logic is frame-locked at one tick per `Present`, so higher rates speed everything up.
+// A field set to `0` disengages the pacer for that mode, making `Present` run as fast as the CPU/GPU allows.
 #[allow(clippy::struct_field_names)]
 pub struct FramerateCfg {
     pub game_fps: u32,
@@ -142,12 +138,10 @@ pub enum RefreshRateMode {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WindowFrame {
     /// `WS_OVERLAPPED | WS_SYSMENU | WS_VISIBLE | WS_CAPTION | WS_MINIMIZEBOX | WS_MAXIMIZEBOX`.
-    /// The "normal" desktop app appearance: title bar with system menu
-    /// and minimize/maximize/close buttons.
+    /// The "normal" desktop app appearance: title bar with system menu and minimize/maximize/close buttons.
     Framed,
     /// `WS_OVERLAPPED | WS_SYSMENU | WS_VISIBLE | WS_MINIMIZEBOX | WS_MAXIMIZEBOX`.
-    /// No caption or border, but the system menu remains fully functional
-    /// (Alt+Space for Move/Minimize/Maximize/Close).
+    /// No caption or border, but the system menu remains fully functional (Alt+Space for Move/Minimize/Maximize/Close).
     Frameless,
     /// `WS_POPUP | WS_VISIBLE`. Pure pixel rectangle; no frame and no system menu.
     Borderless,
@@ -206,8 +200,7 @@ impl Display for PriorityClass {
     }
 }
 
-// The `apply_*` functions below apply a key/value pair from a specific section to `cfg`.
-// Unknown keys are silently ignored.
+// The `apply_*` functions below apply a key/value pair from a specific section to `cfg`. Unknown keys are silently ignored.
 fn apply_display(cfg: &mut DisplayCfg, k: &str, v: &str) {
     match k.to_ascii_lowercase().as_str() {
         "mode" => {
@@ -282,8 +275,7 @@ fn apply_log(cfg: &mut LogCfg, k: &str, v: &str) {
             cfg.sessions_to_keep = parse_nonzero_u32(v).unwrap_or(DEFAULT_SESSIONS_TO_KEEP);
         }
         "log_dir" => {
-            // `v` is already outer-trimmed and unquoted.
-            // We preserve any inner whitespace a user intentionally quotes.
+            // `v` is already outer-trimmed and unquoted. We preserve any inner whitespace a user intentionally quotes.
             cfg.log_dir = if v.is_empty() {
                 None
             } else {
@@ -307,10 +299,9 @@ fn parse_level(v: &str) -> Option<LevelFilter> {
     }
 }
 
-/// Scans `text` (assuming INI format), invoking `f(section, key, value)`
-/// for each `key = value` line. Comments are stripped. Sections track the most recent
-/// `[name]` header (empty before the first), and values are unquoted.
-/// Unknown sections and malformed lines are silently skipped.
+/// Scans `text` (assuming INI format), invoking `f(section, key, value)` for each `key = value` line.
+/// Comments are stripped. Sections track the most recent `[name]` header (empty before the first), and values are unquoted.
+/// Malformed lines are silently skipped; `f` sees every section, and callers ignore the ones they don't recognize.
 ///
 /// Game-specific parsers compose with [`parse_core_only`] by walking `for_each_setting`
 /// for the game's own keys and calling `parse_core_only` separately for the core sections.
@@ -332,9 +323,8 @@ pub fn for_each_setting(text: &str, mut f: impl FnMut(&str, &str, &str)) {
     }
 }
 
-// This is quote-aware: instances of `;` and `#` inside a `"..."` or `'...'` value
-// are preserved, so a path like `log_dir = "C:\foo;bar"` parses intact.
-// Outside quotes, `;` and `#` mark the start of a comment.
+// This is quote-aware: instances of `;` and `#` inside a `"..."` or `'...'` value are preserved,
+// so a path like `log_dir = "C:\foo;bar"` parses intact. Outside quotes, `;` and `#` mark the start of a comment.
 #[must_use]
 fn strip_comment(line: &str) -> &str {
     let mut in_double = false;
@@ -350,8 +340,7 @@ fn strip_comment(line: &str) -> &str {
     line
 }
 
-/// Strips one matching `"..."` or `'...'` pair so quoted INI values
-/// like `mode = "fullscreen"` parse the same as unquoted ones.
+/// Strips one matching `"..."` or `'...'` pair so quoted INI values like `mode = "fullscreen"` parse the same as unquoted ones.
 #[must_use]
 fn unquote(v: &str) -> &str {
     let bytes = v.as_bytes();
@@ -430,8 +419,7 @@ fn parse_priority_class(v: &str) -> Option<PriorityClass> {
     }
 }
 
-// `0x` / `0o` / `0b` radix prefixes are recognized.
-// Bare numbers are interpreted as decimal.
+// `0x` / `0o` / `0b` radix prefixes are recognized. Bare numbers are interpreted as decimal.
 #[must_use]
 fn parse_bitmask(v: &str) -> Option<u32> {
     let bytes = v.as_bytes();
@@ -448,7 +436,8 @@ fn parse_bitmask(v: &str) -> Option<u32> {
     u32::from_str_radix(rest, radix).ok()
 }
 
-/// Strips an optional UTF-8 BOM.
+/// Strips an optional UTF-8 BOM and decodes as UTF-8, lossily: non-UTF-8 bytes
+/// (e.g. a path saved in Shift-JIS) become U+FFFD.
 #[must_use]
 pub fn decode_text(bytes: &[u8]) -> String {
     let body = bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(bytes);
@@ -456,9 +445,8 @@ pub fn decode_text(bytes: &[u8]) -> String {
 }
 
 /// Parses INI text into a `CoreConfig` using only the shared section dispatcher.
-/// Per-game crates that don't define their own config keys call this directly from
-/// `install_hooks`. Crates with their own sections (e.g. th15's `[display] resolution`)
-/// supply their own parse function.
+/// Per-game crates that don't define their own config keys call this directly from `install_hooks`.
+/// Crates with their own sections (e.g. th15's `[display] resolution`) supply their own parse function.
 #[must_use]
 pub fn parse_core_only(text: &str) -> CoreConfig {
     let mut core = CoreConfig::default();

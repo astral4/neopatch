@@ -1,13 +1,11 @@
 //! Typed handles for fixed game-memory addresses.
 //!
-//! `GameAddr<T>` pairs a constant address with an asserted layout. Each address
-//! is declared with `GameAddr::new(0x...)` where the address-to-layout pairing
-//! is verified against the disasm. Subsequent reads and writes through
-//! the typed handle are safe because of the asserted layout.
+//! [`GameAddr<T>`] pairs a constant address with an asserted layout `T`. Each address is declared with `GameAddr::new(0x...)`.
+//! The address-to-layout pairing should be verified against the disassembly.
+//! Subsequent reads and writes through the typed handle are safe because of the asserted layout.
 //!
-//! Pointer-derived addresses (e.g. `(*mgr).field` after dereferencing
-//! a game pointer we just read) aren't instances of `GameAddr`s
-//! since the address isn't fixed. Those sites keep using `read_volatile` directly.
+//! Pointer-derived addresses (e.g. `(*mgr).field` after dereferencing a game pointer we just read)
+//! aren't instances of `GameAddr<T>` since the address isn't fixed. Those sites keep using `read_volatile` directly.
 
 use std::marker::PhantomData;
 use std::ptr::{
@@ -22,9 +20,9 @@ pub struct GameAddr<T: Copy> {
 
 impl<T: Copy> GameAddr<T> {
     /// # Safety
-    /// `addr` must point to a value of layout `T` for the lifetime of the process
-    /// in the game-binary version the call site targets. The caller is responsible for
-    /// confirming this against the disasm at the declaration site.
+    /// `addr` must point to a value of layout `T` for the lifetime of the process in the game-binary version the call site targets.
+    /// `read` and `write` calls through the handle must not race with conflicting access from another thread;
+    /// the volatile ops are not atomic. The caller is responsible for verifying against the disassembly at the declaration site.
     #[must_use]
     pub const unsafe fn new(addr: usize) -> Self {
         Self {

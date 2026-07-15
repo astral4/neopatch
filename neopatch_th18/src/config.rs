@@ -43,7 +43,7 @@ impl Display for Th18DisplayMode {
     }
 }
 
-/// Back-buffer size for `Windowed`/`Fullscreen`. Ignored under `Borderless`.
+/// Back-buffer size for `Windowed` and `Fullscreen`. Ignored under `Borderless`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum Resolution {
     R640x480,

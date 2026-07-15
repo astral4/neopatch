@@ -1,6 +1,6 @@
 //! Per-game replay-state probe.
 //!
-//! Each game-specific crate declares a `ReplayStateLayout` with the values for that game.
+//! Each game-specific crate declares a [`ReplayStateLayout`] with the values for that game.
 
 use crate::d3d9::ReplayMode;
 use crate::pacer::{qpc, read_qpc_freq};
@@ -8,12 +8,11 @@ use crate::thread::{MainCell, MainToken};
 use std::ptr::{read_volatile, with_exposed_provenance};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_CONTROL};
 
-/// Layout of a game's replay-state globals.
-/// All addresses are absolute and must be 4-byte aligned.
+/// Layout of a game's replay-state globals. All addresses are absolute and must be 4-byte aligned.
 #[derive(Clone, Copy)]
 pub struct ReplayStateLayout {
-    /// Address of the `CReplayManager**`. This is a pointer slot that holds
-    /// the address of the manager instance, or null outside the replay menu.
+    /// Address of the `CReplayManager**`. This is a pointer slot that holds the address of the manager instance,
+    /// or null outside the replay menu.
     pub mgr_ptr_addr: usize,
     /// Byte offset of the `mode: i32` field within the manager instance.
     pub mgr_mode_offset: usize,
@@ -27,20 +26,20 @@ pub struct ReplayStateLayout {
     pub input_focus_bit: u32,
     /// Bit set when "skip" input is held.
     pub input_skip_bit: u32,
-    /// Also enter `Skip` while `VK_CONTROL` is held. A held modifier (e.g. Ctrl) latches to
-    /// a continuous signal under WineD3D + X11, whereas a held non-modifier (e.g. Z) arrives as
-    /// discrete pulses and fast-forwards erratically. Set this for games that don't already
-    /// wire Ctrl into a `skip` bit, to restore reliable hold-to-fast-forward behavior.
+    /// Also enter `Skip` while `VK_CONTROL` is held. A held modifier (e.g. Ctrl) latches to a continuous signal under WineD3D + X11,
+    /// whereas a held non-modifier (e.g. Z) arrives as discrete pulses and fast-forwards erratically.
+    /// Set this for games that don't already wire Ctrl into a `skip` bit, to restore hold-to-fast-forward behavior.
     pub skip_on_ctrl: bool,
 }
 
 impl ReplayStateLayout {
-    /// Checks that this layout satisfies invariants for correctness. This should be invoked
-    /// from a `const _: () = ...` block at each site declaring a `ReplayStateLayout`.
+    /// Checks that this layout satisfies invariants for correctness.
+    /// This should be invoked from a `const _: () = ...` block at each site declaring a `ReplayStateLayout`.
     ///
     /// # Panics
-    /// Panics if `mgr_ptr_addr` or `input_addr` is 0.
-    /// Panics if `mgr_ptr_addr`, `mgr_mode_offset`, or `input_addr` isn't a multiple of 4.
+    /// Panics if:
+    /// - `mgr_ptr_addr` or `input_addr` is 0
+    /// - `mgr_ptr_addr`, `mgr_mode_offset`, or `input_addr` isn't a multiple of 4
     pub const fn validate(&self) {
         assert!(
             self.mgr_ptr_addr != 0,
@@ -78,8 +77,7 @@ pub enum InputAddr {
 }
 
 /// Classifies the current pacing intent for a game with replay-speed control.
-/// Returns `Normal` outside the replay menu, when not in viewer mode,
-/// or when no relevant input is held.
+/// Returns `Normal` outside the replay menu, when not in viewer mode, or when no relevant input is held.
 #[must_use]
 pub fn read_replay_mode(tok: &MainToken, layout: ReplayStateLayout) -> ReplayMode {
     let mgr: *const u8 = unsafe { read_volatile(with_exposed_provenance(layout.mgr_ptr_addr)) };
@@ -122,8 +120,8 @@ fn read_input_bits(layout: ReplayStateLayout) -> Option<u32> {
     Some(bits)
 }
 
-// We throttle `GetAsyncKeyState` polling because a high poll rate races the game's own
-// keyboard delivery under WineD3D + X11 and drops its input events.
+// We throttle `GetAsyncKeyState` polling because a high poll rate
+// races the game's own keyboard delivery under WineD3D + X11 and drops its input events.
 const CTRL_POLL_THROTTLE_MS: i64 = 25;
 
 #[derive(Clone, Copy)]
