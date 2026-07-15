@@ -211,7 +211,10 @@ fn qpc_to_ms(ticks: i64, freq: i64) -> u32 {
     if ticks <= 0 {
         return 0;
     }
-    u32::try_from((ticks * 1_000) / freq).unwrap_or(u32::MAX)
+    match ticks.checked_mul(1000) {
+        Some(n) => u32::try_from(n / freq).unwrap_or(u32::MAX),
+        None => u32::MAX,
+    }
 }
 
 fn qpc_to_100ns(ticks: i64, freq: i64) -> i64 {
