@@ -88,13 +88,13 @@ impl<F: Copy + Send + Sync + Unpin + 'static> IatHook<F> {
     pub unsafe fn install(&self, host: HMODULE, hook: F) -> bool {
         let hook_raw = unsafe { fn_ptr_to_raw(hook) };
         let slot_ptr = match unsafe { find_iat_slot(host, self.name) } {
-            Ok(p) => p,
-            Err(miss) => {
+            SlotOutcome::Hit { ptr } => ptr,
+            SlotOutcome::Miss { descriptors } => {
                 info!(
                     kind = "iat_hook",
                     name = self.name,
                     status = "NOT_IMPORTED",
-                    descriptors = miss.descriptors,
+                    descriptors,
                 );
                 return false;
             }
@@ -205,22 +205,22 @@ unsafe fn data_directory(module: HMODULE, idx: usize) -> Option<(*const u8, u32)
     }
 }
 
-/// A by-name IAT lookup that didn't find a slot.
-struct IatMiss {
-    /// Import descriptors whose stripped OFT made them unsearchable by name.
-    /// Nonzero means the miss may be a false negative.
-    descriptors: u32,
+enum SlotOutcome {
+    /// Pointer to the `FirstThunk` slot.
+    Hit { ptr: NonNull<*mut ()> },
+    /// The number of descriptors that couldn't be searched. Nonzero means the miss may be a false negative.
+    Miss { descriptors: u32 },
 }
 
 /// Walks `module`'s import directory for a case-insensitive match on `import_name`.
 /// Returns a pointer to the `FirstThunk` slot on hit, or the count of descriptors that couldn't be searched on miss.
-/// `module` should always be the game (e.g. th15.exe via `GetModuleHandleW(NULL)`), never our own DLL.
-unsafe fn find_iat_slot(module: HMODULE, import_name: &str) -> Result<NonNull<*mut ()>, IatMiss> {
+/// `module` must always be the game (e.g. th15.exe via `GetModuleHandleW(NULL)`), never our own DLL.
+unsafe fn find_iat_slot(module: HMODULE, import_name: &str) -> SlotOutcome {
     unsafe {
         let mut descriptors = 0u32;
         let Some((imp_dir, _)) = data_directory(module, IMAGE_DIRECTORY_ENTRY_IMPORT as usize)
         else {
-            return Err(IatMiss { descriptors });
+            return SlotOutcome::Miss { descriptors };
         };
         let base_mut = module.cast::<u8>();
         let base = base_mut.cast_const();
@@ -233,7 +233,7 @@ unsafe fn find_iat_slot(module: HMODULE, import_name: &str) -> Result<NonNull<*m
                     .cast(),
             );
             if dll_name_rva == 0 {
-                return Err(IatMiss { descriptors });
+                return SlotOutcome::Miss { descriptors };
             }
 
             // OFT holds name RVAs (`Anonymous` union aliases it). FT holds bound function VAs after the loader runs.
@@ -276,7 +276,10 @@ unsafe fn find_iat_slot(module: HMODULE, import_name: &str) -> Result<NonNull<*m
                         // so the alignment bump from `*mut u8` is fine.
                         #[allow(clippy::cast_ptr_alignment)]
                         let slot = base_mut.add(slot_offset).cast::<*mut ()>();
-                        return NonNull::new(slot).ok_or(IatMiss { descriptors });
+                        return match NonNull::new(slot) {
+                            Some(ptr) => SlotOutcome::Hit { ptr },
+                            None => SlotOutcome::Miss { descriptors },
+                        };
                     }
                 }
                 i += 1;
