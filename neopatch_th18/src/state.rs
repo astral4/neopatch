@@ -1,9 +1,9 @@
 //! Direct reads of game state for th18.exe v1.00a.
 
-use neopatch_core::MainToken;
 use neopatch_core::d3d9::ReplayMode;
 use neopatch_core::iat_hook;
 use neopatch_core::replay::{InputAddr, ReplayStateLayout, read_replay_mode};
+use neopatch_core::thread::MainToken;
 use std::sync::atomic::{AtomicBool, Ordering};
 use windows_sys::Win32::Foundation::HMODULE;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::VK_CONTROL;

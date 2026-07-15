@@ -1,8 +1,8 @@
 //! Direct reads of game state for th14.exe v1.00b.
 
-use neopatch_core::MainToken;
 use neopatch_core::d3d9::ReplayMode;
 use neopatch_core::replay::{InputAddr, ReplayStateLayout, read_replay_mode};
+use neopatch_core::thread::MainToken;
 
 const REPLAY_STATE: ReplayStateLayout = ReplayStateLayout {
     mgr_ptr_addr: 0x004d_b688,

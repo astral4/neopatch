@@ -1,8 +1,8 @@
 //! Direct reads of game state for th20.exe v1.00a.
 
-use neopatch_core::MainToken;
 use neopatch_core::d3d9::{ReplayMode, set_replay_mode_fn};
 use neopatch_core::replay::{InputAddr, ReplayStateLayout, read_replay_mode};
+use neopatch_core::thread::MainToken;
 use std::ptr::{read_volatile, with_exposed_provenance};
 use std::sync::OnceLock;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::VK_CONTROL;

@@ -25,14 +25,12 @@ pub mod process;
 mod protect;
 pub mod replay;
 pub mod screenshot;
-mod thread;
+pub mod thread;
 pub mod timer_period;
 mod untrusted;
 pub mod vtable;
 pub mod watchdog;
 pub mod window;
-
-pub use thread::MainToken;
 
 /// Match `$v` against a list of `const` identifiers, returning the literal identifier name
 /// (via `stringify!`) on hit and `"?"` on miss. This lets the printed name and value share a single source.
