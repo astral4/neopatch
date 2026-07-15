@@ -39,9 +39,8 @@ impl<T> Untrusted<T> {
         Self(raw)
     }
 
-    #[allow(clippy::wrong_self_convention)]
     #[must_use]
-    pub(crate) fn is_null(self) -> bool {
+    pub(crate) fn is_null(&self) -> bool {
         self.0.is_null()
     }
 }

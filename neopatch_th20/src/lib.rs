@@ -47,9 +47,9 @@ pub unsafe extern "system" fn DllMain(
         // Lets the vtable patcher distinguish "already our hook" (idempotent re-entry)
         // from a shim-layer chain like `apphelp.dll`'s `CreateDevice` hijack.
         vtable::set_our_dll_handle(hinst as HMODULE);
-        dinput8::init();
         // Cache the real `DirectInput8Create` before `install_hooks`
         // so the proxy export works even if hook installation fails.
+        dinput8::init();
         install_hooks();
     }
     1
@@ -85,7 +85,7 @@ unsafe fn install_hooks() {
         let slide = host_slide(host_exe);
         info!(
             kind = "aslr_slide",
-            host_base = format_args!("{:#010x}", host_exe as usize),
+            host_base = format_args!("{:#010x}", host_exe.addr()),
             preferred_base = format_args!("{:#010x}", aslr::PREFERRED_IMAGE_BASE),
             slide = format_args!("{slide:#010x}"),
         );

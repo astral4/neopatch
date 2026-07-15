@@ -11,8 +11,8 @@ use windows_sys::Win32::System::Threading::GetCurrentProcess;
 // `Copy` is implemented so the value can be taken out of a `OnceLock` by value (`.copied()`) and passed to the patcher.
 #[derive(Clone, Copy)]
 pub(crate) struct ModuleRange {
-    pub base: u32,
-    pub end: u32,
+    pub(crate) base: u32,
+    pub(crate) end: u32,
 }
 
 impl ModuleRange {
@@ -29,6 +29,9 @@ pub(crate) struct Module {
 
 /// Returns `None` for a null handle or when `GetModuleInformation` fails.
 pub(crate) fn module_info(h: HMODULE) -> Option<ModuleRange> {
+    #[allow(clippy::cast_possible_truncation)]
+    const MODULEINFO_SIZE: u32 = size_of::<MODULEINFO>() as u32;
+
     if h.is_null() {
         return None;
     }
@@ -38,12 +41,11 @@ pub(crate) fn module_info(h: HMODULE) -> Option<ModuleRange> {
             SizeOfImage: 0,
             EntryPoint: null_mut(),
         };
-        let info_size = u32::try_from(size_of::<MODULEINFO>()).unwrap_or(0);
-        if GetModuleInformation(GetCurrentProcess(), h, &raw mut info, info_size) == 0 {
+        if GetModuleInformation(GetCurrentProcess(), h, &raw mut info, MODULEINFO_SIZE) == 0 {
             return None;
         }
         #[allow(clippy::cast_possible_truncation)]
-        let base = info.lpBaseOfDll as u32;
+        let base = info.lpBaseOfDll.addr() as u32;
         Some(ModuleRange {
             base,
             end: base.wrapping_add(info.SizeOfImage),

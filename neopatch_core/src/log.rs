@@ -27,6 +27,7 @@ use tracing::{Event, Level, Metadata, Subscriber, info};
 use tracing_subscriber::Layer;
 use tracing_subscriber::layer::{Context, SubscriberExt};
 use tracing_subscriber::registry::LookupSpan;
+use tracing_subscriber::{Layer, registry as default_registry};
 use windows_sys::Win32::Foundation::SYSTEMTIME;
 use windows_sys::Win32::Storage::FileSystem::FlushFileBuffers;
 use windows_sys::Win32::System::SystemInformation::GetLocalTime;
@@ -113,7 +114,7 @@ where
     drop(SESSION_DIR.set(session_dir.clone()));
 
     let layer = NeopatchLayer { level };
-    let subscriber = tracing_subscriber::registry().with(layer);
+    let subscriber = default_registry().with(layer);
     drop(set_global_default(subscriber));
 
     info!(

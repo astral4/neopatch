@@ -82,9 +82,8 @@ impl<F> Sig<F> {
     }
 }
 
-/// A typed function-pointer slot. `F` is the function pointer type.
-// TODO: Tighten to `F: FnPtr` if the `fn_ptr_trait` feature stabilizes.
-pub(crate) struct FnSlot<F: Copy + Send + Sync + 'static> {
+/// Slot for a function-pointer type `F`.
+pub(crate) struct FnSlot<F> {
     slot: OnceLock<F>,
     // The slot's identifier used for panic and diagnostic messages.
     name: &'static str,
@@ -228,7 +227,11 @@ impl<V, F> SlotProjection<V, F> {
     }
 }
 
-impl<V, F: Copy> SlotProjection<V, F> {
+// TODO: Tighten to `F: FnPtr` if the `fn_ptr_trait` feature stabilizes.
+impl<V, F> SlotProjection<V, F>
+where
+    F: Copy + Send + Sync + Unpin + 'static,
+{
     /// Reads the function pointer at this slot from `vtbl`.
     ///
     /// # Safety
@@ -253,7 +256,7 @@ pub(crate) unsafe fn capture_slot<F, V>(
     proj: SlotProjection<V, F>,
     dst: &FnSlot<F>,
 ) where
-    F: Copy + Send + Sync + 'static,
+    F: Copy + Send + Sync + Unpin + 'static,
 {
     let slot_ptr = proj.slot_ptr(vtbl.as_ptr()).cast_const();
     let current_raw = unsafe { read_unaligned(slot_ptr.cast()) };
@@ -284,7 +287,7 @@ pub(crate) unsafe fn capture_slot<F, V>(
 }
 
 pub(crate) struct VtblScope<'a, V> {
-    vtbl: *mut V,
+    vtbl: NonNull<V>,
     modules: &'a [Module],
     our_range: Option<ModuleRange>,
     expected_range: Option<ModuleRange>,
@@ -300,7 +303,7 @@ impl<V> VtblScope<'_, V> {
         name: &str,
         hook: F,
     ) where
-        F: Copy + Send + Sync + 'static,
+        F: Copy + Send + Sync + Unpin + 'static,
     {
         self.write_slot(proj, name, hook, Some(original));
     }
@@ -310,7 +313,7 @@ impl<V> VtblScope<'_, V> {
     // TODO: Tighten to `F: FnPtr` if the `fn_ptr_trait` feature stabilizes.
     pub(crate) fn redirect<F>(&self, _sig: &Sig<F>, proj: SlotProjection<V, F>, name: &str, hook: F)
     where
-        F: Copy + Send + Sync + 'static,
+        F: Copy + Send + Sync + Unpin + 'static,
     {
         self.write_slot::<F>(proj, name, hook, None);
     }
@@ -323,9 +326,9 @@ impl<V> VtblScope<'_, V> {
         hook: F,
         original: Option<&FnSlot<F>>,
     ) where
-        F: Copy + Send + Sync + 'static,
+        F: Copy + Send + Sync + Unpin + 'static,
     {
-        let slot_ptr = proj.slot_ptr(self.vtbl);
+        let slot_ptr = proj.slot_ptr(self.vtbl.as_ptr());
         let slot_raw: *mut *mut () = slot_ptr.cast();
         // SAFETY: writable window open for the scope; the projection's const assert
         // guarantees the slot lies within the `size_of::<V>()` protected range.

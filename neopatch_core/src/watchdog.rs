@@ -72,12 +72,11 @@ fn lookup_handle_type(handle: NonZero<u32>) -> Option<String> {
     unsafe {
         let mut buf = [0u8; 1024];
         #[allow(clippy::cast_possible_truncation)]
-        let buf_len = buf.len() as u32;
         let status = NtQueryObject(
             with_exposed_provenance_mut::<c_void>(handle.get() as usize),
             ObjectTypeInformation,
             buf.as_mut_ptr().cast(),
-            buf_len,
+            buf.len() as u32,
             null_mut(),
         );
         if status < 0 {
@@ -97,8 +96,7 @@ fn lookup_handle_type(handle: NonZero<u32>) -> Option<String> {
         if name_start < buf_start || name_end > buf_end || name_start & 1 != 0 {
             return None;
         }
-        let len_chars = usize::from(header.length) / 2;
-        let slice = from_raw_parts(header.buffer, len_chars);
+        let slice = from_raw_parts(header.buffer, usize::from(header.length) / 2);
         Some(String::from_utf16_lossy(slice))
     }
 }

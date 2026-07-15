@@ -23,6 +23,7 @@ use crate::screenshot::{on_post_create_device, on_pre_present, on_pre_reset};
 use crate::thread::{MainCell, MainToken};
 use crate::vtable::{capture_slot, install_vtable, vtable_field, vtable_sig, vtable_slot};
 use crate::{fmt_hr, iat_hook, match_named};
+use std::cmp::min;
 use std::ffi::c_void;
 use std::ptr::{NonNull, null, null_mut};
 use std::sync::OnceLock;
@@ -497,8 +498,7 @@ unsafe fn enumerate_supported_rates(
     if count > MAX_ENUM_SCAN {
         warn!(kind = "mode_enum_truncated", count, max = MAX_ENUM_SCAN);
     }
-    let scan = count.min(MAX_ENUM_SCAN);
-    for i in 0..scan {
+    for i in 0..min(count, MAX_ENUM_SCAN) {
         if len == rates.len() {
             warn!(
                 kind = "mode_rates_truncated",

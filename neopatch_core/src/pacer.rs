@@ -219,7 +219,7 @@ fn qpc_to_100ns(ticks: i64, freq: i64) -> i64 {
         return 0;
     }
     match ticks.checked_mul(10_000_000) {
-        Some(scaled) => scaled / freq,
+        Some(n) => n / freq,
         None => i64::MAX,
     }
 }

@@ -184,9 +184,6 @@ unsafe extern "system" fn hook_create_window_ex_a(
     }
 }
 
-/// The game's main render-window class as UTF-16.
-const BASE_CLASS_W: [u16; 4] = [b'B' as u16, b'A' as u16, b'S' as u16, b'E' as u16];
-
 unsafe extern "system" fn hook_create_window_ex_w(
     dw_ex_style: u32,
     lp_class_name: *const u16,
@@ -201,6 +198,8 @@ unsafe extern "system" fn hook_create_window_ex_w(
     h_instance: HMODULE,
     lp_param: *mut c_void,
 ) -> HWND {
+    const BASE_CLASS_W: [u16; 4] = [b'B' as u16, b'A' as u16, b'S' as u16, b'E' as u16];
+
     unsafe {
         let is_main = !APPLIED.load(Ordering::Acquire)
             && h_wnd_parent.is_null()

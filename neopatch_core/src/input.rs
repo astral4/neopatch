@@ -26,9 +26,9 @@ const LX_OFFSET: usize = offset_of!(DIJOYSTATE, lX);
 const LY_OFFSET: usize = offset_of!(DIJOYSTATE, lY);
 const POV0_OFFSET: usize = offset_of!(DIJOYSTATE, rgdwPOV);
 const _: () = {
-    assert!(offset_of!(DIJOYSTATE, lX) == offset_of!(DIJOYSTATE2, lX));
-    assert!(offset_of!(DIJOYSTATE, lY) == offset_of!(DIJOYSTATE2, lY));
-    assert!(offset_of!(DIJOYSTATE, rgdwPOV) == offset_of!(DIJOYSTATE2, rgdwPOV));
+    assert!(LX_OFFSET == offset_of!(DIJOYSTATE2, lX));
+    assert!(LY_OFFSET == offset_of!(DIJOYSTATE2, lY));
+    assert!(POV0_OFFSET == offset_of!(DIJOYSTATE2, rgdwPOV));
 };
 
 // 36000 centidegrees = 360 degrees. The DirectInput spec uses `0xFFFFFFFF` for centered,

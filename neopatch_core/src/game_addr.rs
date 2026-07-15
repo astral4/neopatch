@@ -13,7 +13,7 @@ use std::ptr::{
 };
 
 #[derive(Clone, Copy)]
-pub struct GameAddr<T: Copy> {
+pub struct GameAddr<T> {
     addr: usize,
     _t: PhantomData<*mut T>,
 }
