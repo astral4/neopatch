@@ -131,8 +131,10 @@ pub unsafe extern "C" fn save_screenshot_deferred_bmp(filename_ptr: *const u8) -
         return 1;
     };
     let tok = MainToken::new();
+    if !set_pending_cached_save(&tok, &path) {
+        return 1;
+    }
     info!(kind = "screenshot_deferred", path = %String::from_utf8_lossy(path.as_slice()));
-    set_pending_cached_save(&tok, &path);
     0
 }
 
@@ -161,16 +163,16 @@ struct PendingCapture {
 // We stash here and capture one frame later from `on_pre_present`.
 static PENDING_CAPTURE: MainCell<Option<PendingCapture>> = MainCell::new(None);
 
-/// Stashes a filename for capture on the next `hook_present`.
-/// Still-pending stashes are overwritten. Stashing is refused if the device is missing.
-fn set_pending_cached_save(tok: &MainToken, path: &PendingPath) {
+/// Stashes a filename for capture on the next `hook_present` unless the device is missing.
+/// Still-pending stashes are overwritten. Returns whether the stash was accepted.
+fn set_pending_cached_save(tok: &MainToken, path: &PendingPath) -> bool {
     let device = ACTIVE_DEVICE.get(tok);
     if device.is_null() {
         warn!(
             kind = "screenshot_dropped_no_device",
             path = %String::from_utf8_lossy(path.as_slice()),
         );
-        return;
+        return false;
     }
     if let Some(stale) = PENDING_CAPTURE.take(tok) {
         warn!(
@@ -185,6 +187,7 @@ fn set_pending_cached_save(tok: &MainToken, path: &PendingPath) {
             path: *path,
         }),
     );
+    true
 }
 
 pub(crate) fn on_pre_present(tok: &MainToken) {
