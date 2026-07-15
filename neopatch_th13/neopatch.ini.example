@@ -96,8 +96,8 @@ priority = Unchanged
 ;   trace
 level = info
 
-; Number of past sessions to retain logs for.
-; Older ones are deleted at startup, before the new session is logged.
+; Total number of sessions to keep logs for, including the new session.
+; Older ones are deleted at startup.
 ; Default: 10
 sessions_to_keep = 10
 
