@@ -6,7 +6,7 @@
 
 use crate::config::{CoreConfig, write_manifest_common};
 use std::cell::{Cell, RefCell};
-use std::env::var;
+use std::env::var_os;
 use std::ffi::c_void;
 use std::fmt::{Debug, Display, Formatter, Result as FmtResult, Write as _};
 use std::fs::{
@@ -24,7 +24,6 @@ use std::time::Instant;
 use tracing::field::{Field, Visit};
 use tracing::subscriber::set_global_default;
 use tracing::{Event, Level, Metadata, Subscriber, info};
-use tracing_subscriber::Layer;
 use tracing_subscriber::layer::{Context, SubscriberExt};
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::{Layer, registry as default_registry};
@@ -237,10 +236,7 @@ fn pick_log_root(
 
 /// Returns `<%env_var%>\neopatch_logs\`, or an empty path if `env_var` is unset.
 fn appdata_subdir(env_var: &str) -> PathBuf {
-    var(env_var).map_or_else(
-        |_| PathBuf::new(),
-        |s| PathBuf::from(s).join("neopatch_logs"),
-    )
+    var_os(env_var).map_or_else(PathBuf::new, |s| PathBuf::from(s).join("neopatch_logs"))
 }
 
 /// Creates `dir` and verifies it is actually located where the path says.
