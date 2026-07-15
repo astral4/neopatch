@@ -121,8 +121,8 @@ unsafe fn with_suspended<R>(h: HANDLE, f: impl FnOnce() -> R) -> R {
 /// Returns the function passed to `CreateThread` for `thread_handle`.
 fn lookup_thread_start(thread_handle: HANDLE) -> Option<NonZero<u32>> {
     unsafe {
-        let mut start: u32 = 0;
-        let mut returned: u32 = 0;
+        let mut start = 0;
+        let mut returned = 0;
         #[allow(clippy::cast_possible_truncation)]
         let u32_size = size_of::<u32>() as u32;
         let status = NtQueryInformationThread(
@@ -215,8 +215,8 @@ fn enumerate_thread_samples(skip_tid: u32) -> Vec<ThreadSample> {
 }
 
 fn watchdog_loop() -> ! {
-    let mut iter: u64 = 0;
-    let mut prev_frame: Option<u32> = None;
+    let mut iter = 0;
+    let mut prev_frame = None;
     loop {
         sleep(Duration::from_secs(1));
         iter += 1;

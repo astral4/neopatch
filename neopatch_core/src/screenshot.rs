@@ -20,11 +20,10 @@ use std::ffi::c_void;
 use std::mem::zeroed;
 use std::ptr::{null, null_mut};
 use tracing::{info, warn};
-use windows::Win32::Foundation::RECT;
 use windows::Win32::Graphics::Direct3D9::{
     D3DBACKBUFFER_TYPE_MONO, D3DFMT_A8R8G8B8, D3DFMT_X8R8G8B8, D3DFORMAT, D3DLOCK_READONLY,
-    D3DLOCKED_RECT, D3DPOOL_SYSTEMMEM, D3DSURFACE_DESC, IDirect3DDevice9Ex,
-    IDirect3DDevice9Ex_Vtbl, IDirect3DSurface9,
+    D3DLOCKED_RECT, D3DPOOL_SYSTEMMEM, IDirect3DDevice9Ex, IDirect3DDevice9Ex_Vtbl,
+    IDirect3DSurface9,
 };
 use windows::core::Interface;
 use windows_sys::Win32::Foundation::{
@@ -248,12 +247,12 @@ unsafe fn capture_live_and_write(
         .ok_or_else(|| "null device".to_string())?;
     let back_buffer = unsafe { dev.GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO) }
         .map_err(|e| format!("GetBackBuffer hr={}", fmt_hr!(e.code())))?;
-    let mut desc: D3DSURFACE_DESC = unsafe { zeroed() };
+    let mut desc = unsafe { zeroed() };
     unsafe { back_buffer.GetDesc(&raw mut desc) }
         .map_err(|e| format!("GetDesc hr={}", fmt_hr!(e.code())))?;
     require_supported_format(desc.Format)?;
 
-    let mut sysmem: Option<IDirect3DSurface9> = None;
+    let mut sysmem = None;
     unsafe {
         dev.CreateOffscreenPlainSurface(
             desc.Width,
@@ -281,14 +280,8 @@ fn lock_and_write(
     encode: ImageEncoder,
 ) -> Result<(u32, u32), String> {
     let mut locked = D3DLOCKED_RECT::default();
-    unsafe {
-        surface.LockRect(
-            &raw mut locked,
-            null::<RECT>(),
-            D3DLOCK_READONLY.cast_unsigned(),
-        )
-    }
-    .map_err(|e| format!("LockRect hr={}", fmt_hr!(e.code())))?;
+    unsafe { surface.LockRect(&raw mut locked, null(), D3DLOCK_READONLY.cast_unsigned()) }
+        .map_err(|e| format!("LockRect hr={}", fmt_hr!(e.code())))?;
     // We encode while the surface is locked since the encoder dereferences `src`.
     let encoded = unsafe {
         encode(
@@ -352,7 +345,7 @@ unsafe fn build_bmp_24bpp(
         .checked_add(pixel_data_size)
         .ok_or("file size overflow")?;
 
-    let mut buf: Vec<u8> = Vec::with_capacity(file_size.try_into().unwrap_or(0));
+    let mut buf = Vec::with_capacity(file_size.try_into().unwrap_or(0));
     // BITMAPFILEHEADER
     buf.extend_from_slice(b"BM");
     buf.extend_from_slice(&file_size.to_le_bytes());
@@ -404,7 +397,7 @@ unsafe fn build_png_24bpp(
 ) -> Result<Vec<u8>, String> {
     let pixels = width.checked_mul(height).ok_or("image too large")?;
     let rgb_len = pixels.checked_mul(3).ok_or("image too large")?;
-    let mut rgb: Vec<u8> = Vec::with_capacity(rgb_len.try_into().unwrap_or(0));
+    let mut rgb = Vec::with_capacity(rgb_len.try_into().unwrap_or(0));
     for y in 0..height {
         let row_off = isize::try_from(y).map_err(|e| e.to_string())?
             * isize::try_from(pitch).map_err(|e| e.to_string())?;
@@ -417,7 +410,7 @@ unsafe fn build_png_24bpp(
         }
     }
 
-    let mut out: Vec<u8> = Vec::new();
+    let mut out = Vec::new();
     let mut encoder = Encoder::new(&mut out, width, height);
     encoder.set_color(ColorType::Rgb);
     encoder.set_depth(BitDepth::Eight);

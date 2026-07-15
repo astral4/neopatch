@@ -315,7 +315,7 @@ impl<V> VtblScope<'_, V> {
     where
         F: Copy + Send + Sync + Unpin + 'static,
     {
-        self.write_slot::<F>(proj, name, hook, None);
+        self.write_slot(proj, name, hook, None);
     }
 
     // TODO: Tighten to `F: FnPtr` if the `fn_ptr_trait` feature stabilizes.
@@ -482,7 +482,7 @@ pub(crate) unsafe fn install_vtable<V, R>(
         .map(|m| m.range);
 
     let size = size_of::<V>();
-    let region_start: *mut u8 = vtbl.as_ptr().cast();
+    let region_start = vtbl.as_ptr().cast();
     let result = unsafe {
         with_writable(region_start, size, |_| {
             let s = VtblScope {
