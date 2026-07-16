@@ -19,7 +19,7 @@ const RES_RADIO_FIRST_ID: i32 = 0xcd;
 const RES_RADIO_LAST_ID: i32 = 0xcf;
 const FULLSCREEN_CHECKBOX_ID: i32 = 0xcb;
 const OK_BUTTON_ID: u32 = 0xd0;
-const EXIT_FLAG: GameAddr<u32> = unsafe { GameAddr::new(0x004e_6d1c) };
+const EXIT_FLAG_VA: GameAddr<u32> = unsafe { GameAddr::new(0x004e_6d1c) };
 const EXIT_FLAG_BIT: u32 = 0x0008_0000;
 
 const CREATE_DIALOG_CALL_VA: usize = 0x0047_1619;
@@ -80,9 +80,9 @@ unsafe extern "system" fn hook_create_dialog_param_a(
         let radio_ret = CheckRadioButton(hwnd, RES_RADIO_FIRST_ID, RES_RADIO_LAST_ID, res_radio_id);
         let dlg_btn_ret = CheckDlgButton(hwnd, FULLSCREEN_CHECKBOX_ID, fullscreen_state);
         let pm_ok = PostMessageA(hwnd, WM_COMMAND, wparam, 0);
-        let prev = EXIT_FLAG.read();
+        let prev = EXIT_FLAG_VA.read();
         let next = prev | EXIT_FLAG_BIT;
-        EXIT_FLAG.write(next);
+        EXIT_FLAG_VA.write(next);
 
         info!(
             kind = "dialog_auto_dismissed",

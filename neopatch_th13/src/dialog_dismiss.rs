@@ -13,8 +13,8 @@ const DIALOG_TEMPLATE_ID: usize = 0xcb;
 const DIALOG_PROC_VA: usize = 0x0045_e910;
 const MODE_FULLSCREEN: u8 = 0;
 const MODE_WINDOWED: u8 = 1;
-const DISPLAY_MODE_BYTE: GameAddr<u8> = unsafe { GameAddr::new(0x004d_c88f) };
-const LAUNCH_FLAGS: GameAddr<u32> = unsafe { GameAddr::new(0x004d_f0e0) };
+const DISPLAY_MODE_VA: GameAddr<u8> = unsafe { GameAddr::new(0x004d_c88f) };
+const LAUNCH_FLAGS_VA: GameAddr<u32> = unsafe { GameAddr::new(0x004d_f0e0) };
 const LAUNCH_FLAGS_DIALOG_OK_BITS: u32 = 0x60;
 const DIALOG_RET: isize = 6;
 
@@ -63,10 +63,10 @@ unsafe extern "system" fn hook_dialog_box_param_a(
         DisplayMode::Windowed => MODE_WINDOWED,
         DisplayMode::Fullscreen => MODE_FULLSCREEN,
     };
-    let mode_byte_prev = DISPLAY_MODE_BYTE.read();
-    DISPLAY_MODE_BYTE.write(mode_byte);
-    let flags_prev = LAUNCH_FLAGS.read();
-    LAUNCH_FLAGS.write(flags_prev & !LAUNCH_FLAGS_DIALOG_OK_BITS);
+    let mode_byte_prev = DISPLAY_MODE_VA.read();
+    DISPLAY_MODE_VA.write(mode_byte);
+    let flags_prev = LAUNCH_FLAGS_VA.read();
+    LAUNCH_FLAGS_VA.write(flags_prev & !LAUNCH_FLAGS_DIALOG_OK_BITS);
 
     info!(
         kind = "dialog_short_circuited",

@@ -13,7 +13,7 @@ const DIALOG_TEMPLATE_ID: usize = 0xcb;
 const DIALOG_PROC_VA: usize = 0x0044_7910;
 const MODE_FULLSCREEN: u8 = 0;
 const MODE_WINDOWED: u8 = 1;
-const DISPLAY_MODE_BYTE: GameAddr<u8> = unsafe { GameAddr::new(0x004c_3465) };
+const DISPLAY_MODE_VA: GameAddr<u8> = unsafe { GameAddr::new(0x004c_3465) };
 const DIALOG_RET: isize = 6;
 
 const DIALOG_BOX_CALL_VA: usize = 0x0044_5626;
@@ -61,8 +61,8 @@ unsafe extern "system" fn hook_dialog_box_param_a(
         DisplayMode::Windowed => MODE_WINDOWED,
         DisplayMode::Fullscreen => MODE_FULLSCREEN,
     };
-    let mode_byte_prev = DISPLAY_MODE_BYTE.read();
-    DISPLAY_MODE_BYTE.write(mode_byte);
+    let mode_byte_prev = DISPLAY_MODE_VA.read();
+    DISPLAY_MODE_VA.write(mode_byte);
 
     info!(
         kind = "dialog_short_circuited",

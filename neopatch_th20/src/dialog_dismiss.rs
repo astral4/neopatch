@@ -5,8 +5,8 @@ use crate::config::CONFIG;
 use std::sync::OnceLock;
 use tracing::info;
 
-const RADIO_INDEX_BYTE_VA: usize = 0x005c_4f80;
-const SCALE_INDEX_BYTE_VA: usize = 0x005c_4f8a;
+const RADIO_INDEX_VA: usize = 0x005c_4f80;
+const SCALE_INDEX_VA: usize = 0x005c_4f8a;
 const DIALOG_LIFECYCLE_FLAGS_VA: usize = 0x005b_87e8;
 const DIALOG_LIFECYCLE_BITS: u32 = 0x18;
 
@@ -19,22 +19,25 @@ unsafe extern "stdcall" fn dialog_short_circuit() {
     let slide = *SLIDE
         .get()
         .expect("dialog_short_circuit fired before install");
+
     let cfg = CONFIG.get().unwrap();
     let mode = cfg.display_mode;
-    let idx = cfg.resolution.radio_index(mode);
-    let scale = cfg.resolution.scale_index(mode);
-    let radio = unsafe { rebased_addr::<u8>(slide, RADIO_INDEX_BYTE_VA) };
-    let scale_addr = unsafe { rebased_addr::<u8>(slide, SCALE_INDEX_BYTE_VA) };
+    let radio_index = cfg.resolution.radio_index(mode);
+    let scale_index = cfg.resolution.scale_index(mode);
+    let radio_addr = unsafe { rebased_addr(slide, RADIO_INDEX_VA) };
+    let scale_addr = unsafe { rebased_addr(slide, SCALE_INDEX_VA) };
     let lifecycle = unsafe { rebased_addr::<u32>(slide, DIALOG_LIFECYCLE_FLAGS_VA) };
-    radio.write(idx);
-    scale_addr.write(scale);
+
+    radio_addr.write(radio_index);
+    scale_addr.write(scale_index);
     lifecycle.write(lifecycle.read() & !DIALOG_LIFECYCLE_BITS);
+
     info!(
         kind = "dialog_short_circuited",
         resolution = %cfg.resolution,
         mode = %mode,
-        radio_index = idx,
-        scale_index = scale,
+        radio_index,
+        scale_index,
     );
 }
 
