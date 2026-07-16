@@ -5,29 +5,9 @@ use neopatch_core::patches::{Patch, patch_jmp};
 use neopatch_core::screenshot::save_screenshot_deferred_bmp;
 use std::arch::naked_asm;
 
-/// Live `Direct3DCreate9` call site, rewritten to defend against downstream IAT hijacks.
-/// There is a second call site at `0x00439702`, a dead standalone init helper that nothing calls.
-const DIRECT3DCREATE9_CALL_ADDR: usize = 0x0043_8bc3;
+const DIRECT3DCREATE9_CALL_VA: usize = 0x0043_8bc3;
 const DIRECT3DCREATE9_CALL_BYTES: [u8; 5] = [0xe8, 0xae, 0x95, 0x01, 0x00];
 
-pub(crate) unsafe fn install_d3d9_call_site_rewrite() {
-    unsafe {
-        install_call_site_rewrite(DIRECT3DCREATE9_CALL_ADDR, &DIRECT3DCREATE9_CALL_BYTES);
-    }
-}
-
-/// "Sleep-path branch nop" + "frame limiter unconditional skip": disengages the game's
-/// own pacer in `CWindowManager::Update` (the `Sleep` at `0x0043952B`, the FPU deadline check).
-///
-/// "AnmManager mode 2 y -> z": fixes a typo in `fcn.00443290`. The Y component of
-/// `parentPos` (`+0x350`) is summed where the Z component (`+0x354`) was meant to be.
-/// Reached in render mode 2, and modes 1/3 when rotation is exactly 0.
-///
-/// "32-bit color skip force-16-bit branch" + "32-bit color ignore persistent choice":
-/// forces `pp.BackBufferFormat = X8R8G8B8` in `fcn.00439890`'s fullscreen path regardless of
-/// `custom.exe`. First skips the `[0x491d78] & 1` 16-bit fallback; second NOPs the `setne cl`
-/// so the persistent `[0x491d62]` choice can't push `0x16` (X8R8G8B8) up to `0x17` (R5G6B5).
-/// Windowed mode pulls the format from the desktop and needs no patches.
 const PATCHES: &[Patch] = &[
     Patch::new(
         0x0043_93b7,
@@ -61,14 +41,6 @@ const PATCHES: &[Patch] = &[
     ),
 ];
 
-pub(crate) unsafe fn apply_basic() {
-    unsafe { Patch::apply_all(PATCHES) };
-}
-
-/// Splice over `mov ebx, [ebx + 0x35c]` (6 bytes) inside `fcn.00444240`, the `AnmManager`
-/// modes 5/7 position helper. X and Y correctly accumulate `matrix.t*`; Z doesn't.
-/// `[esp + 0x74]` is the `matrix.tz` frame slot; the displaced `mov` loads
-/// the `AnmVm` flags field and is replayed.
 const ANM_MODE57_SPLICE: usize = 0x0044_438e;
 const ANM_MODE57_DISPLACED_LEN: usize = 6;
 static ANM_MODE57_AFTER_SPLICE: usize = ANM_MODE57_SPLICE + ANM_MODE57_DISPLACED_LEN;
@@ -83,20 +55,6 @@ unsafe extern "C" fn anm_mode57_z_trampoline() -> ! {
     )
 }
 
-pub(crate) unsafe fn install_anm_matrix_tz_fix() {
-    unsafe {
-        patch_jmp(
-            ANM_MODE57_SPLICE,
-            &[0x8b, 0x9b, 0x5c, 0x03, 0x00, 0x00],
-            anm_mode57_z_trampoline as *mut (),
-            "AnmManager mode 5/7 z + matrix.tz",
-        );
-    }
-}
-
-/// th10 screenshot save (eax-convention; filename pointer in EAX). The game calls this
-/// after `Present`, where the live back buffer is undefined under D3D9Ex flip-model, so we
-/// stash the path and capture in the next `on_pre_present` instead of saving immediately.
 const SCREENSHOT_SAVE_FN: usize = 0x0042_0670;
 const SCREENSHOT_SAVE_FN_PROLOGUE: [u8; 5] = [0x83, 0xec, 0x0c, 0x53, 0x55];
 
@@ -111,8 +69,16 @@ unsafe extern "C" fn screenshot_trampoline() -> u32 {
     );
 }
 
-pub(crate) unsafe fn install_screenshot_hook() {
+pub(crate) unsafe fn install() {
     unsafe {
+        install_call_site_rewrite(DIRECT3DCREATE9_CALL_VA, &DIRECT3DCREATE9_CALL_BYTES);
+        Patch::apply_all(PATCHES);
+        patch_jmp(
+            ANM_MODE57_SPLICE,
+            &[0x8b, 0x9b, 0x5c, 0x03, 0x00, 0x00],
+            anm_mode57_z_trampoline as *mut (),
+            "AnmManager mode 5/7 z + matrix.tz",
+        );
         patch_jmp(
             SCREENSHOT_SAVE_FN,
             &SCREENSHOT_SAVE_FN_PROLOGUE,

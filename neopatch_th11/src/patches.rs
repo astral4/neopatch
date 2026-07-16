@@ -5,26 +5,9 @@ use neopatch_core::patches::{Patch, patch_jmp};
 use neopatch_core::screenshot::save_screenshot_live_bmp;
 use std::arch::naked_asm;
 
-/// Live `Direct3DCreate9` call site, rewritten to defend against downstream IAT hijacks.
-/// There is a second call site at `0x00446ab2`, a dead standalone init helper that nothing calls.
-const DIRECT3DCREATE9_CALL_ADDR: usize = 0x0044_570e;
+const DIRECT3DCREATE9_CALL_VA: usize = 0x0044_570e;
 const DIRECT3DCREATE9_CALL_BYTES: [u8; 5] = [0xe8, 0xa3, 0xa2, 0x01, 0x00];
 
-pub(crate) unsafe fn install_d3d9_call_site_rewrite() {
-    unsafe {
-        install_call_site_rewrite(DIRECT3DCREATE9_CALL_ADDR, &DIRECT3DCREATE9_CALL_BYTES);
-    }
-}
-
-/// "UpdateFast skip": flips `jne 0x44645e` to `jmp +0x43`, landing past
-/// the `Sleep(1)` and the FPU catch-up loop in `CWindowManager::UpdateFast`.
-///
-/// "fast input latency #1/#2": flips two cond jumps so the per-frame dispatch
-/// always reaches `fcn.00446420` (`UpdateFast`) instead of the slow/normal paths.
-/// OILP also does this under "Force fast input latency mode."
-///
-/// "replay speed control skip": skips the game's own Ctrl-key fast-forward.
-/// Without this, the game's internal speed control fights our pacer's replay-speed modes.
 const PATCHES: &[Patch] = &[
     Patch::new(0x0044_6454, &[0x75, 0x08], &[0xeb, 0x43], "UpdateFast skip"),
     Patch::new(
@@ -47,14 +30,6 @@ const PATCHES: &[Patch] = &[
     ),
 ];
 
-pub(crate) unsafe fn apply_basic() {
-    unsafe { Patch::apply_all(PATCHES) };
-}
-
-/// Splice over `mov ebx, [ebx + 0x404]` (6 bytes) inside `fcn.00450e20`, the `AnmManager`
-/// modes 5/7 position helper. X and Y correctly accumulate `matrix.t*`; Z doesn't.
-/// `[esp + 0x78]` is the `matrix.tz` frame slot; the displaced `mov` loads
-/// the `AnmVm` flags field and is replayed.
 const ANM_MODE57_SPLICE: usize = 0x0045_0f83;
 const ANM_MODE57_DISPLACED_LEN: usize = 6;
 static ANM_MODE57_AFTER_SPLICE: usize = ANM_MODE57_SPLICE + ANM_MODE57_DISPLACED_LEN;
@@ -69,19 +44,6 @@ unsafe extern "C" fn anm_mode57_z_trampoline() -> ! {
     )
 }
 
-pub(crate) unsafe fn install_anm_matrix_tz_fix() {
-    unsafe {
-        patch_jmp(
-            ANM_MODE57_SPLICE,
-            &[0x8b, 0x9b, 0x04, 0x04, 0x00, 0x00],
-            anm_mode57_z_trampoline as *mut (),
-            "AnmManager mode 5/7 z + matrix.tz",
-        );
-    }
-}
-
-/// th11 screenshot save (eax-convention; filename pointer in EAX).
-/// The game calls this from the render thread before `Present`.
 const SCREENSHOT_SAVE_FN: usize = 0x0042_9ca0;
 const SCREENSHOT_SAVE_FN_PROLOGUE: [u8; 5] = [0x83, 0xec, 0x10, 0x83, 0x3d];
 
@@ -96,8 +58,16 @@ unsafe extern "C" fn screenshot_trampoline() -> u32 {
     );
 }
 
-pub(crate) unsafe fn install_screenshot_hook() {
+pub(crate) unsafe fn install() {
     unsafe {
+        install_call_site_rewrite(DIRECT3DCREATE9_CALL_VA, &DIRECT3DCREATE9_CALL_BYTES);
+        Patch::apply_all(PATCHES);
+        patch_jmp(
+            ANM_MODE57_SPLICE,
+            &[0x8b, 0x9b, 0x04, 0x04, 0x00, 0x00],
+            anm_mode57_z_trampoline as *mut (),
+            "AnmManager mode 5/7 z + matrix.tz",
+        );
         patch_jmp(
             SCREENSHOT_SAVE_FN,
             &SCREENSHOT_SAVE_FN_PROLOGUE,
