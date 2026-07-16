@@ -6,7 +6,7 @@
 use crate::patches::patch_call;
 use crate::protect::with_writable;
 use crate::vtable::{FnSlot, fn_ptr_to_raw, raw_to_fn_ptr};
-use std::ffi::{CStr, c_char};
+use std::ffi::CStr;
 use std::mem::offset_of;
 use std::ptr::{NonNull, read_unaligned, write_unaligned};
 use tracing::{info, warn};
@@ -188,7 +188,7 @@ unsafe fn data_directory(module: HMODULE, idx: usize) -> Option<(*const u8, u32)
         let dd_offset = offset_of!(IMAGE_NT_HEADERS32, OptionalHeader)
             + offset_of!(IMAGE_OPTIONAL_HEADER32, DataDirectory)
             + idx * size_of::<IMAGE_DATA_DIRECTORY>();
-        let va: u32 = read_unaligned(
+        let dir_rva: u32 = read_unaligned(
             nt_base
                 .add(dd_offset + offset_of!(IMAGE_DATA_DIRECTORY, VirtualAddress))
                 .cast(),
@@ -198,10 +198,10 @@ unsafe fn data_directory(module: HMODULE, idx: usize) -> Option<(*const u8, u32)
                 .add(dd_offset + offset_of!(IMAGE_DATA_DIRECTORY, Size))
                 .cast(),
         );
-        if va == 0 || size == 0 {
+        if dir_rva == 0 || size == 0 {
             return None;
         }
-        Some((base.add(va as usize), size))
+        Some((base.add(dir_rva as usize), size))
     }
 }
 
@@ -267,15 +267,15 @@ unsafe fn find_iat_slot(module: HMODULE, import_name: &str) -> SlotOutcome {
                 let ord_flag = 0x8000_0000;
                 if entry & ord_flag == 0 {
                     // By-name import; `entry` is the RVA of `IMAGE_IMPORT_BY_NAME`.
-                    let name_offset = entry as usize + offset_of!(ImageImportByName, name);
-                    let name_ptr = base.add(name_offset).cast::<c_char>();
+                    let name_rva = entry as usize + offset_of!(ImageImportByName, name);
+                    let name_ptr = base.add(name_rva).cast();
                     let imp_name = CStr::from_ptr(name_ptr).to_bytes();
                     if imp_name.eq_ignore_ascii_case(import_name.as_bytes()) {
-                        let slot_offset = ft as usize + i * size_of::<IMAGE_THUNK_DATA32>();
+                        let slot_rva = ft as usize + i * size_of::<IMAGE_THUNK_DATA32>();
                         // All accesses through the returned pointer occur via `read_unaligned` and `write_unaligned`,
                         // so the alignment bump from `*mut u8` is fine.
                         #[allow(clippy::cast_ptr_alignment)]
-                        let slot = base_mut.add(slot_offset).cast::<*mut ()>();
+                        let slot = base_mut.add(slot_rva).cast();
                         return match NonNull::new(slot) {
                             Some(ptr) => SlotOutcome::Hit { ptr },
                             None => SlotOutcome::Miss { descriptors },
