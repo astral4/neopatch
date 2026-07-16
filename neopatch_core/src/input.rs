@@ -229,7 +229,7 @@ mod tests {
 
     #[test]
     fn convert_pov_centered_passes_axes_through() {
-        for centered in [0xFFFF_FFFFu32, 0xFFFF, 36000, 99999] {
+        for centered in [0xffff_ffffu32, 0xffff, 36000, 99999] {
             let (lx, ly) = convert_pov(centered, 123, -456);
             assert_eq!(lx, 123, "pov={centered:#x}");
             assert_eq!(ly, -456, "pov={centered:#x}");

@@ -43,8 +43,8 @@ use windows_sys::Win32::System::Threading::{
 const DUMP_LIMIT: u32 = 8;
 
 // VC++ runtime conventions.
-const MS_VC_THREAD_NAME: NTSTATUS = 0x406D_1388_u32.cast_signed();
-const MS_VC_CXX_EH: NTSTATUS = 0xE06D_7363_u32.cast_signed();
+const MS_VC_THREAD_NAME: NTSTATUS = 0x406d_1388_u32.cast_signed();
+const MS_VC_CXX_EH: NTSTATUS = 0xe06d_7363_u32.cast_signed();
 
 /// Re-entry guard. If our filter itself crashes (e.g. dereferencing an invalid context), the OS would re-invoke us
 /// and we'd recurse until stack overflow. This is tripped on entry and released after first-chance (vectored) handling;

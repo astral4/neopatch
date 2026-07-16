@@ -65,7 +65,7 @@ const MAX_ENUM_SCAN: u32 = 4096;
 const D3DERR_DEVICELOST: HRESULT = HRESULT(0x8876_0868_u32.cast_signed());
 const D3DERR_DEVICEREMOVED: HRESULT = HRESULT(0x8876_0870_u32.cast_signed());
 const D3DERR_DEVICEHUNG: HRESULT = HRESULT(0x8876_0874_u32.cast_signed());
-const D3DERR_OUTOFVIDEOMEMORY: HRESULT = HRESULT(0x8876_017C_u32.cast_signed());
+const D3DERR_OUTOFVIDEOMEMORY: HRESULT = HRESULT(0x8876_017c_u32.cast_signed());
 
 /// Replay-speed state observed by game-specific crates, queried each `Present` to decide whether to switch the pacer policy.
 #[repr(u32)]
@@ -1734,7 +1734,7 @@ mod tests {
             assert!(is_transient_device_error(hr), "{}", fmt_hr!(hr));
         }
         assert!(!is_transient_device_error(HRESULT(
-            0x8876_086C_u32.cast_signed()
+            0x8876_086c_u32.cast_signed()
         )));
         assert!(!is_transient_device_error(HRESULT(0)));
     }

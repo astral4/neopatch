@@ -60,6 +60,6 @@ mod unwind_resume_stub {
 
     #[unsafe(no_mangle)]
     unsafe extern "C" fn _Unwind_Resume(_: *mut c_void) -> ! {
-        unsafe { ExitProcess(0xDEAD) }
+        unsafe { ExitProcess(0xdead) }
     }
 }

@@ -762,7 +762,7 @@ mod tests {
         assert_eq!(cfg.framerate.game_fps, 120);
         assert_eq!(cfg.framerate.replay_skip_fps, 480);
         assert_eq!(cfg.process.priority, PriorityClass::High);
-        assert_eq!(cfg.process.affinity_mask, Some(nz(0xFF)));
+        assert_eq!(cfg.process.affinity_mask, Some(nz(0xff)));
         assert_eq!(cfg.display.mode, DisplayMode::Fullscreen);
     }
 
