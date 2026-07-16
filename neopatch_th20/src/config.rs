@@ -1,9 +1,13 @@
 //! th20-specific configuration.
 
-use neopatch_core::config::{self, CoreConfig, DisplayMode as CoreDisplayMode};
+use neopatch_core::config::{
+    CoreConfig, DisplayMode as CoreDisplayMode, for_each_setting, parse_core_only,
+};
 use std::fmt::{Display, Formatter, Result as FmtResult};
 use std::io::{Result as IoResult, Write};
 use std::sync::OnceLock;
+
+pub(crate) static CONFIG: OnceLock<Th20Config> = OnceLock::new();
 
 #[derive(Default)]
 pub(crate) struct Th20Config {
@@ -11,11 +15,6 @@ pub(crate) struct Th20Config {
     pub resolution: Resolution,
 }
 
-pub(crate) static CONFIG: OnceLock<Th20Config> = OnceLock::new();
-
-/// th20 adds `Borderless` (radio 8, "DOT by DOT") on top of core's two variants.
-/// Under `Borderless` we drive `WindowPolicy::DeferToGame`, which doesn't consult
-/// `display.mode`; `to_core` collapses it onto `Fullscreen` for the other core sites that do.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum Th20DisplayMode {
     #[default]
@@ -43,7 +42,7 @@ impl Display for Th20DisplayMode {
     }
 }
 
-/// Back-buffer size for `Windowed` and `Fullscreen`. Ignored under `Borderless`.
+/// Back buffer size for `Windowed` and `Fullscreen`. Ignored under `Borderless`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum Resolution {
     R640x480,
@@ -53,9 +52,7 @@ pub(crate) enum Resolution {
 }
 
 impl Resolution {
-    /// Index into `DAT_005ae128` (the OK handler's check-order table); ends up
-    /// in `[0x005c4f80]`. 0..2 fullscreen, 3..5 windowed-framed, 6..7 upscaled-windowed
-    /// (not surfaced), 8 DOT by DOT, 9 smooth-scaled (not surfaced).
+    /// Index of the startup dialog's resolution radio button for this size and `mode`.
     pub(crate) fn radio_index(self, mode: Th20DisplayMode) -> u8 {
         match (mode, self) {
             (Th20DisplayMode::Fullscreen, Self::R640x480) => 0,
@@ -68,9 +65,8 @@ impl Resolution {
         }
     }
 
-    /// Mirrors `DAT_005ae1d0` (`0 1 2 0 1 2 3 4 5 5`), the value the OK handler
-    /// would have written to `[0x005c4f8a]`.
-    pub(crate) fn scale_byte(self, mode: Th20DisplayMode) -> u8 {
+    /// Index of the render scale for this size and `mode`.
+    pub(crate) fn scale_index(self, mode: Th20DisplayMode) -> u8 {
         match self.radio_index(mode) {
             i @ 0..=2 => i,
             i @ 3..=5 => i - 3,
@@ -116,18 +112,17 @@ fn parse_resolution(v: &str) -> Option<Resolution> {
     }
 }
 
-/// Parses INI text into both configs. th20 owns `[display] mode` (extends
-/// core's enum) and then overrides `core.display.mode` with the projection.
-pub(crate) fn parse(text: &str) -> (Th20Config, CoreConfig) {
+/// Parses INI text into a configuration, with defaults for any keys/sections the text omits.
+pub(crate) fn parse_config(text: &str) -> (Th20Config, CoreConfig) {
     let th20 = parse_th20_only(text);
-    let mut core = config::parse_core_only(text);
+    let mut core = parse_core_only(text);
     core.display.mode = th20.display_mode.to_core();
     (th20, core)
 }
 
 fn parse_th20_only(text: &str) -> Th20Config {
     let mut cfg = Th20Config::default();
-    config::for_each_setting(text, |section, k, v| {
+    for_each_setting(text, |section, k, v| {
         if section.eq_ignore_ascii_case("display") {
             if k.eq_ignore_ascii_case("mode") {
                 if let Some(m) = parse_display_mode(v) {
@@ -143,8 +138,8 @@ fn parse_th20_only(text: &str) -> Th20Config {
     cfg
 }
 
-/// Under `Borderless` the resolution line is a sentinel: th20's borderless
-/// branch overrides whatever value we'd otherwise log.
+/// Writes th20-specific manifest lines that aren't already covered by the core configuration.
+/// Under borderless, the resolution line carries a sentinel because the value we'd log gets overridden.
 pub(crate) fn write_manifest_extras<W: Write + ?Sized>(
     w: &mut W,
     th20: &Th20Config,
@@ -233,21 +228,21 @@ mod tests {
     }
 
     #[test]
-    fn scale_byte_matches_dat_005ae1d0() {
+    fn scale_index_matches_dat_005ae1d0() {
         for r in [
             Resolution::R640x480,
             Resolution::R960x720,
             Resolution::R1280x960,
         ] {
             assert_eq!(
-                r.scale_byte(Th20DisplayMode::Fullscreen),
+                r.scale_index(Th20DisplayMode::Fullscreen),
                 r.radio_index(Th20DisplayMode::Fullscreen),
             );
             assert_eq!(
-                r.scale_byte(Th20DisplayMode::Windowed),
+                r.scale_index(Th20DisplayMode::Windowed),
                 r.radio_index(Th20DisplayMode::Windowed) - 3,
             );
-            assert_eq!(r.scale_byte(Th20DisplayMode::Borderless), 5);
+            assert_eq!(r.scale_index(Th20DisplayMode::Borderless), 5);
         }
     }
 
@@ -269,7 +264,7 @@ mod tests {
 
     #[test]
     fn default_matches_documented_defaults() {
-        let (th20, core) = parse("");
+        let (th20, core) = parse_config("");
         assert_eq!(th20.display_mode, Th20DisplayMode::Windowed);
         assert_eq!(core.display.mode, CoreDisplayMode::Windowed);
         assert_eq!(core.display.refresh_rate, RefreshRateMode::NativeMultiple);
@@ -292,11 +287,11 @@ mod tests {
             mode = Borderless
             resolution = 960x720
         ";
-        let (th20, core) = parse(text);
+        let (th20, core) = parse_config(text);
         assert_eq!(core.framerate.game_fps, 120);
         assert_eq!(core.framerate.replay_skip_fps, 480);
         assert_eq!(core.process.priority, PriorityClass::High);
-        assert_eq!(core.process.affinity_mask, Some(nz(0xFF)));
+        assert_eq!(core.process.affinity_mask, Some(nz(0xff)));
         assert_eq!(th20.display_mode, Th20DisplayMode::Borderless);
         assert_eq!(core.display.mode, CoreDisplayMode::Fullscreen);
         assert_eq!(th20.resolution, Resolution::R960x720);
@@ -304,8 +299,9 @@ mod tests {
 
     #[test]
     fn parse_handles_quoted_values_and_comments() {
-        let (th20, core) =
-            parse("[display]\nmode = \"borderless\" ; trailing comment\nresolution = '960x720'");
+        let (th20, core) = parse_config(
+            "[display]\nmode = \"borderless\" ; trailing comment\nresolution = '960x720'",
+        );
         assert_eq!(th20.display_mode, Th20DisplayMode::Borderless);
         assert_eq!(core.display.mode, CoreDisplayMode::Fullscreen);
         assert_eq!(th20.resolution, Resolution::R960x720);

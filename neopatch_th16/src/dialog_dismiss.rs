@@ -1,12 +1,7 @@
 //! Logic for auto-dismissing th16's startup dialog.
-//!
-//! We let the dialog's message pump continue running because th16 folds it into the main loop,
-//! so the game tick advances while the dialog is up. This is done by hooking `CreateDialogParamA`,
-//! overriding the dialog's selections from our config, and using `PostMessage` to send an OK click;
-//! th16's OK handler (`fcn.0045c110`) tears the dialog down itself, so no pump exit-flag is needed.
 
 use crate::config::CONFIG;
-use neopatch_core::config::{self as core_config, DisplayMode};
+use neopatch_core::config::{CONFIG as CORE_CONFIG, DisplayMode};
 use neopatch_core::iat_hook;
 use neopatch_core::patches::Patch;
 use std::ffi::c_char;
@@ -17,25 +12,16 @@ use windows_sys::Win32::UI::Controls::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{BN_CLICKED, DLGPROC, PostMessageA, WM_COMMAND};
 
-const DIALOG_TEMPLATE_ID: usize = 0xCB;
+const DIALOG_TEMPLATE_ID: usize = 0xcb;
 const DIALOG_PROC_VA: usize = 0x0045_c110;
+const RES_RADIO_FIRST_ID: i32 = 0xcd;
+const RES_RADIO_LAST_ID: i32 = 0xcf;
+const FULLSCREEN_CHECKBOX_ID: i32 = 0xcb;
+const OK_BUTTON_ID: u32 = 0xd0;
 
-// Dialog control IDs (confirmed in the th16 dialog proc):
-// - 0xCA "don't show again" checkbox
-// - 0xCB fullscreen checkbox
-// - 0xCD/CE/CF render-size radios (640x480 / 960x720 / 1280x960)
-// - 0xD0 OK button
-const FULLSCREEN_CHECKBOX_ID: i32 = 0xCB;
-const RES_RADIO_FIRST_ID: i32 = 0xCD;
-const RES_RADIO_LAST_ID: i32 = 0xCF;
-const OK_BUTTON_ID: u32 = 0xD0;
+const CREATE_DIALOG_CALL_VA: usize = 0x0045_9b13;
+const CREATE_DIALOG_CALL_BYTES: [u8; 6] = [0xff, 0x15, 0x20, 0xb2, 0x48, 0x00];
 
-/// "force resolution dialog": `jne 0x459b01` -> `jmp 0x459b01` makes the dialog path
-/// unconditional, so our hook fires every launch instead of being gated by th16.cfg's
-/// persisted "show this dialog" bit or an Alt-held-at-launch check.
-///
-/// "force dialog hidden": `push 5` (SW_SHOW) -> `push 0` (SW_HIDE) on the dialog's
-/// `ShowWindow`. The OK handler still runs and applies the selection invisibly.
 const DIALOG_PATCHES: &[Patch] = &[
     Patch::new(
         0x0045_9ae9,
@@ -51,9 +37,6 @@ const DIALOG_PATCHES: &[Patch] = &[
     ),
 ];
 
-const CREATE_DIALOG_CALL_ADDR: usize = 0x0045_9b13;
-const CREATE_DIALOG_CALL_BYTES: [u8; 6] = [0xff, 0x15, 0x20, 0xb2, 0x48, 0x00];
-
 iat_hook! {
     REAL_CREATE_DIALOG_PARAM_A / real_create_dialog_param_a : "CreateDialogParamA"
         as fn(
@@ -63,18 +46,6 @@ iat_hook! {
             proc: DLGPROC,
             init_param: LPARAM,
         ) -> HWND;
-}
-
-pub(crate) unsafe fn install(host: HMODULE) {
-    unsafe {
-        REAL_CREATE_DIALOG_PARAM_A.install_with_call_site(
-            host,
-            hook_create_dialog_param_a,
-            CREATE_DIALOG_CALL_ADDR,
-            &CREATE_DIALOG_CALL_BYTES,
-        );
-        Patch::apply_all(DIALOG_PATCHES);
-    }
 }
 
 unsafe extern "system" fn hook_create_dialog_param_a(
@@ -103,35 +74,41 @@ unsafe extern "system" fn hook_create_dialog_param_a(
             return hwnd;
         }
 
-        let th16_cfg = CONFIG.get().unwrap();
-        let core_cfg = core_config::CONFIG.get().unwrap();
+        let mode = CORE_CONFIG.get().unwrap().display.mode;
+        let resolution = CONFIG.get().unwrap().resolution;
 
-        let res_radio_id = RES_RADIO_FIRST_ID + i32::from(th16_cfg.resolution.index());
-        let fullscreen = matches!(core_cfg.display.mode, DisplayMode::Fullscreen);
-
-        // The range is restricted to 0xCD..0xCF so `CheckRadioButton`'s
-        // "clear others in range" doesn't hit the checkboxes at 0xCA/CB.
-        let radio_ret = CheckRadioButton(hwnd, RES_RADIO_FIRST_ID, RES_RADIO_LAST_ID, res_radio_id);
-        let fs_state = if fullscreen {
-            BST_CHECKED
-        } else {
-            BST_UNCHECKED
+        let res_radio_id = RES_RADIO_FIRST_ID + i32::from(resolution.index());
+        let fullscreen_state = match mode {
+            DisplayMode::Windowed => BST_UNCHECKED,
+            DisplayMode::Fullscreen => BST_CHECKED,
         };
-        let dlg_btn_ret = CheckDlgButton(hwnd, FULLSCREEN_CHECKBOX_ID, fs_state);
-        // Drives the dialog proc's own OK handler (reads the control state, then self-destructs).
         let wparam = ((BN_CLICKED << 16) | OK_BUTTON_ID) as WPARAM;
+
+        let radio_ret = CheckRadioButton(hwnd, RES_RADIO_FIRST_ID, RES_RADIO_LAST_ID, res_radio_id);
+        let dlg_btn_ret = CheckDlgButton(hwnd, FULLSCREEN_CHECKBOX_ID, fullscreen_state);
         let pm_ok = PostMessageA(hwnd, WM_COMMAND, wparam, 0);
+
         info!(
             kind = "dialog_auto_dismissed",
-            resolution = %th16_cfg.resolution,
-            mode = %core_cfg.display.mode,
+            mode = %mode,
+            resolution = %resolution,
             res_radio = format_args!("{res_radio_id:#x}"),
-            fullscreen,
-            fs_state,
             check_radio_button = radio_ret,
             check_dlg_button = dlg_btn_ret,
             post_message_ok = pm_ok,
         );
         hwnd
+    }
+}
+
+pub(crate) unsafe fn install(host: HMODULE) {
+    unsafe {
+        REAL_CREATE_DIALOG_PARAM_A.install_with_call_site(
+            host,
+            hook_create_dialog_param_a,
+            CREATE_DIALOG_CALL_VA,
+            &CREATE_DIALOG_CALL_BYTES,
+        );
+        Patch::apply_all(DIALOG_PATCHES);
     }
 }

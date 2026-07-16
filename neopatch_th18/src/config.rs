@@ -1,9 +1,13 @@
 //! th18-specific configuration.
 
-use neopatch_core::config::{self, CoreConfig, DisplayMode as CoreDisplayMode};
+use neopatch_core::config::{
+    CoreConfig, DisplayMode as CoreDisplayMode, for_each_setting, parse_core_only,
+};
 use std::fmt::{Display, Formatter, Result as FmtResult};
 use std::io::{Result as IoResult, Write};
 use std::sync::OnceLock;
+
+pub(crate) static CONFIG: OnceLock<Th18Config> = OnceLock::new();
 
 #[derive(Default)]
 pub(crate) struct Th18Config {
@@ -11,11 +15,6 @@ pub(crate) struct Th18Config {
     pub resolution: Resolution,
 }
 
-pub(crate) static CONFIG: OnceLock<Th18Config> = OnceLock::new();
-
-/// th18 adds `Borderless` (radio 8, "DOT by DOT") on top of core's two variants.
-/// Under `Borderless` we drive `WindowPolicy::DeferToGame`, which doesn't consult
-/// `display.mode`; `to_core` collapses it onto `Fullscreen` for the other core sites that do.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum Th18DisplayMode {
     #[default]
@@ -43,7 +42,7 @@ impl Display for Th18DisplayMode {
     }
 }
 
-/// Back-buffer size for `Windowed` and `Fullscreen`. Ignored under `Borderless`.
+/// Back buffer size for `Windowed` and `Fullscreen`. Ignored under `Borderless`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum Resolution {
     R640x480,
@@ -53,7 +52,7 @@ pub(crate) enum Resolution {
 }
 
 impl Resolution {
-    /// Index into the dialog's ten-radio array at `DAT_004b4280`.
+    /// Index of the startup dialog's resolution radio button for this size and `mode`.
     pub(crate) fn radio_index(self, mode: Th18DisplayMode) -> u8 {
         match (mode, self) {
             (Th18DisplayMode::Fullscreen, Self::R640x480) => 0,
@@ -66,10 +65,8 @@ impl Resolution {
         }
     }
 
-    /// Per-radio value `DAT_004cd012` would have received from the OK handler,
-    /// mirroring the table at `DAT_004b7fbc` (`0 1 2 0 1 2 3 4 5 5`). Under
-    /// borderless `fcn.004734e0` overrides with its own monitor-size auto-pick.
-    pub(crate) fn scale_byte(self, mode: Th18DisplayMode) -> u8 {
+    /// Index of the render scale for this size and `mode`.
+    pub(crate) fn scale_index(self, mode: Th18DisplayMode) -> u8 {
         match self.radio_index(mode) {
             i @ 0..=2 => i,
             i @ 3..=5 => i - 3,
@@ -115,20 +112,17 @@ fn parse_resolution(v: &str) -> Option<Resolution> {
     }
 }
 
-/// Parses INI text into a `(Th18Config, CoreConfig)` pair, with defaults for
-/// any keys/sections the text omits. th18 owns `[display] mode` because it
-/// extends core's enum, then overrides `core.display.mode` with the
-/// canonical projection.
-pub(crate) fn parse(text: &str) -> (Th18Config, CoreConfig) {
+/// Parses INI text into a configuration, with defaults for any keys/sections the text omits.
+pub(crate) fn parse_config(text: &str) -> (Th18Config, CoreConfig) {
     let th18 = parse_th18_only(text);
-    let mut core = config::parse_core_only(text);
+    let mut core = parse_core_only(text);
     core.display.mode = th18.display_mode.to_core();
     (th18, core)
 }
 
 fn parse_th18_only(text: &str) -> Th18Config {
     let mut cfg = Th18Config::default();
-    config::for_each_setting(text, |section, k, v| {
+    for_each_setting(text, |section, k, v| {
         if section.eq_ignore_ascii_case("display") {
             if k.eq_ignore_ascii_case("mode") {
                 if let Some(m) = parse_display_mode(v) {
@@ -144,9 +138,8 @@ fn parse_th18_only(text: &str) -> Th18Config {
     cfg
 }
 
-/// Writes th18-specific manifest lines that aren't already covered by the core
-/// configuration. Under `Borderless` the resolution line carries a sentinel
-/// because `fcn.004734e0` overrides the value we'd otherwise log.
+/// Writes th18-specific manifest lines that aren't already covered by the core configuration.
+/// Under borderless, the resolution line carries a sentinel because the value we'd log gets overridden.
 pub(crate) fn write_manifest_extras<W: Write + ?Sized>(
     w: &mut W,
     th18: &Th18Config,
@@ -196,7 +189,6 @@ mod tests {
 
     #[test]
     fn radio_index_combines_mode_and_resolution() {
-        // Fullscreen -> popup radios 0..2; Windowed -> framed radios 3..5.
         assert_eq!(
             Resolution::R640x480.radio_index(Th18DisplayMode::Fullscreen),
             0,
@@ -221,7 +213,6 @@ mod tests {
             Resolution::R1280x960.radio_index(Th18DisplayMode::Windowed),
             5,
         );
-        // Borderless ignores resolution; always maps to radio 8 ("DOT by DOT").
         assert_eq!(
             Resolution::R640x480.radio_index(Th18DisplayMode::Borderless),
             8,
@@ -237,21 +228,21 @@ mod tests {
     }
 
     #[test]
-    fn scale_byte_matches_dat_004b7fbc() {
+    fn scale_index_matches_dat_004b7fbc() {
         for r in [
             Resolution::R640x480,
             Resolution::R960x720,
             Resolution::R1280x960,
         ] {
             assert_eq!(
-                r.scale_byte(Th18DisplayMode::Fullscreen),
+                r.scale_index(Th18DisplayMode::Fullscreen),
                 r.radio_index(Th18DisplayMode::Fullscreen),
             );
             assert_eq!(
-                r.scale_byte(Th18DisplayMode::Windowed),
+                r.scale_index(Th18DisplayMode::Windowed),
                 r.radio_index(Th18DisplayMode::Windowed) - 3,
             );
-            assert_eq!(r.scale_byte(Th18DisplayMode::Borderless), 5);
+            assert_eq!(r.scale_index(Th18DisplayMode::Borderless), 5);
         }
     }
 
@@ -273,7 +264,7 @@ mod tests {
 
     #[test]
     fn default_matches_documented_defaults() {
-        let (th18, core) = parse("");
+        let (th18, core) = parse_config("");
         assert_eq!(th18.display_mode, Th18DisplayMode::Windowed);
         assert_eq!(core.display.mode, CoreDisplayMode::Windowed);
         assert_eq!(core.display.refresh_rate, RefreshRateMode::NativeMultiple);
@@ -296,21 +287,21 @@ mod tests {
             mode = Borderless
             resolution = 960x720
         ";
-        let (th18, core) = parse(text);
+        let (th18, core) = parse_config(text);
         assert_eq!(core.framerate.game_fps, 120);
         assert_eq!(core.framerate.replay_skip_fps, 480);
         assert_eq!(core.process.priority, PriorityClass::High);
-        assert_eq!(core.process.affinity_mask, Some(nz(0xFF)));
+        assert_eq!(core.process.affinity_mask, Some(nz(0xff)));
         assert_eq!(th18.display_mode, Th18DisplayMode::Borderless);
-        // Core's mode is the canonicalized projection.
         assert_eq!(core.display.mode, CoreDisplayMode::Fullscreen);
         assert_eq!(th18.resolution, Resolution::R960x720);
     }
 
     #[test]
     fn parse_handles_quoted_values_and_comments() {
-        let (th18, core) =
-            parse("[display]\nmode = \"borderless\" ; trailing comment\nresolution = '960x720'");
+        let (th18, core) = parse_config(
+            "[display]\nmode = \"borderless\" ; trailing comment\nresolution = '960x720'",
+        );
         assert_eq!(th18.display_mode, Th18DisplayMode::Borderless);
         assert_eq!(core.display.mode, CoreDisplayMode::Fullscreen);
         assert_eq!(th18.resolution, Resolution::R960x720);

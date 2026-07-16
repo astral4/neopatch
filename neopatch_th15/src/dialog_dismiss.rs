@@ -1,11 +1,7 @@
 //! Logic for auto-dismissing th15's startup dialog.
-//!
-//! We let the dialog's message pump continue running because the loader thread deadlocks otherwise.
-//! This is done by hooking `CreateDialogParamA`, overriding the dialog's selections from
-//! our config, and then using `PostMessage` to send an OK click and set the pump's exit-flag bit.
 
 use crate::config::CONFIG;
-use neopatch_core::config::{self as core_config, DisplayMode};
+use neopatch_core::config::{CONFIG as CORE_CONFIG, DisplayMode};
 use neopatch_core::game_addr::GameAddr;
 use neopatch_core::iat_hook;
 use neopatch_core::patches::Patch;
@@ -17,40 +13,22 @@ use windows_sys::Win32::UI::Controls::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{BN_CLICKED, DLGPROC, PostMessageA, WM_COMMAND};
 
-const DIALOG_TEMPLATE_ID: usize = 0xCB;
-const DIALOG_PROC_VA: usize = 0x0047_3DE0;
-
-// Dialog control IDs:
-// - 0xCA "don't show again" checkbox
-// - 0xCB fullscreen checkbox
-// - 0xCC unused
-// - 0xCD/CE/CF resolution radios (640x480/960x720/1280x960)
-//
-// The OK handler computes `[0x4e79c3] = res_radio_index + (0xCB checked ? 0 : 3)`,
-// so we have to set both the resolution radio and the fullscreen checkbox.
-const FULLSCREEN_CHECKBOX_ID: i32 = 0xCB;
-const RES_RADIO_FIRST_ID: i32 = 0xCD;
-const RES_RADIO_LAST_ID: i32 = 0xCF;
-
-const OK_BUTTON_ID: u32 = 0xD0;
-
-/// Pump exit predicate at `0x4716A2`: `test [0x4e6d1c], 0x80001`. Setting bit 19
-/// ("Enter accept") terminates the pump after the posted OK click is dispatched.
-const EXIT_FLAG: GameAddr<u32> = unsafe { GameAddr::new(0x004E_6D1C) };
+const DIALOG_TEMPLATE_ID: usize = 0xcb;
+const DIALOG_PROC_VA: usize = 0x0047_3de0;
+const RES_RADIO_FIRST_ID: i32 = 0xcd;
+const RES_RADIO_LAST_ID: i32 = 0xcf;
+const FULLSCREEN_CHECKBOX_ID: i32 = 0xcb;
+const OK_BUTTON_ID: u32 = 0xd0;
+const EXIT_FLAG: GameAddr<u32> = unsafe { GameAddr::new(0x004e_6d1c) };
 const EXIT_FLAG_BIT: u32 = 0x0008_0000;
 
-/// "force resolution dialog": unconditional gate so our IAT hook fires every launch
-/// instead of being suppressed by th15.cfg's "don't show again" bit.
-///
-/// "force dialog hidden": replaces `SW_SHOW` with `SW_HIDE` on the explicit
-/// `ShowWindow` call. The OK handler still runs and writes `[0x4e79c3]` invisibly.
+const CREATE_DIALOG_CALL_VA: usize = 0x0047_1619;
+const CREATE_DIALOG_CALL_BYTES: [u8; 6] = [0xff, 0x15, 0x30, 0xe2, 0x4b, 0x00];
+
 const DIALOG_PATCHES: &[Patch] = &[
     Patch::new(0x0047_15f2, &[0x75], &[0xeb], "force resolution dialog"),
     Patch::new(0x0047_1620, &[0x05], &[0x00], "force dialog hidden"),
 ];
-
-const CREATE_DIALOG_CALL_ADDR: usize = 0x0047_1619;
-const CREATE_DIALOG_CALL_BYTES: [u8; 6] = [0xff, 0x15, 0x30, 0xe2, 0x4b, 0x00];
 
 iat_hook! {
     REAL_CREATE_DIALOG_PARAM_A / real_create_dialog_param_a : "CreateDialogParamA"
@@ -61,18 +39,6 @@ iat_hook! {
             proc: DLGPROC,
             init_param: LPARAM,
         ) -> HWND;
-}
-
-pub(crate) unsafe fn install(host: HMODULE) {
-    unsafe {
-        REAL_CREATE_DIALOG_PARAM_A.install_with_call_site(
-            host,
-            hook_create_dialog_param_a,
-            CREATE_DIALOG_CALL_ADDR,
-            &CREATE_DIALOG_CALL_BYTES,
-        );
-        Patch::apply_all(DIALOG_PATCHES);
-    }
 }
 
 unsafe extern "system" fn hook_create_dialog_param_a(
@@ -101,36 +67,28 @@ unsafe extern "system" fn hook_create_dialog_param_a(
             return hwnd;
         }
 
-        let th15_cfg = CONFIG.get().unwrap();
-        let core_cfg = core_config::CONFIG.get().unwrap();
+        let mode = CORE_CONFIG.get().unwrap().display.mode;
+        let resolution = CONFIG.get().unwrap().resolution;
 
-        let res_radio_id = RES_RADIO_FIRST_ID + i32::from(th15_cfg.resolution.index());
-        let fullscreen = matches!(core_cfg.display.mode, DisplayMode::Fullscreen);
-
-        // The range is restricted to 0xCD..0xCF so `CheckRadioButton`'s
-        // "clear others in range" doesn't hit the checkboxes at 0xCA/CB/CC.
-        let radio_ret = CheckRadioButton(hwnd, RES_RADIO_FIRST_ID, RES_RADIO_LAST_ID, res_radio_id);
-        let fs_state = if fullscreen {
-            BST_CHECKED
-        } else {
-            BST_UNCHECKED
+        let res_radio_id = RES_RADIO_FIRST_ID + i32::from(resolution.index());
+        let fullscreen_state = match mode {
+            DisplayMode::Windowed => BST_UNCHECKED,
+            DisplayMode::Fullscreen => BST_CHECKED,
         };
-        let dlg_btn_ret = CheckDlgButton(hwnd, FULLSCREEN_CHECKBOX_ID, fs_state);
         let wparam = ((BN_CLICKED << 16) | OK_BUTTON_ID) as WPARAM;
+
+        let radio_ret = CheckRadioButton(hwnd, RES_RADIO_FIRST_ID, RES_RADIO_LAST_ID, res_radio_id);
+        let dlg_btn_ret = CheckDlgButton(hwnd, FULLSCREEN_CHECKBOX_ID, fullscreen_state);
         let pm_ok = PostMessageA(hwnd, WM_COMMAND, wparam, 0);
-        // We post first, then set the exit bit. The pump at `0x471633` dispatches
-        // queued messages before re-testing `[0x4e6d1c]` at `0x471698`, so the OK handler's
-        // `[0x4e79c3]` write runs on the same iteration that our bit terminates the loop.
         let prev = EXIT_FLAG.read();
         let next = prev | EXIT_FLAG_BIT;
         EXIT_FLAG.write(next);
+
         info!(
             kind = "dialog_auto_dismissed",
-            resolution = %th15_cfg.resolution,
-            mode = %core_cfg.display.mode,
+            mode = %mode,
+            resolution = %resolution,
             res_radio = format_args!("{res_radio_id:#x}"),
-            fullscreen,
-            fs_state,
             check_radio_button = radio_ret,
             check_dlg_button = dlg_btn_ret,
             post_message_ok = pm_ok,
@@ -138,5 +96,17 @@ unsafe extern "system" fn hook_create_dialog_param_a(
             exit_flag_next = format_args!("{next:#010x}"),
         );
         hwnd
+    }
+}
+
+pub(crate) unsafe fn install(host: HMODULE) {
+    unsafe {
+        REAL_CREATE_DIALOG_PARAM_A.install_with_call_site(
+            host,
+            hook_create_dialog_param_a,
+            CREATE_DIALOG_CALL_VA,
+            &CREATE_DIALOG_CALL_BYTES,
+        );
+        Patch::apply_all(DIALOG_PATCHES);
     }
 }

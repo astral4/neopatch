@@ -1,8 +1,4 @@
 //! Auto-dismiss th20's startup dialog.
-//!
-//! th20's dialog runs inside a self-contained `__stdcall fcn.0041ae70` with its own `PeekMessageW`
-//! loop. We splice the function entry and mirror the bytes the OK handler `fcn.0041ab30` would have
-//! written, then clear the lifecycle bits main checks on return (`(DAT_005b87e8 >> 3) & 3 == 0`).
 
 use crate::aslr::{rebased_addr, rebased_patch_jmp};
 use crate::config::CONFIG;
@@ -12,8 +8,8 @@ use tracing::info;
 const RADIO_INDEX_BYTE_VA: usize = 0x005c_4f80;
 const SCALE_INDEX_BYTE_VA: usize = 0x005c_4f8a;
 const DIALOG_LIFECYCLE_FLAGS_VA: usize = 0x005b_87e8;
+const DIALOG_LIFECYCLE_BITS: u32 = 0x18;
 
-/// The 5-byte prologue is the first half of `push ebp; mov ebp, esp; sub esp, 0x15c`.
 const DIALOG_DISPATCH_VA: usize = 0x0041_ae70;
 const DIALOG_DISPATCH_PROLOGUE: [u8; 5] = [0x55, 0x8b, 0xec, 0x81, 0xec];
 
@@ -26,19 +22,19 @@ unsafe extern "stdcall" fn dialog_short_circuit() {
     let cfg = CONFIG.get().unwrap();
     let mode = cfg.display_mode;
     let idx = cfg.resolution.radio_index(mode);
-    let scale = cfg.resolution.scale_byte(mode);
+    let scale = cfg.resolution.scale_index(mode);
     let radio = unsafe { rebased_addr::<u8>(slide, RADIO_INDEX_BYTE_VA) };
     let scale_addr = unsafe { rebased_addr::<u8>(slide, SCALE_INDEX_BYTE_VA) };
     let lifecycle = unsafe { rebased_addr::<u32>(slide, DIALOG_LIFECYCLE_FLAGS_VA) };
     radio.write(idx);
     scale_addr.write(scale);
-    lifecycle.write(lifecycle.read() & !0x18);
+    lifecycle.write(lifecycle.read() & !DIALOG_LIFECYCLE_BITS);
     info!(
         kind = "dialog_short_circuited",
         resolution = %cfg.resolution,
         mode = %mode,
         radio_index = idx,
-        scale_byte = scale,
+        scale_index = scale,
     );
 }
 

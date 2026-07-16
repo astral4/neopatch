@@ -1,23 +1,17 @@
 //! th16-specific configuration.
 
-use neopatch_core::config::{self, CoreConfig};
+use neopatch_core::config::{CoreConfig, for_each_setting, parse_core_only};
 use std::fmt::{Display, Formatter, Result as FmtResult};
 use std::io::{Result as IoResult, Write};
 use std::sync::OnceLock;
+
+pub(crate) static CONFIG: OnceLock<Th16Config> = OnceLock::new();
 
 #[derive(Default)]
 pub(crate) struct Th16Config {
     pub resolution: Resolution,
 }
 
-pub(crate) static CONFIG: OnceLock<Th16Config> = OnceLock::new();
-
-// Important: discriminants are load-bearing! They're the resolution component of:
-// - the display-mode byte (`byte % 3`, with `byte / 3 == 0` selecting fullscreen and
-//   `== 1` selecting windowed)
-// - the offset from `RES_RADIO_FIRST_ID` (`0xCD`) for the dialog radio control IDs
-// - the index into the `ascii.anm` / `ascii_960.anm` / `ascii_1280.anm` font selection
-//   done by the `AsciiInf` dispatcher
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum Resolution {
@@ -66,15 +60,14 @@ fn parse_resolution(v: &str) -> Option<Resolution> {
     }
 }
 
-/// Parses INI text into a `(Th16Config, CoreConfig)` pair,
-/// with defaults for any keys/sections the text omits.
-pub(crate) fn parse(text: &str) -> (Th16Config, CoreConfig) {
-    (parse_th16_only(text), config::parse_core_only(text))
+/// Parses INI text into a configuration, with defaults for any keys/sections the text omits.
+pub(crate) fn parse_config(text: &str) -> (Th16Config, CoreConfig) {
+    (parse_th16_only(text), parse_core_only(text))
 }
 
 fn parse_th16_only(text: &str) -> Th16Config {
     let mut cfg = Th16Config::default();
-    config::for_each_setting(text, |section, k, v| {
+    for_each_setting(text, |section, k, v| {
         if section.eq_ignore_ascii_case("display")
             && k.eq_ignore_ascii_case("resolution")
             && let Some(r) = parse_resolution(v)
@@ -120,7 +113,7 @@ mod tests {
 
     #[test]
     fn default_matches_documented_defaults() {
-        let (th16, core) = parse("");
+        let (th16, core) = parse_config("");
         assert_eq!(core.display.mode, DisplayMode::Windowed);
         assert_eq!(core.display.refresh_rate, RefreshRateMode::NativeMultiple);
         assert_eq!(th16.resolution, Resolution::R1280x960);
@@ -141,18 +134,37 @@ mod tests {
             [display]
             resolution = 960x720
         ";
-        let (th16, core) = parse(text);
+        let (th16, core) = parse_config(text);
         assert_eq!(core.framerate.game_fps, 120);
         assert_eq!(core.framerate.replay_skip_fps, 480);
         assert_eq!(core.process.priority, PriorityClass::High);
-        assert_eq!(core.process.affinity_mask, Some(nz(0xFF)));
+        assert_eq!(core.process.affinity_mask, Some(nz(0xff)));
         assert_eq!(th16.resolution, Resolution::R960x720);
     }
 
     #[test]
+    fn parse_silently_ignores_unknown() {
+        let text = "
+            [does_not_exist]
+            x = 1
+
+            [framerate]
+            unknown_key = whatever
+            game_fps = NotANumber
+
+            no_equals_sign
+            ; comment line
+            # also a comment
+        ";
+        let (_, core) = parse_config(text);
+        assert_eq!(core.framerate.game_fps, 60);
+    }
+
+    #[test]
     fn parse_handles_quoted_values_and_comments() {
-        let (th16, core) =
-            parse("[display]\nmode = \"fullscreen\" ; trailing comment\nresolution = '960x720'");
+        let (th16, core) = parse_config(
+            "[display]\nmode = \"fullscreen\" ; trailing comment\nresolution = '960x720'",
+        );
         assert_eq!(core.display.mode, DisplayMode::Fullscreen);
         assert_eq!(th16.resolution, Resolution::R960x720);
     }

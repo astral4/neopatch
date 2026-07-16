@@ -1,6 +1,4 @@
-//! neopatch_th20: latency reductions, optimizations, and other fixes for Touhou 20.
-//!
-//! Shipped as `dinput8.dll` next to `th20.exe`.
+//! neopatch_th20: neopatch for Touhou 20.
 
 #[cfg(all(not(panic = "abort"), not(test), not(doc)))]
 compile_error!("neopatch_th20 requires `panic = \"abort\"`");
@@ -12,8 +10,8 @@ mod patches;
 mod state;
 
 use crate::aslr::host_slide;
-use crate::config::{self as th20_config, Th20Config, Th20DisplayMode};
-use neopatch_core::config::{self as core_config, CoreConfig};
+use crate::config::{CONFIG, Th20Config, Th20DisplayMode, parse_config, write_manifest_extras};
+use neopatch_core::config::{CONFIG as CORE_CONFIG, CoreConfig, decode_text};
 use neopatch_core::pacer::{PACER, Pacer, PacingPolicy};
 use neopatch_core::{
     crash, d3d9, d3dx9, dinput8, dinput8_export, exit_hooks, gdi_caps, input, log, process,
@@ -44,11 +42,7 @@ pub unsafe extern "system" fn DllMain(
     }
     unsafe {
         DisableThreadLibraryCalls(hinst as HMODULE);
-        // Lets the vtable patcher distinguish "already our hook" (idempotent re-entry)
-        // from a shim-layer chain like `apphelp.dll`'s `CreateDevice` hijack.
         vtable::set_our_dll_handle(hinst as HMODULE);
-        // Cache the real `DirectInput8Create` before `install_hooks`
-        // so the proxy export works even if hook installation fails.
         dinput8::init();
         install_hooks();
     }
@@ -64,16 +58,16 @@ unsafe fn install_hooks() {
             .and_then(|d| read(d.join("neopatch.ini")).ok())
             .map_or_else(
                 || (Th20Config::default(), CoreConfig::default()),
-                |b| th20_config::parse(&core_config::decode_text(&b)),
+                |b| parse_config(&decode_text(&b)),
             );
-        drop(core_config::CONFIG.set(core_cfg));
-        drop(config::CONFIG.set(th20_cfg));
-        let core_cfg = core_config::CONFIG.get().unwrap();
-        let th20_cfg = config::CONFIG.get().unwrap();
+        drop(CORE_CONFIG.set(core_cfg));
+        drop(CONFIG.set(th20_cfg));
+        let core_cfg = CORE_CONFIG.get().unwrap();
+        let th20_cfg = CONFIG.get().unwrap();
 
         let install_dir = exe_dir.map_or_else(|| PathBuf::from("."), Path::to_path_buf);
         log::init(&install_dir, core_cfg, host_exe_path.as_deref(), |w| {
-            th20_config::write_manifest_extras(w, th20_cfg)
+            write_manifest_extras(w, th20_cfg)
         });
 
         crash::install_handlers();
@@ -108,26 +102,20 @@ unsafe fn install_hooks() {
             },
             window::WindowApi::Wide,
         );
-        dialog_dismiss::install(slide);
         exit_hooks::install(host_exe);
         d3dx9::install(host_exe);
 
-        // Wire the replay-mode probe before any `Present` can fire.
         state::install(slide);
-
         _ = PACER.set(Pacer::new(PacingPolicy::LiveInput {
             target_fps: core_cfg.framerate.game_fps,
         }));
-
         d3d9::install(host_exe);
-        patches::install_d3d9_call_site_rewrite(slide);
 
-        // th20's input writer at `fcn.00421b00` does not read `DIJOYSTATE2` offsets
-        // 0x20-0x30 (`rgdwPOV[]`), so the default of `dpad = true` is safe.
         if core_cfg.input.dpad {
             input::install();
         }
-        patches::apply_basic(slide);
-        patches::install_screenshot_hook(slide);
+
+        dialog_dismiss::install(slide);
+        patches::install(slide);
     }
 }

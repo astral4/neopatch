@@ -1,7 +1,6 @@
 //! Runtime rebasing for Touhou 20.
 //!
-//! Constants are stored as preferred-base VAs. Installation code adds `host_slide()`
-//! to reach the runtime VA. With ASLR off, `slide == 0`.
+//! Constants are stored as preferred-base VAs. Installation code adds [`host_slide()`] to reach the runtime VA.
 
 use neopatch_core::d3d9::install_call_site_rewrite;
 use neopatch_core::game_addr::GameAddr;
@@ -48,11 +47,10 @@ pub(crate) unsafe fn rebased_call_site_rewrite<const N: usize>(
     unsafe { install_call_site_rewrite(va.wrapping_add(slide), expected) };
 }
 
-/// `core::GameAddr<T>` for a th20 global at `va + slide` (the rebased analog of a fixed
-/// `GameAddr::new`). Forwards to core like the `rebased_*` patch helpers above.
+/// Returns `GameAddr<T>` for a th20 global at `va + slide`.
 ///
 /// # Safety
-/// `va + slide` must point to a value of layout `T` in `th20.exe v1.00a`.
+/// `va + slide` must point to a value with layout `T`.
 pub(crate) unsafe fn rebased_addr<T: Copy>(slide: usize, va: usize) -> GameAddr<T> {
     unsafe { GameAddr::new(va.wrapping_add(slide)) }
 }
