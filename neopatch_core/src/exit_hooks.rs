@@ -128,7 +128,7 @@ unsafe extern "system" fn hook_create_thread(
 ) -> HANDLE {
     unsafe {
         let h = real_create_thread(sec, stack, start, param, flags, tid_out);
-        let start_va = start.map_or(0, |f| f as usize);
+        let start_va = start.map_or(0, |f| (f as *const ()).addr());
         let tid_out = Untrusted::from_raw(tid_out.cast_const());
         let mut tid: u32 = 0;
         if !tid_out.is_null() {

@@ -42,7 +42,7 @@ unsafe extern "system" fn hook_dialog_box_param_a(
     init_param: LPARAM,
 ) -> isize {
     let template_id = template.addr();
-    let proc_va = proc.map_or(0usize, |f| f as usize);
+    let proc_va = proc.map_or(0usize, |f| (f as *const ()).addr());
 
     if template_id != DIALOG_TEMPLATE_ID || proc_va != DIALOG_PROC_VA {
         info!(

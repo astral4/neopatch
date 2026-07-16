@@ -10,7 +10,7 @@ use windows_sys::Win32::Foundation::HMODULE;
 pub(crate) const PREFERRED_IMAGE_BASE: usize = 0x0040_0000;
 
 pub(crate) fn host_slide(host: HMODULE) -> usize {
-    host.addr().wrapping_sub(PREFERRED_IMAGE_BASE)
+    host.expose_provenance().wrapping_sub(PREFERRED_IMAGE_BASE)
 }
 
 /// # Safety

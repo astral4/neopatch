@@ -8,10 +8,9 @@ use crate::log::flush;
 use crate::modules::{Module, annotate, annotate_resolved, walk_modules};
 use crate::thread::main_id;
 use crate::untrusted::safe_read_stack;
-use std::ffi::c_void;
 use std::mem::zeroed;
 use std::num::NonZero;
-use std::ptr::{null_mut, read_unaligned, with_exposed_provenance_mut};
+use std::ptr::{null_mut, read_unaligned, without_provenance_mut};
 use std::slice::from_raw_parts;
 use std::thread::{Builder, sleep};
 use std::time::Duration;
@@ -71,9 +70,10 @@ pub fn install() {
 fn lookup_handle_type(handle: NonZero<u32>) -> Option<String> {
     unsafe {
         let mut buf = [0u8; 1024];
+
         #[allow(clippy::cast_possible_truncation)]
         let status = NtQueryObject(
-            with_exposed_provenance_mut::<c_void>(handle.get() as usize),
+            without_provenance_mut(handle.get() as usize),
             ObjectTypeInformation,
             buf.as_mut_ptr().cast(),
             buf.len() as u32,
@@ -82,10 +82,12 @@ fn lookup_handle_type(handle: NonZero<u32>) -> Option<String> {
         if status < 0 {
             return None;
         }
+
         // The kernel writes the name string into the trailing area of our buffer and sets `TypeName.Buffer` to point at it.
         // We check the bounds of the kernel-supplied pointer against our own buffer
         // so a malformed reply can't redirect us at arbitrary process memory or an unmapped address.
         let header: UnicodeStringHeader = read_unaligned(buf.as_ptr().cast());
+
         if header.length == 0 || header.buffer.is_null() {
             return None;
         }
@@ -96,7 +98,10 @@ fn lookup_handle_type(handle: NonZero<u32>) -> Option<String> {
         if name_start < buf_start || name_end > buf_end || name_start & 1 != 0 {
             return None;
         }
-        let slice = from_raw_parts(header.buffer, usize::from(header.length) / 2);
+
+        #[allow(clippy::cast_ptr_alignment)]
+        let name_ptr = buf.as_ptr().with_addr(name_start).cast();
+        let slice = from_raw_parts(name_ptr, usize::from(header.length) / 2);
         Some(String::from_utf16_lossy(slice))
     }
 }
@@ -265,8 +270,7 @@ fn snapshot_stuck(iter: u64, frame: u32) {
     if let Some(handle) = NonZero::new(handle_value)
         && let Some(ty) = lookup_handle_type(handle)
     {
-        let raw_tid =
-            unsafe { GetThreadId(with_exposed_provenance_mut::<c_void>(handle.get() as usize)) };
+        let raw_tid = unsafe { GetThreadId(without_provenance_mut(handle.get() as usize)) };
         wait_target_tid = NonZero::new(raw_tid);
         if let Some(tid) = wait_target_tid {
             info!("  wait handle: {handle_value:#010x} type={ty} -> tid={tid}");
