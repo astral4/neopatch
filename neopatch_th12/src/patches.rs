@@ -39,7 +39,7 @@ unsafe extern "C" fn anm_mode57_z_trampoline() -> ! {
     naked_asm!(
         "fadd dword ptr [ebx + 0x444]",
         "fadd dword ptr [esp + 0x48]",
-        "jmp  dword ptr [{slot}]",
+        "jmp dword ptr [{slot}]",
         slot = sym ANM_MODE57_AFTER_SPLICE,
     )
 }

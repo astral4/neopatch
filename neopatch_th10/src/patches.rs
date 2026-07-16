@@ -49,8 +49,8 @@ static ANM_MODE57_AFTER_SPLICE: usize = ANM_MODE57_SPLICE + ANM_MODE57_DISPLACED
 unsafe extern "C" fn anm_mode57_z_trampoline() -> ! {
     naked_asm!(
         "fadd dword ptr [esp + 0x74]",
-        "mov  ebx, [ebx + 0x35c]",
-        "jmp  dword ptr [{slot}]",
+        "mov ebx, [ebx + 0x35c]",
+        "jmp dword ptr [{slot}]",
         slot = sym ANM_MODE57_AFTER_SPLICE,
     )
 }

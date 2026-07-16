@@ -15,7 +15,7 @@ const MODE_FULLSCREEN: u8 = 0;
 const MODE_WINDOWED: u8 = 1;
 const DISPLAY_MODE_BYTE: GameAddr<u8> = unsafe { GameAddr::new(0x004d_c88f) };
 const LAUNCH_FLAGS: GameAddr<u32> = unsafe { GameAddr::new(0x004d_f0e0) };
-const LAUNCH_FLAGS_DIALOG_OK_MASK: u32 = 0xffff_ff9f;
+const LAUNCH_FLAGS_DIALOG_OK_BITS: u32 = 0x60;
 const DIALOG_RET: isize = 6;
 
 const DIALOG_BOX_CALL_VA: usize = 0x0045_c3a1;
@@ -66,7 +66,7 @@ unsafe extern "system" fn hook_dialog_box_param_a(
     let mode_byte_prev = DISPLAY_MODE_BYTE.read();
     DISPLAY_MODE_BYTE.write(mode_byte);
     let flags_prev = LAUNCH_FLAGS.read();
-    LAUNCH_FLAGS.write(flags_prev & LAUNCH_FLAGS_DIALOG_OK_MASK);
+    LAUNCH_FLAGS.write(flags_prev & !LAUNCH_FLAGS_DIALOG_OK_BITS);
 
     info!(
         kind = "dialog_short_circuited",
@@ -76,7 +76,7 @@ unsafe extern "system" fn hook_dialog_box_param_a(
         display_mode_prev = mode_byte_prev,
         display_mode_next = mode_byte,
         launch_flags_prev = format_args!("{flags_prev:#010x}"),
-        launch_flags_next = format_args!("{:#010x}", flags_prev & LAUNCH_FLAGS_DIALOG_OK_MASK),
+        launch_flags_next = format_args!("{:#010x}", flags_prev & !LAUNCH_FLAGS_DIALOG_OK_BITS),
         retval = DIALOG_RET,
     );
     DIALOG_RET
