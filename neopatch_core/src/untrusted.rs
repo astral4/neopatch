@@ -15,15 +15,19 @@ mod sealed {
     pub(crate) trait Zeroable: Copy {
         const ZERO: Self;
     }
+
     impl Zeroable for u8 {
         const ZERO: Self = 0;
     }
+
     impl Zeroable for u16 {
         const ZERO: Self = 0;
     }
+
     impl Zeroable for u32 {
         const ZERO: Self = 0;
     }
+
     impl<T: Zeroable, const N: usize> Zeroable for [T; N] {
         const ZERO: Self = [T::ZERO; N];
     }
@@ -83,11 +87,7 @@ impl<T: sealed::Zeroable> Untrusted<T> {
 /// A partial-`T` trailing read (`ReadProcessMemory` stopping mid-`T` at a page boundary) overwrites `buf[n]` with `T::ZERO`.
 /// The returned `n` excludes the partial slot.
 fn safe_read<T: sealed::Zeroable>(src: *const T, buf: &mut [T]) -> usize {
-    let bytes = rpm(
-        src.cast::<c_void>(),
-        buf.as_mut_ptr().cast::<c_void>(),
-        size_of_val(buf),
-    );
+    let bytes = rpm(src.cast(), buf.as_mut_ptr().cast(), size_of_val(buf));
     let n = bytes / size_of::<T>();
     if !bytes.is_multiple_of(size_of::<T>()) && n < buf.len() {
         // A partial-`T` tail read left `ReadProcessMemory`'s leftover bytes in `buf[n]`,

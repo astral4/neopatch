@@ -102,7 +102,7 @@ pub fn read_replay_mode(
 
 /// Reads the held-input bitfield named by `layout`. Returns `None` if the input object isn't live yet.
 fn read_input_bits(layout: ReplayStateLayout) -> Option<u32> {
-    let bits_ptr: *const u32 = match layout.input_addr {
+    let bits_ptr = match layout.input_addr {
         InputAddr::Direct(addr) => with_exposed_provenance(addr),
         InputAddr::Indirect(addr) => {
             let obj: *const u8 = unsafe { read_volatile(with_exposed_provenance(addr)) };

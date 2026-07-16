@@ -219,7 +219,7 @@ impl<V, F> SlotProjection<V, F> {
     fn slot_ptr(self, vtbl: *mut V) -> *mut F {
         // SAFETY: the assertion in `SlotProjection::at` bounds `offset + size_of::<F>()` by `size_of::<V>()`,
         // so the resulting pointer stays inside `V`'s allocation when `vtbl` does.
-        unsafe { vtbl.cast::<u8>().add(self.offset).cast::<F>() }
+        unsafe { vtbl.cast::<u8>().add(self.offset).cast() }
     }
 
     const fn offset(self) -> usize {

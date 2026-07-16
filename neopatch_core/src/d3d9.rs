@@ -1005,7 +1005,7 @@ unsafe extern "system" fn hook_check_device_format(
 
 unsafe fn install_device_hooks(dev: NonNull<c_void>) {
     unsafe {
-        let vtbl: *mut IDirect3DDevice9Ex_Vtbl = *dev.as_ptr().cast();
+        let vtbl = *dev.as_ptr().cast();
         let Some(vtbl) = NonNull::new(vtbl) else {
             warn!(kind = "device_vtbl_null", dev = format_args!("{dev:p}"));
             return;

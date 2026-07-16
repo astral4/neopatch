@@ -76,7 +76,7 @@ pub fn init() {
         return;
     }
     if let Some(f) = unsafe { GetProcAddress(dll, c"DirectInput8Create".as_ptr().cast()) }
-        && let Some(real) = unsafe { raw_to_fn_ptr::<DirectInput8CreateFn>(f as *mut ()) }
+        && let Some(real) = unsafe { raw_to_fn_ptr(f as *mut ()) }
     {
         REAL.store(real);
     }
@@ -101,9 +101,9 @@ pub unsafe fn forward(
     let hr = unsafe { real(hinst, dw_version, riidltf, ppv_out, punk_outer) };
     if hr >= 0 && !ppv_out.is_null() && !riidltf.is_null() {
         // SAFETY: `windows_sys::core::GUID` and `windows::core::GUID` are both `#[repr(C)]` with identical fields, so they share layout.
-        let iid = unsafe { &*riidltf.cast::<WinGUID>() };
+        let iid: WinGUID = unsafe { *riidltf.cast() };
         // This is fine because A/W vtables coincide at the patched slots. th10–th18 provide the A IID; th20 provides the W IID.
-        if *iid == IDirectInput8A::IID || *iid == IDirectInput8W::IID {
+        if iid == IDirectInput8A::IID || iid == IDirectInput8W::IID {
             if let Some(on_created) = ON_CREATED.get() {
                 let di = unsafe { *ppv_out };
                 unsafe { on_created(di) };

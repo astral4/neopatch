@@ -34,11 +34,11 @@ impl<T: Copy> GameAddr<T> {
     #[inline]
     #[must_use]
     pub fn read(self) -> T {
-        unsafe { read_volatile(with_exposed_provenance::<T>(self.addr)) }
+        unsafe { read_volatile(with_exposed_provenance(self.addr)) }
     }
 
     #[inline]
     pub fn write(self, v: T) {
-        unsafe { write_volatile(with_exposed_provenance_mut::<T>(self.addr), v) };
+        unsafe { write_volatile(with_exposed_provenance_mut(self.addr), v) };
     }
 }

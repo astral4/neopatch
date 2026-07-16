@@ -134,7 +134,7 @@ unsafe extern "system" fn hook_get_device_state(
     let hr = unsafe { call_real_get_device_state(this, cb_data, lpv_data) };
     if hr.is_ok() && !lpv_data.is_null() && matches!(cb_data, DIJOYSTATE_SIZE | DIJOYSTATE2_SIZE) {
         unsafe {
-            let ptr = lpv_data.cast::<u8>();
+            let ptr: *mut u8 = lpv_data.cast();
             let pov = ptr.add(POV0_OFFSET).cast::<u32>().read_unaligned();
             let lx = ptr.add(LX_OFFSET).cast::<i32>().read_unaligned();
             let ly = ptr.add(LY_OFFSET).cast::<i32>().read_unaligned();

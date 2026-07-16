@@ -222,7 +222,7 @@ unsafe fn find_iat_slot(module: HMODULE, import_name: &str) -> SlotOutcome {
         else {
             return SlotOutcome::Miss { descriptors };
         };
-        let base_mut = module.cast::<u8>();
+        let base_mut: *mut u8 = module.cast();
         let base = base_mut.cast_const();
 
         let mut desc_offset = 0;

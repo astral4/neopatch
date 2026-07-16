@@ -68,7 +68,7 @@ pub unsafe fn patch_jmp<const N: usize>(
     hook: *mut (),
     name: &str,
 ) {
-    unsafe { write_relative_branch::<N>(target, expected, hook, 0xe9, name) };
+    unsafe { write_relative_branch(target, expected, hook, 0xe9, name) };
 }
 
 /// Rewrites a direct-call or indirect-call site so it targets `hook` instead of the original callee.
@@ -85,7 +85,7 @@ pub(crate) unsafe fn patch_call<const N: usize>(
     hook: *mut (),
     name: &str,
 ) {
-    unsafe { write_relative_branch::<N>(target, expected, hook, 0xe8, name) };
+    unsafe { write_relative_branch(target, expected, hook, 0xe8, name) };
 }
 
 unsafe fn write_relative_branch<const N: usize>(
@@ -172,7 +172,7 @@ unsafe fn read_at(addr: usize, len: usize) -> [u8; MAX_PATCH_LEN] {
     );
     let mut buf = [0u8; MAX_PATCH_LEN];
     unsafe {
-        copy_nonoverlapping(with_exposed_provenance::<u8>(addr), buf.as_mut_ptr(), len);
+        copy_nonoverlapping(with_exposed_provenance(addr), buf.as_mut_ptr(), len);
     }
     buf
 }
