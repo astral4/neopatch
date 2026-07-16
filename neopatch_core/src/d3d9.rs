@@ -447,7 +447,7 @@ fn rewrite_present_params(pp: &mut D3DPRESENT_PARAMETERS) {
 }
 
 /// Overrides the game's hard-coded 60 Hz in `pp.FullScreen_RefreshRateInHz` with the result of [`pick_refresh_rate`],
-/// validated against the back-buffer format/dimensions.
+/// validated against the back buffer format/dimensions.
 unsafe fn apply_refresh_override(
     pp: &mut D3DPRESENT_PARAMETERS,
     d3d9: *mut c_void,
