@@ -7,7 +7,7 @@ mod dialog_dismiss;
 mod patches;
 mod state;
 
-use neopatch_core::config::{self as core_config, CoreConfig};
+use neopatch_core::config::{CONFIG, CoreConfig, decode_text, parse_core_only};
 use neopatch_core::pacer::{PACER, Pacer, PacingPolicy};
 use neopatch_core::{
     crash, d3d9, d3dx9, dinput8, dinput8_export, exit_hooks, gdi_caps, input, log, process,
@@ -54,11 +54,9 @@ unsafe fn install_hooks() {
 
         let core_cfg = exe_dir
             .and_then(|d| read(d.join("neopatch.ini")).ok())
-            .map_or_else(CoreConfig::default, |b| {
-                core_config::parse_core_only(&core_config::decode_text(&b))
-            });
-        drop(core_config::CONFIG.set(core_cfg));
-        let core_cfg = core_config::CONFIG.get().unwrap();
+            .map_or_else(CoreConfig::default, |b| parse_core_only(&decode_text(&b)));
+        drop(CONFIG.set(core_cfg));
+        let core_cfg = CONFIG.get().unwrap();
 
         let install_dir = exe_dir.map_or_else(|| PathBuf::from("."), Path::to_path_buf);
         log::init(&install_dir, core_cfg, host_exe_path.as_deref(), |_| Ok(()));
