@@ -11,6 +11,7 @@ neopatch is configured through a `neopatch.ini` file, which should also be place
 - Touhou 10 (v1.00a): [`neopatch.ini.example`](neopatch_th10/neopatch.ini.example)
 - Touhou 11 (v1.00a): [`neopatch.ini.example`](neopatch_th11/neopatch.ini.example)
 - Touhou 12 (v1.00b): [`neopatch.ini.example`](neopatch_th12/neopatch.ini.example)
+- Touhou 12.8 (v1.00a): [`neopatch.ini.example`](neopatch_th128/neopatch.ini.example)
 - Touhou 13 (v1.00c): [`neopatch.ini.example`](neopatch_th13/neopatch.ini.example)
 - Touhou 14 (v1.00b): [`neopatch.ini.example`](neopatch_th14/neopatch.ini.example)
 - Touhou 15 (v1.00b): [`neopatch.ini.example`](neopatch_th15/neopatch.ini.example)

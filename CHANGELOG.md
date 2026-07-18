@@ -4,6 +4,10 @@ All notable changes to neopatch will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- Support for Touhou 12.8 ~ Great Fairy Wars (`th128.exe v1.00a`).
+
 ### Changed
 
 - Releases are now packaged as a single ZIP archive with one directory per game instead of a separate archive per game.
