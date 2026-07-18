@@ -3,6 +3,7 @@
 //! [`CoreConfig`] represents the game-agnostic settings. Each per-game crate defines its own config struct
 //! for game-specific fields (e.g. `Resolution`) and parses it alongside `CoreConfig`.
 
+use std::borrow::Cow;
 use std::fmt::{Display, Formatter, Result as FmtResult};
 use std::io::{Result as IoResult, Write};
 use std::num::NonZero;
@@ -87,8 +88,8 @@ impl Default for InputCfg {
 
 pub struct ProcessCfg {
     pub priority: PriorityClass,
-    // `u32` because i686 processes can't address cores beyond bit 31 (WoW64 limit).
-    // `None` means `SetProcessAffinityMask` is not called, so the OS keeps its scheduler default.
+    /// `None` means `SetProcessAffinityMask` is not called and the OS scheduler default is used.
+    // This is `u32` because 32-bit processes can't address cores beyond bit 31.
     pub affinity_mask: Option<NonZero<u32>>,
 }
 
@@ -143,7 +144,7 @@ pub enum WindowFrame {
     /// `WS_OVERLAPPED | WS_SYSMENU | WS_VISIBLE | WS_MINIMIZEBOX | WS_MAXIMIZEBOX`.
     /// No caption or border, but the system menu remains fully functional (Alt+Space for Move/Minimize/Maximize/Close).
     Frameless,
-    /// `WS_POPUP | WS_VISIBLE`. Pure pixel rectangle; no frame and no system menu.
+    /// `WS_POPUP | WS_VISIBLE`. Pure pixel rectangle; no frame or system menu.
     Borderless,
 }
 
@@ -300,8 +301,8 @@ fn parse_level(v: &str) -> Option<LevelFilter> {
 }
 
 /// Scans `text` (assuming INI format), invoking `f(section, key, value)` for each `key = value` line.
-/// Comments are stripped. Sections track the most recent `[name]` header (empty before the first), and values are unquoted.
-/// Malformed lines are silently skipped; `f` sees every section, and callers ignore the ones they don't recognize.
+/// Sections track the most recent `[name]` header (empty before the first), and values are unquoted.
+/// Comments are stripped and malformed lines are silently skipped.
 ///
 /// Game-specific parsers compose with [`parse_core_only`] by walking `for_each_setting`
 /// for the game's own keys and calling `parse_core_only` separately for the core sections.
@@ -323,10 +324,10 @@ pub fn for_each_setting(text: &str, mut f: impl FnMut(&str, &str, &str)) {
     }
 }
 
-// This is quote-aware: instances of `;` and `#` inside a `"..."` or `'...'` value are preserved,
-// so a path like `log_dir = "C:\foo;bar"` parses intact. Outside quotes, `;` and `#` mark the start of a comment.
+/// Outside quotes, `;` and `#` mark the start of a comment and are stripped.
 #[must_use]
 fn strip_comment(line: &str) -> &str {
+    // Instances of `;` and `#` inside a `"..."` or `'...'` value are preserved, so a path like `log_dir = "C:\foo;bar"` parses intact.
     let mut in_double = false;
     let mut in_single = false;
     for (i, c) in line.char_indices() {
@@ -436,15 +437,15 @@ fn parse_bitmask(v: &str) -> Option<u32> {
     u32::from_str_radix(rest, radix).ok()
 }
 
-/// Strips an optional UTF-8 BOM and decodes as UTF-8, lossily: non-UTF-8 bytes
-/// (e.g. a path saved in Shift-JIS) become U+FFFD.
+/// Strips a UTF-8 BOM if present and lossily decodes the input as UTF-8,
+/// replacing any invalid UTF-8 sequences with `U+FFFD REPLACEMENT CHARACTER`.
 #[must_use]
-pub fn decode_text(bytes: &[u8]) -> String {
+pub fn decode_text(bytes: &[u8]) -> Cow<'_, str> {
     let body = bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(bytes);
-    String::from_utf8_lossy(body).into_owned()
+    String::from_utf8_lossy(body)
 }
 
-/// Parses INI text into a `CoreConfig` using only the shared section dispatcher.
+/// Parses INI text into a [`CoreConfig`] using only the shared section dispatcher.
 /// Per-game crates that don't define their own config keys call this directly from `install_hooks`.
 /// Crates with their own sections (e.g. th15's `[display] resolution`) supply their own parse function.
 #[must_use]
@@ -504,12 +505,15 @@ pub(crate) fn write_manifest_common<W: Write + ?Sized>(
     Ok(())
 }
 
-fn fmt_opt<T: Display>(v: Option<&T>) -> String {
-    v.map_or_else(|| "auto".to_owned(), ToString::to_string)
+fn fmt_opt<T: Display>(v: Option<&T>) -> Cow<'static, str> {
+    v.map_or_else(|| "auto".into(), |v| v.to_string().into())
 }
 
-fn fmt_mask(v: Option<NonZero<u32>>) -> String {
-    v.map_or_else(|| "0 (default)".to_owned(), |m| format!("{:#x}", m.get()))
+fn fmt_mask(v: Option<NonZero<u32>>) -> Cow<'static, str> {
+    v.map_or_else(
+        || "0 (default)".into(),
+        |v| format!("{:#x}", v.get()).into(),
+    )
 }
 
 #[cfg(test)]

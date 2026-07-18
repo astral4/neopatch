@@ -8,7 +8,6 @@ use windows_sys::Win32::System::ProcessStatus::{
 use windows_sys::Win32::System::Threading::GetCurrentProcess;
 
 /// Half-open range `[base, end)` of a loaded module.
-// `Copy` is implemented so the value can be taken out of a `OnceLock` by value (`.copied()`) and passed to the patcher.
 #[derive(Clone, Copy)]
 pub(crate) struct ModuleRange {
     pub(crate) base: u32,
@@ -27,7 +26,7 @@ pub(crate) struct Module {
     pub(crate) name: String,
 }
 
-/// Returns `None` for a null handle or when `GetModuleInformation` fails.
+/// Returns `None` if the handle is null or `GetModuleInformation` fails.
 pub(crate) fn module_info(h: HMODULE) -> Option<ModuleRange> {
     #[allow(clippy::cast_possible_truncation)]
     const MODULEINFO_SIZE: u32 = size_of::<MODULEINFO>() as u32;
@@ -35,6 +34,7 @@ pub(crate) fn module_info(h: HMODULE) -> Option<ModuleRange> {
     if h.is_null() {
         return None;
     }
+
     unsafe {
         let mut info = MODULEINFO {
             lpBaseOfDll: null_mut(),
@@ -61,10 +61,10 @@ pub(crate) fn walk_modules() -> Vec<Module> {
     #[allow(clippy::cast_possible_truncation)]
     const BUF_BYTES: u32 = HANDLES_CAP * size_of::<HMODULE>() as u32;
 
-    let mut result: Vec<Module> = Vec::new();
+    let mut result = Vec::new();
     unsafe {
         let process = GetCurrentProcess();
-        let mut handles: [HMODULE; HANDLES_LEN] = [null_mut(); HANDLES_LEN];
+        let mut handles = [null_mut(); HANDLES_LEN];
         let mut needed = 0;
         if EnumProcessModules(process, handles.as_mut_ptr(), BUF_BYTES, &raw mut needed) == 0 {
             return result;
