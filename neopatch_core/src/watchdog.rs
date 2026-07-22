@@ -19,7 +19,7 @@ use windows_sys::Wdk::Foundation::{NtQueryObject, ObjectTypeInformation};
 use windows_sys::Wdk::System::Threading::{
     NtQueryInformationThread, ThreadQuerySetWin32StartAddress,
 };
-use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
+use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE, UNICODE_STRING};
 use windows_sys::Win32::System::Diagnostics::Debug::{
     CONTEXT, CONTEXT_CONTROL_X86, CONTEXT_INTEGER_X86, CONTEXT_X86, GetThreadContext,
 };
@@ -34,16 +34,6 @@ use windows_sys::Win32::System::Threading::{
 /// Subset of `CONTEXT_*` flags we actually need: integer (eax..edi) and control (eip/esp/ebp/eflags/cs/ss).
 /// This is distinct from the SDK's `CONTEXT_FULL_X86` which also pulls in `CONTEXT_SEGMENTS_X86`. We don't read ds/es/fs/gs.
 const CONTEXT_FULL_X86_NO_SEGMENTS: u32 = CONTEXT_X86 | CONTEXT_CONTROL_X86 | CONTEXT_INTEGER_X86;
-
-/// Leading `UNICODE_STRING` of `ObjectTypeInformation`.
-/// The kernel writes the name into the trailing area of our buffer and sets `buffer` to point at it.
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct UnicodeStringHeader {
-    length: u16,
-    maximum_length: u16,
-    buffer: *mut u16,
-}
 
 /// Per-thread sample. EBP drives [`walk_ebp_frames`].
 /// The 64-word stack window is always emitted alongside, supplementing the EBP walk in case it terminates early.
@@ -83,25 +73,25 @@ fn lookup_handle_type(handle: NonZero<u32>) -> Option<String> {
             return None;
         }
 
-        // The kernel writes the name string into the trailing area of our buffer and sets `TypeName.Buffer` to point at it.
+        // The kernel writes the name string into the trailing area of our buffer and sets `Buffer` to point at it.
         // We check the bounds of the kernel-supplied pointer against our own buffer
         // so a malformed reply can't redirect us at arbitrary process memory or an unmapped address.
-        let header: UnicodeStringHeader = read_unaligned(buf.as_ptr().cast());
+        let header: UNICODE_STRING = read_unaligned(buf.as_ptr().cast());
 
-        if header.length == 0 || header.buffer.is_null() {
+        if header.Length == 0 || header.Buffer.is_null() {
             return None;
         }
         let buf_start = buf.as_ptr().addr();
         let buf_end = buf_start.saturating_add(buf.len());
-        let name_start = header.buffer.addr();
-        let name_end = name_start.saturating_add(usize::from(header.length));
+        let name_start = header.Buffer.addr();
+        let name_end = name_start.saturating_add(usize::from(header.Length));
         if name_start < buf_start || name_end > buf_end || name_start & 1 != 0 {
             return None;
         }
 
         #[allow(clippy::cast_ptr_alignment)]
         let name_ptr = buf.as_ptr().with_addr(name_start).cast();
-        let slice = from_raw_parts(name_ptr, usize::from(header.length) / 2);
+        let slice = from_raw_parts(name_ptr, usize::from(header.Length) / 2);
         Some(String::from_utf16_lossy(slice))
     }
 }

@@ -5,11 +5,12 @@
 
 use crate::iat_hook;
 use tracing::debug;
-use windows::Win32::Graphics::Gdi::{HDC, VREFRESH as SDK_VREFRESH};
+use windows::Win32::Graphics::Gdi::HDC;
 use windows_sys::Win32::Foundation::HMODULE;
+use windows_sys::Win32::Graphics::Gdi::VREFRESH as SDK_VREFRESH;
 
 // `cast_signed` preserves the bit pattern.
-const VREFRESH: i32 = SDK_VREFRESH.0.cast_signed();
+const VREFRESH: i32 = SDK_VREFRESH.cast_signed();
 
 iat_hook! {
     REAL_GET_DEVICE_CAPS / real_get_device_caps : "GetDeviceCaps"

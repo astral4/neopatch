@@ -15,7 +15,8 @@ use windows_sys::Win32::System::Diagnostics::Debug::{
     IMAGE_DATA_DIRECTORY, IMAGE_DIRECTORY_ENTRY_IMPORT, IMAGE_NT_HEADERS32, IMAGE_OPTIONAL_HEADER32,
 };
 use windows_sys::Win32::System::SystemServices::{
-    IMAGE_DOS_HEADER, IMAGE_DOS_SIGNATURE, IMAGE_IMPORT_DESCRIPTOR, IMAGE_NT_SIGNATURE,
+    IMAGE_DOS_HEADER, IMAGE_DOS_SIGNATURE, IMAGE_IMPORT_BY_NAME, IMAGE_IMPORT_DESCRIPTOR,
+    IMAGE_NT_SIGNATURE, IMAGE_ORDINAL_FLAG32,
 };
 use windows_sys::Win32::System::WindowsProgramming::IMAGE_THUNK_DATA32;
 
@@ -46,12 +47,6 @@ macro_rules! iat_hook {
             unsafe { $real.original()($($arg),*) }
         }
     };
-}
-
-#[repr(C)]
-struct ImageImportByName {
-    hint: u16,
-    name: [u8; 1],
 }
 
 /// Set-once-with-non-null storage for an IAT hook's import name and displaced original pointer. Use through [`iat_hook!`].
@@ -264,10 +259,9 @@ unsafe fn find_iat_slot(module: HMODULE, import_name: &str) -> SlotOutcome {
                 if entry == 0 {
                     break;
                 }
-                let ord_flag = 0x8000_0000;
-                if entry & ord_flag == 0 {
+                if entry & IMAGE_ORDINAL_FLAG32 == 0 {
                     // By-name import; `entry` is the RVA of `IMAGE_IMPORT_BY_NAME`.
-                    let name_rva = entry as usize + offset_of!(ImageImportByName, name);
+                    let name_rva = entry as usize + offset_of!(IMAGE_IMPORT_BY_NAME, Name);
                     let name_ptr = base.add(name_rva).cast();
                     let imp_name = CStr::from_ptr(name_ptr).to_bytes();
                     if imp_name.eq_ignore_ascii_case(import_name.as_bytes()) {
