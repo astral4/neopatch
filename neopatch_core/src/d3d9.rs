@@ -113,18 +113,6 @@ static LAST_PRESENT: MainCell<PresentState> = MainCell::new(PresentState {
     since_frame: 0,
 });
 
-/// Contains `IDirect3D9Ex*` and `adapter` from the most recent successful `CreateDeviceEx` call.
-/// Needed to re-derive the `D3DDISPLAYMODEEX` arg at `ResetEx` time.
-#[derive(Clone, Copy)]
-struct ResetCtx {
-    // A raw borrow of the object held by the game. This is valid for the device's lifetime
-    // by D3D9's contract since the device implicitly refs its parent.
-    d3d9: *mut c_void,
-    adapter: u32,
-}
-
-static RESET_CTX: MainCell<Option<ResetCtx>> = MainCell::new(None);
-
 // At most one `IDirect3D9` and one device are alive at a time in the game, so each slot is a single global. Read-only slots
 // are populated via `capture_slot` and never patched. The trampolines exist so call sites don't have to manually transmute.
 vtable_slot! {
@@ -251,7 +239,6 @@ vtable_slot! {
             p_shared_handle: *mut HANDLE,
         ) -> HRESULT;
 }
-
 iat_hook! {
     REAL_DIRECT3D_CREATE9 / real_direct3d_create9 : "Direct3DCreate9"
         as fn(sdk_version: u32) -> *mut c_void;
@@ -850,14 +837,6 @@ unsafe extern "system" fn hook_create_device(
                 SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW,
             );
 
-            RESET_CTX.set(
-                &tok,
-                Some(ResetCtx {
-                    d3d9: this,
-                    adapter,
-                }),
-            );
-
             install_device_hooks(dev);
             post_device_alive(&tok, dev);
 
@@ -1188,16 +1167,45 @@ unsafe fn reset_once(
     }
 }
 
+/// The parent `IDirect3D9Ex` and adapter ordinal of a live device.
+struct DeviceParent {
+    /// The reference returned by `GetDirect3D`.
+    d3d9: IDirect3D9,
+    adapter: u32,
+}
+
+impl DeviceParent {
+    /// # Safety
+    /// `dev` must be a live `IDirect3DDevice9Ex`.
+    unsafe fn new(dev: *mut c_void) -> Self {
+        unsafe {
+            let dev = IDirect3DDevice9Ex::from_raw_borrowed(&dev)
+                .expect("hook_reset called on a null device");
+            let d3d9 = dev
+                .GetDirect3D()
+                .expect("GetDirect3D failed on a live device");
+
+            let mut cp = D3DDEVICE_CREATION_PARAMETERS::default();
+            dev.GetCreationParameters(&raw mut cp)
+                .expect("GetCreationParameters failed on a live device");
+
+            Self {
+                d3d9,
+                adapter: cp.AdapterOrdinal,
+            }
+        }
+    }
+}
+
 unsafe extern "system" fn hook_reset(this: *mut c_void, pp: *mut D3DPRESENT_PARAMETERS) -> HRESULT {
     let tok = MainToken::new();
     on_pre_reset(&tok);
     unsafe {
-        let ctx = RESET_CTX
-            .get(&tok)
-            .expect("hook_reset fired before hook_create_device populated RESET_CTX");
-        let desktop_before = sample_for_degradation_check(ctx.d3d9, ctx.adapter, pp);
+        let parent = DeviceParent::new(this);
+        let desktop_before = sample_for_degradation_check(parent.d3d9.as_raw(), parent.adapter, pp);
         // We reapply refresh rate selection so runtime rate toggles take effect at the next `Reset`.
-        let mut prep = prep_present_params(pp, ctx.d3d9, ctx.adapter, desktop_before);
+        let mut prep =
+            prep_present_params(pp, parent.d3d9.as_raw(), parent.adapter, desktop_before);
         let use_reset_ex = REAL_RESET_EX.try_get().is_some();
 
         let hr = run_with_refresh_failsafe(
@@ -1215,7 +1223,7 @@ unsafe extern "system" fn hook_reset(this: *mut c_void, pp: *mut D3DPRESENT_PARA
             let dev = NonNull::new_unchecked(this);
             post_device_alive(&tok, dev);
             if let Some(before) = desktop_before {
-                warn_if_exclusive_degraded(ctx.d3d9, ctx.adapter, before, &prep);
+                warn_if_exclusive_degraded(parent.d3d9.as_raw(), parent.adapter, before, &prep);
             }
         }
         hr
