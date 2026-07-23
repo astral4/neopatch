@@ -3,13 +3,13 @@
 use crate::config::{PriorityClass, ProcessCfg};
 use crate::thread::MainToken;
 use tracing::info;
-use windows::core::w;
 use windows_sys::Win32::Foundation::GetLastError;
 use windows_sys::Win32::System::Threading::{
     ABOVE_NORMAL_PRIORITY_CLASS, AvSetMmThreadCharacteristicsW, BELOW_NORMAL_PRIORITY_CLASS,
     GetCurrentProcess, HIGH_PRIORITY_CLASS, IDLE_PRIORITY_CLASS, NORMAL_PRIORITY_CLASS,
     PROCESS_CREATION_FLAGS, SetPriorityClass, SetProcessAffinityMask,
 };
+use windows_sys::w;
 
 pub fn apply(cfg: &ProcessCfg) {
     if let Some(pc) = priority_class(cfg.priority) {
@@ -40,7 +40,7 @@ pub fn apply(cfg: &ProcessCfg) {
 /// Registers the calling thread with the MMCSS "Games" task class.
 pub(crate) fn register_mmcss(_tok: &MainToken) {
     let mut task_idx = 0;
-    let h = unsafe { AvSetMmThreadCharacteristicsW(w!("Games").as_ptr(), &raw mut task_idx) };
+    let h = unsafe { AvSetMmThreadCharacteristicsW(w!("Games"), &raw mut task_idx) };
     let os_error = last_error_if(h.is_null());
     info!(
         kind = "mmcss_register",
