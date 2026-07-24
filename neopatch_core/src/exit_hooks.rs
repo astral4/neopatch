@@ -1,15 +1,21 @@
 //! Logging and passthrough hooks for game exit logic.
 
+use crate::ansi::{codepage, to_wide};
 use crate::iat_hook;
 use crate::log::flush;
 use crate::untrusted::Untrusted;
 use std::ffi::c_void;
+use std::num::NonZero;
+use std::ptr::null;
 use std::slice::from_mut as slice_from_mut;
 use tracing::info;
 use windows_sys::Win32::Foundation::{HANDLE, HMODULE, HWND};
 use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
 use windows_sys::Win32::System::Threading::LPTHREAD_START_ROUTINE;
+use windows_sys::Win32::UI::WindowsAndMessaging::MessageBoxW;
 use windows_sys::core::{PCSTR, PCWSTR};
+
+const MAX_MSGBOX_LEN: usize = 4096;
 
 iat_hook! {
     REAL_EXIT_PROCESS / real_exit_process : "ExitProcess"
@@ -61,8 +67,7 @@ unsafe extern "system" fn hook_exit_process(exit_code: u32) -> ! {
             kind = "exit_process_intercepted",
             exit_code = format_args!("{exit_code:#010x}"),
         );
-        // We drain the `BufWriter` before the OS tears down the process.
-        // Otherwise, the destructor and shutdown tail of the log are lost.
+        // We drain the `BufWriter` before the OS tears down the process. Otherwise, the destructor and shutdown tail of the log are lost.
         flush();
         real_exit_process(exit_code)
     }
@@ -87,6 +92,10 @@ unsafe extern "system" fn hook_message_box_a(
     flags: u32,
 ) -> i32 {
     unsafe {
+        if let Some(ret) = try_show_wide(parent, text, caption, flags) {
+            return ret;
+        }
+
         let text_str = pcstr_to_string(Untrusted::from_raw(text));
         let caption_str = pcstr_to_string(Untrusted::from_raw(caption));
         info!(
@@ -97,6 +106,75 @@ unsafe extern "system" fn hook_message_box_a(
         );
         real_message_box_a(parent, text, caption, flags)
     }
+}
+
+/// Shows the dialog through `MessageBoxW` when a side needs the game code page. With a code page registered,
+/// the system's own A-to-W conversion would mangle game-encoded (e.g. Shift-JIS) text on a non-Japanese locale,
+/// so we convert it ourselves. This deliberately bypasses any other DLL's chained `MessageBoxA` hook for such dialogs,
+/// since forwarding would mean converting back through the system code page, which is the lossy step being avoided.
+///
+/// Returns `None` without showing anything when the conversion doesn't apply. This occurs when there is no game code page,
+/// every side is ASCII or null, or there is a side whose non-ASCII bytes fail to convert (showing a half-converted dialog would be worse).
+fn try_show_wide(parent: HWND, text: PCSTR, caption: PCSTR, flags: u32) -> Option<i32> {
+    let cp = codepage()?;
+    let mut scratch = [0u8; MAX_MSGBOX_LEN];
+    if !has_non_ascii(text, &mut scratch) && !has_non_ascii(caption, &mut scratch) {
+        return None;
+    }
+
+    let text_w = widen(cp, text, &mut scratch).ok()?;
+    let caption_w = widen(cp, caption, &mut scratch).ok()?;
+
+    info!(
+        kind = "message_box_a_converted",
+        flags = format_args!("{flags:#x}"),
+        caption = %wide_log_string(caption_w.as_deref()),
+        text = %wide_log_string(text_w.as_deref()),
+    );
+
+    Some(unsafe {
+        MessageBoxW(
+            parent,
+            opt_pcwstr(text_w.as_deref()),
+            opt_pcwstr(caption_w.as_deref()),
+            flags,
+        )
+    })
+}
+
+fn has_non_ascii(p: PCSTR, scratch: &mut [u8]) -> bool {
+    !p.is_null()
+        && !Untrusted::from_raw(p)
+            .safe_read_until(scratch, 0)
+            .is_ascii()
+}
+
+/// Widens one `MessageBoxA` string through the caller's `scratch`. Returns `Ok(None)` for a null pointer, ASCII bytes widened 1:1,
+/// and anything else converted through `codepage`. Returns `Err` if conversion fails.
+fn widen(codepage: NonZero<u32>, p: PCSTR, scratch: &mut [u8]) -> Result<Option<Vec<u16>>, ()> {
+    if p.is_null() {
+        return Ok(None);
+    }
+
+    let bytes = Untrusted::from_raw(p).safe_read_until(scratch, 0);
+    if bytes.is_ascii() {
+        return Ok(Some(
+            bytes.iter().map(|&b| u16::from(b)).chain([0]).collect(),
+        ));
+    }
+
+    to_wide(codepage, bytes, false).ok_or(()).map(Some)
+}
+
+fn opt_pcwstr(side: Option<&[u16]>) -> PCWSTR {
+    side.map_or_else(null, <[u16]>::as_ptr)
+}
+
+fn wide_log_string(side: Option<&[u16]>) -> String {
+    side.map_or_else(
+        || String::from("<null>"),
+        |wide| String::from_utf16_lossy(wide.strip_suffix(&[0]).unwrap_or(wide)),
+    )
 }
 
 unsafe extern "system" fn hook_message_box_w(
@@ -159,4 +237,64 @@ fn pcwstr_to_string(p: Untrusted<u16>) -> String {
     }
     let mut buf = [0u16; 4096];
     String::from_utf16_lossy(p.safe_read_until(&mut buf, 0))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        MAX_MSGBOX_LEN, has_non_ascii as has_non_ascii_scratch, opt_pcwstr, widen as widen_scratch,
+    };
+    use crate::ansi::CP_SHIFT_JIS;
+    use std::ptr::null;
+    use windows_sys::core::PCSTR;
+
+    const TEXT_SHIFT_JIS: &[u8] = &[0x93, 0x8c, 0x95, 0xfb, 0x00];
+    const TEXT_WIDE: &[u16] = &[0x6771, 0x65b9, 0];
+
+    fn has_non_ascii(p: PCSTR) -> bool {
+        has_non_ascii_scratch(p, &mut [0u8; MAX_MSGBOX_LEN])
+    }
+
+    fn widen(p: PCSTR) -> Result<Option<Vec<u16>>, ()> {
+        widen_scratch(CP_SHIFT_JIS, p, &mut [0u8; MAX_MSGBOX_LEN])
+    }
+
+    #[test]
+    fn null_side_passthrough() {
+        assert!(!has_non_ascii(null()));
+        let side = widen(null()).unwrap();
+        assert!(side.is_none());
+        assert!(opt_pcwstr(side.as_deref()).is_null());
+    }
+
+    #[test]
+    fn ascii_side_not_on_w_path() {
+        for s in [c"oops", c""] {
+            assert!(!has_non_ascii(s.as_ptr().cast()), "{s:?}");
+            let side = widen(s.as_ptr().cast()).unwrap();
+            assert!(!opt_pcwstr(side.as_deref()).is_null(), "{s:?}");
+        }
+    }
+
+    #[test]
+    fn ascii_widening_one_to_one() {
+        let side = widen(c"oops".as_ptr().cast()).unwrap();
+        assert_eq!(
+            side.as_deref(),
+            Some([0x6f, 0x6f, 0x70, 0x73, 0].as_slice())
+        );
+    }
+
+    #[test]
+    fn empty_string_widening() {
+        let side = widen(c"".as_ptr().cast()).unwrap();
+        assert_eq!(side.as_deref(), Some([0u16].as_slice()));
+    }
+
+    #[test]
+    fn shift_jis_conversion() {
+        assert!(has_non_ascii(TEXT_SHIFT_JIS.as_ptr()));
+        let side = widen(TEXT_SHIFT_JIS.as_ptr()).unwrap();
+        assert_eq!(side.as_deref(), Some(TEXT_WIDE));
+    }
 }

@@ -11,6 +11,7 @@ All notable changes to neopatch will be documented in this file.
 ### Changed
 
 - Releases are now packaged as a single ZIP archive with one directory per game instead of a separate archive per game.
+- `[window]` geometry and frame settings now apply only to windowed-mode game windows.
 
 ### Fixed
 
@@ -18,6 +19,7 @@ All notable changes to neopatch will be documented in this file.
 - D3D9 devices are now created with `D3DCREATE_MULTITHREADED` to prevent graphics-driver crashes at scene transitions, since the games use D3D from worker threads.
 - Ctrl key detection for Touhou 18 and Touhou 20 no longer introduces a polling race that can drop keypress events.
 - In Touhou 18 and Touhou 20, holding Ctrl no longer fast-forwards replays while the game window is inactive.
+- Non-ASCII text in window titles and dialogs now correctly renders without mojibake even when using an incompatible system locale or ANSI code page.
 
 ## [0.9.1] - 2026-06-02
 

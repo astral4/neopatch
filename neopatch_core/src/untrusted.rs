@@ -10,6 +10,8 @@ use std::ptr::with_exposed_provenance;
 use windows_sys::Win32::System::Diagnostics::Debug::ReadProcessMemory;
 use windows_sys::Win32::System::Threading::GetCurrentProcess;
 
+const PAGE_SIZE: usize = 4096;
+
 // Sealed; the all-zero bit pattern is a valid value of `T` named `ZERO`.
 mod sealed {
     pub(crate) trait Zeroable: Copy {
@@ -55,8 +57,8 @@ impl<T: sealed::Zeroable> Untrusted<T> {
         safe_read(self.0, buf)
     }
 
-    /// [`safe_read`]s into `buf`, then returns the populated prefix up to (but excluding) the first `terminator` element
-    /// (or the full read length if no terminator is found).
+    /// [`safe_read`]s into `buf`, then returns the populated prefix up to but excluding the first `terminator` element,
+    /// or the full read length if no terminator is found.
     pub(crate) fn safe_read_until(self, buf: &mut [T], terminator: T) -> &[T]
     where
         T: PartialEq,
@@ -64,6 +66,16 @@ impl<T: sealed::Zeroable> Untrusted<T> {
         let n = self.safe_read(buf);
         let len = buf[..n].iter().position(|t| *t == terminator).unwrap_or(n);
         &buf[..len]
+    }
+
+    /// Like [`Untrusted::safe_read_until`], but returns `None` when no `terminator` is present within the populated read.
+    pub(crate) fn safe_read_terminated(self, buf: &mut [T], terminator: T) -> Option<&[T]>
+    where
+        T: PartialEq,
+    {
+        let n = self.safe_read(buf);
+        let len = buf[..n].iter().position(|t| *t == terminator)?;
+        Some(&buf[..len])
     }
 
     /// True if the pointed-to buffer reads as exactly `expected` followed by a NUL (`T::ZERO`).

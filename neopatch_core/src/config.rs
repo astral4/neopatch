@@ -44,8 +44,9 @@ impl Default for DisplayCfg {
     }
 }
 
-// Window dimensions and frame default to game-derived values supplied at install time
-// (matching framebuffer dimensions; `Borderless` in fullscreen, `Frameless` in windowed). Set explicitly to override.
+// Window dimensions and frame default to game-derived values supplied at install time:
+// matching framebuffer dimensions; `Borderless` in fullscreen and `Frameless` in windowed.
+// This configuration only applies to windowed-mode (non-popup) window creations since exclusive-fullscreen is managed by D3D.
 #[derive(Default)]
 pub struct WindowCfg {
     pub x: i32,

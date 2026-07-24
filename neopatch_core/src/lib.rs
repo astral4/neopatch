@@ -7,6 +7,7 @@
 #[cfg(all(not(target_arch = "x86"), not(test), not(doc)))]
 compile_error!("neopatch is x86-only");
 
+pub mod ansi;
 pub mod config;
 pub mod crash;
 pub mod d3d9;

@@ -7,28 +7,29 @@ use std::ffi::c_void;
 use std::num::NonZero;
 use std::ptr::null_mut;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, Ordering};
-use tracing::info;
+use tracing::{info, warn};
 use windows_sys::Win32::Foundation::{HMODULE, HWND, RECT};
-use windows_sys::Win32::Globalization::MultiByteToWideChar;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    AdjustWindowRectEx, GWL_EXSTYLE, GWL_STYLE, HMENU, HWND_TOPMOST, SWP_FRAMECHANGED,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_SHOWWINDOW, SetWindowLongA,
-    SetWindowPos, SetWindowTextW, WINDOW_EX_STYLE, WINDOW_STYLE, WS_CAPTION, WS_MAXIMIZEBOX,
-    WS_MINIMIZEBOX, WS_OVERLAPPED, WS_POPUP, WS_SYSMENU, WS_VISIBLE,
+    AdjustWindowRectEx, DefWindowProcW, GWL_EXSTYLE, GWL_STYLE, GetWindowLongA, HMENU,
+    HWND_TOPMOST, InternalGetWindowText, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
+    SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_SHOWWINDOW, SetWindowLongA, SetWindowPos, WINDOW_EX_STYLE,
+    WINDOW_STYLE, WM_SETTEXT, WS_CAPTION, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_POPUP,
+    WS_SYSMENU, WS_VISIBLE,
 };
 
-static APPLIED: AtomicBool = AtomicBool::new(false);
 static STATE: OnceLock<State> = OnceLock::new();
 
-/// What `install` does with the game's render window. `Restyle` rewrites size/position/style/title/Z-order from `[window]`.
-/// `DeferToGame` rewrites title/Z-order but leaves geometry and style to the game.
+/// Determines what [`install`] does with the game's render window.
 #[derive(Clone, Copy)]
 pub enum WindowPolicy {
+    /// Rewrites geometry/style/title/Z-order for non-`WS_POPUP` window creations, and only title/Z-order for `WS_POPUP` creations.
     Restyle {
+        /// The target size.
         framebuffer: (u32, u32),
+        /// Determines the default frame used when `[window]` leaves it unset.
         display_mode: DisplayMode,
     },
+    /// Rewrites only title/Z-order.
     DeferToGame,
 }
 
@@ -93,6 +94,7 @@ impl ResolvedWindowCfg {
     }
 }
 
+/// The resolved form of [`WindowPolicy`].
 enum State {
     Restyle {
         framebuffer: (u32, u32),
@@ -158,8 +160,7 @@ unsafe extern "system" fn hook_create_window_ex_a(
     unsafe {
         // IME and sound-thread helpers also use this import, but we only want the game's render window.
         // We match by class name "BASE" to catch both fullscreen (`WS_POPUP`) and windowed (no `WS_POPUP`) branches.
-        let is_main = !APPLIED.load(Ordering::Acquire)
-            && h_wnd_parent.is_null()
+        let is_main = h_wnd_parent.is_null()
             && Untrusted::from_raw(lp_class_name).matches_nul_terminated(b"BASE");
         let (use_w, use_h) =
             prep_main_window(is_main, dw_ex_style, dw_style, x, y, n_width, n_height);
@@ -201,8 +202,7 @@ unsafe extern "system" fn hook_create_window_ex_w(
     const BASE_CLASS_W: [u16; 4] = [b'B' as u16, b'A' as u16, b'S' as u16, b'E' as u16];
 
     unsafe {
-        let is_main = !APPLIED.load(Ordering::Acquire)
-            && h_wnd_parent.is_null()
+        let is_main = h_wnd_parent.is_null()
             && Untrusted::from_raw(lp_class_name).matches_nul_terminated(&BASE_CLASS_W);
         let (use_w, use_h) =
             prep_main_window(is_main, dw_ex_style, dw_style, x, y, n_width, n_height);
@@ -271,29 +271,62 @@ fn prep_main_window(
     (use_w, use_h)
 }
 
-/// Post-creation handling, run once on the first successful creation of the main window.
-/// [`State::Restyle`] rewrites geometry/style/title. [`State::DeferToGame`] applies only the title and `always_on_top`.
+// Post-creation handling for the main render window.
+// This runs on first creation and again on every recreation, with each creation styled independently.
 fn finish_main_window(hwnd: HWND, is_main: bool, build_title: impl FnOnce() -> Vec<u16>) {
-    if is_main
-        && !hwnd.is_null()
-        && APPLIED
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
-    {
-        let title = build_title();
-        match STATE.get().unwrap() {
-            State::Restyle { restyle, .. } => apply(hwnd, restyle, &title),
-            State::DeferToGame { always_on_top } => unsafe {
-                apply_deferred(hwnd, *always_on_top, &title);
-            },
-        }
+    if !is_main {
+        return;
+    }
+    if hwnd.is_null() {
+        warn!(kind = "main_window_create_failed");
+        return;
+    }
+
+    let title = build_title();
+    match STATE.get().unwrap() {
+        State::Restyle { restyle, .. } => unsafe {
+            if GetWindowLongA(hwnd, GWL_STYLE).cast_unsigned() & WS_POPUP == 0 {
+                apply(hwnd, restyle, &title);
+            } else {
+                apply_deferred(hwnd, restyle.always_on_top, &title);
+            }
+        },
+        State::DeferToGame { always_on_top } => unsafe {
+            apply_deferred(hwnd, *always_on_top, &title);
+        },
+    }
+}
+
+/// Sets the window title losslessly, bypassing the ANSI message thunk.
+///
+/// `SetWindowTextW` delivers `WM_SETTEXT` through the target window's procedure.
+/// For an ANSI window, the text is converted from UTF-16 to ANSI for the game's procedure and back for storage.
+/// Both go through the system ANSI code page, which mangles Japanese text on non-Japanese locales.
+unsafe fn set_window_text_lossless(hwnd: HWND, title: &[u16]) {
+    unsafe {
+        // We assume the games' window procedures ignore `WM_SETTEXT`.
+        DefWindowProcW(
+            hwnd,
+            WM_SETTEXT,
+            0,
+            title.as_ptr().expose_provenance().cast_signed(),
+        );
+        // `InternalGetWindowText` reads the internal Unicode buffer directly — the same source the
+        // title bar and taskbar render from — bypassing the lossy `WM_GETTEXT` ANSI thunk.
+        let mut stored = [0u16; 128];
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        let n = InternalGetWindowText(hwnd, stored.as_mut_ptr(), stored.len() as i32);
+        info!(
+            kind = "window_title_set",
+            title = %String::from_utf16_lossy(&stored[..n.max(0).cast_unsigned() as usize]),
+        );
     }
 }
 
 /// [`apply`] without geometry/style modifications.
 unsafe fn apply_deferred(hwnd: HWND, always_on_top: bool, title: &[u16]) {
     unsafe {
-        SetWindowTextW(hwnd, title.as_ptr());
+        set_window_text_lossless(hwnd, title);
         if always_on_top {
             SetWindowPos(
                 hwnd,
@@ -312,27 +345,16 @@ unsafe fn apply_deferred(hwnd: HWND, always_on_top: bool, title: &[u16]) {
 ///
 /// This is independent of locale because we use the literal Shift-JIS code page, not the system ANSI code page.
 fn build_extended_title_from_sjis(original: Untrusted<u8>) -> Vec<u16> {
-    const CP_SHIFT_JIS: u32 = 932;
     const BUF_LEN: usize = 512;
 
     let mut buf = [0u8; BUF_LEN];
     let sjis = original.safe_read_until(&mut buf, 0);
 
-    let mut wide = vec![0u16; sjis.len()];
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    let in_len = sjis.len() as i32;
-    let written = unsafe {
-        MultiByteToWideChar(
-            CP_SHIFT_JIS,
-            0,
-            sjis.as_ptr(),
-            in_len,
-            wide.as_mut_ptr(),
-            in_len,
-        )
-    };
-    wide.truncate(written.max(0).cast_unsigned() as usize);
-
+    // Lenient conversion, like the system thunk would be: an empty or unconvertible title
+    // degrades to just the suffix.
+    let mut wide = crate::ansi::to_wide(crate::ansi::CP_SHIFT_JIS, sjis, false).unwrap_or_default();
+    // Drop `to_wide`'s NUL terminator; `append_suffix` re-terminates after the suffix.
+    wide.pop();
     append_suffix(&mut wide);
     wide
 }
@@ -355,7 +377,7 @@ fn append_suffix(wide: &mut Vec<u16>) {
 fn apply(hwnd: HWND, cfg: &ResolvedWindowCfg, title: &[u16]) {
     unsafe {
         // We do this before `SetWindowPos` so the `SWP_FRAMECHANGED`-driven first paint of the title bar gets the new UTF-16 title.
-        SetWindowTextW(hwnd, title.as_ptr());
+        set_window_text_lossless(hwnd, title);
 
         let style: WINDOW_STYLE = match cfg.frame {
             WindowFrame::Framed => {
@@ -382,9 +404,9 @@ fn apply(hwnd: HWND, cfg: &ResolvedWindowCfg, title: &[u16]) {
             bottom: cfg.height.cast_signed(),
         };
         AdjustWindowRectEx(&raw mut rc, style, 0, ex_style);
+
         let w = rc.right - rc.left;
         let h = rc.bottom - rc.top;
-
         let after = if cfg.always_on_top {
             HWND_TOPMOST
         } else {
