@@ -99,6 +99,10 @@ todo = "warn"
 unimplemented = "warn"
 unreadable_literal = { level = "allow", priority = 1 }
 
+[workspace.lints.rustdoc]
+broken_intra_doc_links = "deny"
+private_intra_doc_links = "allow"
+
 [profile.release]
 lto = "fat"
 codegen-units = 1
