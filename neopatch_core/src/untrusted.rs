@@ -115,12 +115,84 @@ pub(crate) fn safe_read_stack<const N: usize>(esp: u32, out: &mut [u32; N]) -> u
     safe_read(src, out)
 }
 
-/// Returns the number of bytes read; 0 on null source or `ReadProcessMemory` failure.
+/// Returns the number of bytes read; 0 on null source.
 fn rpm(src: *const c_void, dst: *mut c_void, len: usize) -> usize {
     if src.is_null() {
         return 0;
     }
-    let mut bytes_read = 0;
-    let _ = unsafe { ReadProcessMemory(GetCurrentProcess(), src, dst, len, &raw mut bytes_read) };
-    bytes_read
+    let mut total = 0usize;
+    while total < len {
+        let to_page_end = PAGE_SIZE - (src.addr() + total) % PAGE_SIZE;
+        let chunk = to_page_end.min(len - total);
+        let mut bytes_read = 0;
+        let ok = unsafe {
+            ReadProcessMemory(
+                GetCurrentProcess(),
+                src.wrapping_byte_add(total),
+                dst.wrapping_byte_add(total),
+                chunk,
+                &raw mut bytes_read,
+            )
+        };
+        total += bytes_read;
+        if ok == 0 || bytes_read < chunk {
+            break;
+        }
+    }
+    total
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PAGE_SIZE, Untrusted};
+    use std::ptr::{copy_nonoverlapping, null, write_bytes};
+    use windows_sys::Win32::System::Memory::{
+        MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_NOACCESS, PAGE_READWRITE, VirtualAlloc,
+        VirtualFree, VirtualProtect,
+    };
+
+    #[test]
+    fn read_stops_at_guard_page() {
+        unsafe {
+            let base = VirtualAlloc(
+                null(),
+                2 * PAGE_SIZE,
+                MEM_COMMIT | MEM_RESERVE,
+                PAGE_READWRITE,
+            );
+            assert!(!base.is_null());
+            let mut old = 0u32;
+            assert_ne!(
+                VirtualProtect(
+                    base.wrapping_byte_add(PAGE_SIZE),
+                    PAGE_SIZE,
+                    PAGE_NOACCESS,
+                    &raw mut old,
+                ),
+                0,
+            );
+
+            // "th6_01.rpy\0" is placed so the NUL is the last readable byte.
+            let s = b"th6_01.rpy\0";
+            let start = base.cast::<u8>().wrapping_add(PAGE_SIZE - s.len());
+            copy_nonoverlapping(s.as_ptr(), start, s.len());
+
+            let mut buf = [0u8; 521]; // `2 * MAX_PATH + 1`; see ansi.rs
+            let read = Untrusted::from_raw(start.cast_const())
+                .safe_read_terminated(&mut buf, 0)
+                .map(<[u8]>::to_vec);
+            assert_eq!(read.as_deref(), Some(&s[..s.len() - 1]));
+
+            // An unterminated run into the guard page still refuses.
+            let tail = base.cast::<u8>().wrapping_add(PAGE_SIZE - 4);
+            write_bytes(tail, b'X', 4);
+            let mut buf = [0u8; 64];
+            assert_eq!(
+                Untrusted::from_raw(tail.cast_const()).safe_read_terminated(&mut buf, 0),
+                None,
+            );
+
+            VirtualFree(base, 0, MEM_RELEASE);
+        }
+    }
 }
