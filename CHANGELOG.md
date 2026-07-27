@@ -23,6 +23,10 @@ All notable changes to neopatch will be documented in this file.
 - Non-ASCII text in window titles and dialogs now correctly renders without mojibake even when using an incompatible system locale or ANSI code page.
 - neopatch no longer risks faulting from unmapped memory when the `dinput8.dll` file is loaded by a non-game executable.
 
+### Removed
+
+- Removed the hang watchdog.
+
 ## [0.9.1] - 2026-06-02
 
 ### Fixed

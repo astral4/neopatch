@@ -385,7 +385,7 @@ where
                 if let Ok(mut guard) = FILE_WRITER.lock()
                     && let Some(writer) = guard.as_mut()
                 {
-                    // We don't flush for each line since watchdog ticks and crash/exit hooks are responsible for durability.
+                    // We don't flush for each line since the crash/exit hooks are responsible for durability.
                     drop(writer.write_all(line.as_bytes()));
                 }
             });

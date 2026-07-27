@@ -14,14 +14,13 @@ use neopatch_core::pacer::{PACER, Pacer, PacingPolicy};
 use neopatch_core::patches::install_all;
 use neopatch_core::{
     crash, d3d9, d3dx9, dinput8, dinput8_export, exit_hooks, gdi_caps, input, log, process,
-    timer_period, vtable, watchdog, window,
+    timer_period, vtable, window,
 };
 use std::env::current_exe;
 use std::ffi::c_void;
 use std::fs::read;
 use std::path::{Path, PathBuf};
 use std::ptr::null;
-use tracing::level_filters::LevelFilter;
 use windows_sys::Win32::Foundation::{HINSTANCE, HMODULE};
 use windows_sys::Win32::System::LibraryLoader::{DisableThreadLibraryCalls, GetModuleHandleW};
 use windows_sys::Win32::System::SystemServices::DLL_PROCESS_ATTACH;
@@ -64,9 +63,6 @@ unsafe fn install_hooks() {
         }
 
         crash::install_handlers();
-        if core_cfg.log.level >= LevelFilter::INFO {
-            watchdog::install();
-        }
 
         let host_exe = GetModuleHandleW(null());
 

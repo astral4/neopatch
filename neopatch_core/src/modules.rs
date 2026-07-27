@@ -123,11 +123,7 @@ pub(crate) fn walk_modules() -> Vec<Module> {
     result
 }
 
-pub(crate) fn annotate(addr: u32, modules: &[Module]) -> String {
-    annotate_resolved(addr, modules).unwrap_or_else(|| format!("{addr:#010x}"))
-}
-
-/// Like [`annotate`], but returns `None` for unresolved addresses.
+/// Resolves `addr` to a `module+offset` label, or `None` for an address in no known module.
 pub(crate) fn annotate_resolved(addr: u32, modules: &[Module]) -> Option<String> {
     if addr == 0 {
         return None;

@@ -1,7 +1,7 @@
 //! neopatch_core: game-agnostic foundation for neopatch.
 //!
 //! Provides patching, hooking, and trampoline primitives; D3D9/D3D9Ex shims; the frame pacer; per-session logging;
-//! crash and watchdog instrumentation; and Win32 process tunables. Game-specific crates depend on this crate
+//! crash instrumentation; and Win32 process tunables. Game-specific crates depend on this crate
 //! and wire game-specific behavior through the registered callbacks documented on each module.
 
 #[cfg(all(not(target_arch = "x86"), not(test), not(doc)))]
@@ -30,7 +30,6 @@ pub mod thread;
 pub mod timer_period;
 mod untrusted;
 pub mod vtable;
-pub mod watchdog;
 pub mod window;
 
 /// Match `$v` against a list of `const` identifiers, returning the literal identifier name
