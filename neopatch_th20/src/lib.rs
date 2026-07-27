@@ -9,10 +9,13 @@ mod dialog_dismiss;
 mod patches;
 mod state;
 
-use crate::aslr::host_slide;
+use crate::aslr::{PREFERRED_IMAGE_BASE, host_slide};
 use crate::config::{CONFIG, Th20Config, Th20DisplayMode, parse_config, write_manifest_extras};
+use crate::dialog_dismiss::sites as dialog_sites;
+use crate::patches::sites;
 use neopatch_core::config::{CONFIG as CORE_CONFIG, CoreConfig, decode_text};
 use neopatch_core::pacer::{PACER, Pacer, PacingPolicy};
+use neopatch_core::patches::install_all;
 use neopatch_core::{
     crash, d3d9, d3dx9, dinput8, dinput8_export, exit_hooks, gdi_caps, input, log, process,
     timer_period, vtable, watchdog, window,
@@ -70,19 +73,23 @@ unsafe fn install_hooks() {
             write_manifest_extras(w, th20_cfg)
         });
 
-        crash::install_handlers();
-        if core_cfg.log.level >= LevelFilter::INFO {
-            watchdog::install();
-        }
-
         let host_exe = GetModuleHandleW(null());
         let slide = host_slide(host_exe);
         info!(
             kind = "aslr_slide",
             host_base = format_args!("{:#010x}", host_exe.addr()),
-            preferred_base = format_args!("{:#010x}", aslr::PREFERRED_IMAGE_BASE),
+            preferred_base = format_args!("{:#010x}", PREFERRED_IMAGE_BASE),
             slide = format_args!("{slide:#010x}"),
         );
+
+        if !install_all(&[&sites(slide), &dialog_sites(slide)]) {
+            return;
+        }
+
+        crash::install_handlers();
+        if core_cfg.log.level >= LevelFilter::INFO {
+            watchdog::install();
+        }
 
         process::apply(&core_cfg.process);
 
@@ -114,8 +121,5 @@ unsafe fn install_hooks() {
         if core_cfg.input.dpad {
             input::install();
         }
-
-        dialog_dismiss::install(slide);
-        patches::install(slide);
     }
 }

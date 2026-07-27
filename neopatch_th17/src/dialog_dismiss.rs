@@ -3,7 +3,7 @@
 use crate::config::CONFIG;
 use neopatch_core::config::{CONFIG as CORE_CONFIG, DisplayMode};
 use neopatch_core::iat_hook;
-use neopatch_core::patches::Patch;
+use neopatch_core::patches::PatchSite;
 use std::ffi::c_char;
 use tracing::info;
 use windows_sys::Win32::Foundation::{HMODULE, HWND, LPARAM, WPARAM};
@@ -22,18 +22,24 @@ const OK_BUTTON_ID: u32 = 0xd0;
 const CREATE_DIALOG_CALL_VA: usize = 0x0046_0bae;
 const CREATE_DIALOG_CALL_BYTES: [u8; 6] = [0xff, 0x15, 0x38, 0xa2, 0x49, 0x00];
 
-const DIALOG_PATCHES: &[Patch] = &[
-    Patch::new(
+pub(crate) const DIALOG_PATCHES: &[PatchSite] = &[
+    PatchSite::replace(
         0x0046_0b87,
         &[0x75, 0x16],
         &[0xeb, 0x16],
         "force resolution dialog",
     ),
-    Patch::new(
+    PatchSite::replace(
         0x0046_0bb4,
         &[0x6a, 0x05],
         &[0x6a, 0x00],
         "force dialog hidden",
+    ),
+    PatchSite::call(
+        CREATE_DIALOG_CALL_VA,
+        &CREATE_DIALOG_CALL_BYTES,
+        hook_create_dialog_param_a as *mut (),
+        "CreateDialogParamA call-site rewrite",
     ),
 ];
 
@@ -103,12 +109,6 @@ unsafe extern "system" fn hook_create_dialog_param_a(
 
 pub(crate) unsafe fn install(host: HMODULE) {
     unsafe {
-        REAL_CREATE_DIALOG_PARAM_A.install_with_call_site(
-            host,
-            hook_create_dialog_param_a,
-            CREATE_DIALOG_CALL_VA,
-            &CREATE_DIALOG_CALL_BYTES,
-        );
-        Patch::apply_all(DIALOG_PATCHES);
+        REAL_CREATE_DIALOG_PARAM_A.install(host, hook_create_dialog_param_a);
     }
 }

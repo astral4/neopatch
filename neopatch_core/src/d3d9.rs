@@ -18,8 +18,8 @@
 use crate::config::{CONFIG, RefreshRateMode};
 use crate::log::log_at;
 use crate::pacer::{PACER, PacingPolicy};
-use crate::patches::patch_call;
 use crate::screenshot::{on_post_create_device, on_pre_present, on_pre_reset};
+use crate::patches::PatchSite;
 use crate::thread::{MainCell, MainToken};
 use crate::vtable::{capture_slot, install_vtable, vtable_field, vtable_sig, vtable_slot};
 use crate::{fmt_hr, iat_hook, match_named};
@@ -245,8 +245,8 @@ iat_hook! {
 }
 
 /// IAT-hooks `Direct3DCreate9` against `host`'s import table, forwarding to `Direct3DCreate9Ex`.
-/// For defense against tools that IAT-hook the same import after us, game-specific crates should additionally call
-/// [`install_call_site_rewrite`] for each known live call site. Rewritten sites bypass the IAT entirely.
+/// For defense against tools that IAT-hook the same import after us, game-specific crates should additionally apply
+/// [`call_site_rewrite`] for each known live call site. Rewritten sites bypass the IAT entirely.
 ///
 /// # Safety
 /// `host` must be a loaded module handle.
@@ -256,24 +256,22 @@ pub unsafe fn install(host: HMODULE) {
     }
 }
 
-/// Rewrites a `Direct3DCreate9` call site to a 5-byte direct call to our hook.
-/// Accepts both 5-byte `E8 disp32` direct-call sites (TH10–TH12 + TH20, where the original call goes through a thunk)
-/// and 6-byte `FF 15 disp32` indirect-call sites (TH13-TH18, where the original call dispatches through the IAT).
+/// Returns a patch that rewrites a `Direct3DCreate9` call site to a 5-byte direct call to our hook.
+/// Accepts both 5-byte `E8 disp32` direct-call sites (th10–th12 + th20, where the original call goes through a thunk)
+/// and 6-byte `FF 15 disp32` indirect-call sites (th13-th18, where the original call dispatches through the IAT).
 /// The replacement is a 5-byte `E8 disp32`; the 6-byte variant gets a trailing NOP.
 /// This bypasses any downstream IAT hook (e.g. thcrap) that would otherwise intercept `Direct3DCreate9` from us.
-///
-/// # Safety
-/// `addr` must be a valid, committed, readable code address holding a call whose bytes equal `expected`,
-/// with protection that `VirtualProtect` can modify.
-pub unsafe fn install_call_site_rewrite<const N: usize>(addr: usize, expected: &[u8; N]) {
-    unsafe {
-        patch_call(
-            addr,
-            expected,
-            hook_direct3dcreate9 as *mut (),
-            "Direct3DCreate9 call-site rewrite",
-        );
-    }
+#[must_use]
+pub const fn call_site_rewrite<const N: usize>(
+    addr: usize,
+    expected: &'static [u8; N],
+) -> PatchSite {
+    PatchSite::call(
+        addr,
+        expected,
+        create_hooked_d3d9 as *mut (),
+        "Direct3DCreate9 call-site rewrite",
+    )
 }
 
 unsafe extern "system" fn hook_direct3dcreate9(sdk_version: u32) -> *mut c_void {

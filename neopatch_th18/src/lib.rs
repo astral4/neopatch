@@ -9,8 +9,11 @@ mod patches;
 mod state;
 
 use crate::config::{CONFIG, Th18Config, Th18DisplayMode, parse_config, write_manifest_extras};
+use crate::dialog_dismiss::DIALOG_PATCHES;
+use crate::patches::PATCHES;
 use neopatch_core::config::{CONFIG as CORE_CONFIG, CoreConfig, decode_text};
 use neopatch_core::pacer::{PACER, Pacer, PacingPolicy};
+use neopatch_core::patches::install_all;
 use neopatch_core::{
     crash, d3d9, d3dx9, dinput8, dinput8_export, exit_hooks, gdi_caps, input, log, process,
     timer_period, vtable, watchdog, window,
@@ -67,6 +70,10 @@ unsafe fn install_hooks() {
             write_manifest_extras(w, th18_cfg)
         });
 
+        if !install_all(&[PATCHES, DIALOG_PATCHES]) {
+            return;
+        }
+
         crash::install_handlers();
         if core_cfg.log.level >= LevelFilter::INFO {
             watchdog::install();
@@ -105,8 +112,5 @@ unsafe fn install_hooks() {
         if core_cfg.input.dpad {
             input::install();
         }
-
-        dialog_dismiss::install();
-        patches::install();
     }
 }

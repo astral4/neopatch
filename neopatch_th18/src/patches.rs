@@ -1,7 +1,7 @@
 //! Patches and hooks for th18.exe v1.00a.
 
-use neopatch_core::d3d9::install_call_site_rewrite;
-use neopatch_core::patches::{Patch, patch_jmp};
+use neopatch_core::d3d9::call_site_rewrite;
+use neopatch_core::patches::PatchSite;
 use neopatch_core::screenshot::save_screenshot_live_bmp;
 use std::arch::naked_asm;
 use std::ffi::c_char;
@@ -9,19 +9,27 @@ use std::ffi::c_char;
 const DIRECT3DCREATE9_CALL_VA: usize = 0x0047_1634;
 const DIRECT3DCREATE9_CALL_BYTES: [u8; 6] = [0xff, 0x15, 0x88, 0xd2, 0x4a, 0x00];
 
-const PATCHES: &[Patch] = &[
-    Patch::new(0x0047_2e25, &[0x72, 0x18], &[0xeb, 0x53], "UpdateFast skip"),
-    Patch::new(
+pub(crate) const PATCHES: &[PatchSite] = &[
+    call_site_rewrite(DIRECT3DCREATE9_CALL_VA, &DIRECT3DCREATE9_CALL_BYTES),
+    PatchSite::replace(0x0047_2e25, &[0x72, 0x18], &[0xeb, 0x53], "UpdateFast skip"),
+    PatchSite::replace(
         0x0047_1a9e,
         &[0x0f, 0x89, 0x93, 0x01, 0x00, 0x00],
         &[0xe9, 0xb2, 0x01, 0x00, 0x00, 0x90],
         "force fast input latency",
     ),
-    Patch::new(
-        0x0046_1dd3,
-        &[0x75, 0x3a],
-        &[0x90, 0x90],
-        "replay speed control skip",
+    PatchSite::nop(0x0046_1dd3, &[0x75, 0x3a], "replay speed control skip"),
+    PatchSite::jmp(
+        ANM_MODE57_SPLICE,
+        &[0xf3, 0x0f, 0x11, 0x5d, 0x9c],
+        anm_mode57_z_trampoline as *mut (),
+        "AnmManager z + matrix.tz",
+    ),
+    PatchSite::jmp(
+        SCREENSHOT_SAVE_FN,
+        &SCREENSHOT_SAVE_FN_PROLOGUE,
+        screenshot_trampoline as *mut (),
+        "screenshot save (fcn.00453f40)",
     ),
 ];
 
@@ -51,23 +59,4 @@ unsafe extern "stdcall" fn screenshot_trampoline(_filename: *const c_char) -> u3
         "ret 4",
         save = sym save_screenshot_live_bmp,
     );
-}
-
-pub(crate) unsafe fn install() {
-    unsafe {
-        install_call_site_rewrite(DIRECT3DCREATE9_CALL_VA, &DIRECT3DCREATE9_CALL_BYTES);
-        Patch::apply_all(PATCHES);
-        patch_jmp(
-            ANM_MODE57_SPLICE,
-            &[0xf3, 0x0f, 0x11, 0x5d, 0x9c],
-            anm_mode57_z_trampoline as *mut (),
-            "AnmManager z + matrix.tz",
-        );
-        patch_jmp(
-            SCREENSHOT_SAVE_FN,
-            &SCREENSHOT_SAVE_FN_PROLOGUE,
-            screenshot_trampoline as *mut (),
-            "screenshot save (fcn.00453f40)",
-        );
-    }
 }

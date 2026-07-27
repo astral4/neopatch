@@ -1,8 +1,8 @@
 //! Auto-dismiss th20's startup dialog.
 
-use crate::aslr::{rebased_addr, rebased_patch_jmp};
+use crate::aslr::{current_slide, rebased_addr};
 use crate::config::CONFIG;
-use std::sync::OnceLock;
+use neopatch_core::patches::PatchSite;
 use tracing::info;
 
 const RADIO_INDEX_VA: usize = 0x005c_4f80;
@@ -13,20 +13,16 @@ const DIALOG_LIFECYCLE_BITS: u32 = 0x18;
 const DIALOG_DISPATCH_VA: usize = 0x0041_ae70;
 const DIALOG_DISPATCH_PROLOGUE: [u8; 5] = [0x55, 0x8b, 0xec, 0x81, 0xec];
 
-static SLIDE: OnceLock<usize> = OnceLock::new();
-
 unsafe extern "stdcall" fn dialog_short_circuit() {
-    let slide = *SLIDE
-        .get()
-        .expect("dialog_short_circuit fired before install");
+    let slide = current_slide();
 
     let cfg = CONFIG.get().unwrap();
     let mode = cfg.display_mode;
     let radio_index = cfg.resolution.radio_index(mode);
     let scale_index = cfg.resolution.scale_index(mode);
-    let radio_addr = unsafe { rebased_addr(slide, RADIO_INDEX_VA) };
-    let scale_addr = unsafe { rebased_addr(slide, SCALE_INDEX_VA) };
-    let lifecycle = unsafe { rebased_addr::<u32>(slide, DIALOG_LIFECYCLE_FLAGS_VA) };
+    let radio_addr = unsafe { rebased_addr(RADIO_INDEX_VA, slide) };
+    let scale_addr = unsafe { rebased_addr(SCALE_INDEX_VA, slide) };
+    let lifecycle = unsafe { rebased_addr::<u32>(DIALOG_LIFECYCLE_FLAGS_VA, slide) };
 
     radio_addr.write(radio_index);
     scale_addr.write(scale_index);
@@ -41,15 +37,12 @@ unsafe extern "stdcall" fn dialog_short_circuit() {
     );
 }
 
-pub(crate) unsafe fn install(slide: usize) {
-    _ = SLIDE.set(slide);
-    unsafe {
-        rebased_patch_jmp(
-            slide,
-            DIALOG_DISPATCH_VA,
-            &DIALOG_DISPATCH_PROLOGUE,
-            dialog_short_circuit as *mut (),
-            "dialog short-circuit (fcn.0041ae70)",
-        );
-    }
+pub(crate) fn sites(slide: usize) -> [PatchSite; 1] {
+    [PatchSite::jmp(
+        DIALOG_DISPATCH_VA,
+        &DIALOG_DISPATCH_PROLOGUE,
+        dialog_short_circuit as *mut (),
+        "dialog short-circuit (fcn.0041ae70)",
+    )
+    .rebase(slide)]
 }

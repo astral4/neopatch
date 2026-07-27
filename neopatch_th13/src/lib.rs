@@ -7,8 +7,11 @@ mod dialog_dismiss;
 mod patches;
 mod state;
 
+use crate::dialog_dismiss::DIALOG_PATCHES;
+use crate::patches::PATCHES;
 use neopatch_core::config::{CONFIG, CoreConfig, decode_text, parse_core_only};
 use neopatch_core::pacer::{PACER, Pacer, PacingPolicy};
+use neopatch_core::patches::install_all;
 use neopatch_core::{
     crash, d3d9, d3dx9, dinput8, dinput8_export, exit_hooks, gdi_caps, input, log, process,
     timer_period, vtable, watchdog, window,
@@ -61,6 +64,10 @@ unsafe fn install_hooks() {
         let install_dir = exe_dir.map_or_else(|| PathBuf::from("."), Path::to_path_buf);
         log::init(&install_dir, core_cfg, host_exe_path.as_deref(), |_| Ok(()));
 
+        if !install_all(&[PATCHES, DIALOG_PATCHES]) {
+            return;
+        }
+
         crash::install_handlers();
         if core_cfg.log.level >= LevelFilter::INFO {
             watchdog::install();
@@ -81,7 +88,6 @@ unsafe fn install_hooks() {
             },
             window::WindowApi::Ansi,
         );
-        dialog_dismiss::install(host_exe);
         exit_hooks::install(host_exe);
         d3dx9::install(host_exe);
 
@@ -95,6 +101,6 @@ unsafe fn install_hooks() {
             input::install();
         }
 
-        patches::install();
+        dialog_dismiss::install(host_exe);
     }
 }

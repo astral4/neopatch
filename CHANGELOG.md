@@ -12,6 +12,7 @@ All notable changes to neopatch will be documented in this file.
 
 - Releases are now packaged as a single ZIP archive with one directory per game instead of a separate archive per game.
 - `[window]` geometry and frame settings now apply only to windowed-mode game windows.
+- Every patch site is now verified before modifying anything. If a patch site does not match, then nothing is installed and the game runs exactly as it would without neopatch.
 
 ### Fixed
 

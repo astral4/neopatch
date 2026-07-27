@@ -3,7 +3,6 @@
 //! [`IatHook<F>`] carries the import's function-pointer type `F` through the install/capture/call chain.
 //! The trampoline calls the captured original directly without transmuting.
 
-use crate::patches::patch_call;
 use crate::protect::with_writable;
 use crate::vtable::{FnSlot, fn_ptr_to_raw, raw_to_fn_ptr};
 use std::ffi::CStr;
@@ -140,24 +139,6 @@ impl<F: Copy + Send + Sync + Unpin + 'static> IatHook<F> {
             );
             false
         }
-    }
-
-    /// Installs the IAT hook (capturing the original) and also rewrites a single known call site
-    /// of the import to call `hook` directly. Returns whether the IAT hook itself installed.
-    ///
-    /// # Safety
-    /// `host` must be a loaded module handle. `call_addr` must be a writable code address holding `expected`.
-    pub unsafe fn install_with_call_site<const N: usize>(
-        &self,
-        host: HMODULE,
-        hook: F,
-        call_addr: usize,
-        expected: &[u8; N],
-    ) -> bool {
-        let installed = unsafe { self.install(host, hook) };
-        let label = format!("{} call-site rewrite", self.name);
-        unsafe { patch_call(call_addr, expected, fn_ptr_to_raw(hook), &label) };
-        installed
     }
 }
 

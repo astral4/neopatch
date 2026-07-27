@@ -2,7 +2,7 @@
 
 use neopatch_core::config::{CONFIG, DisplayMode};
 use neopatch_core::iat_hook;
-use neopatch_core::patches::Patch;
+use neopatch_core::patches::PatchSite;
 use std::ffi::c_char;
 use tracing::info;
 use windows_sys::Win32::Foundation::{HMODULE, HWND, LPARAM};
@@ -16,12 +16,15 @@ const DIALOG_RET_WINDOWED: isize = 7;
 const DIALOG_BOX_CALL_VA: usize = 0x0043_8b8c;
 const DIALOG_BOX_CALL_BYTES: [u8; 6] = [0xff, 0x15, 0x64, 0x62, 0x46, 0x00];
 
-const DIALOG_PATCHES: &[Patch] = &[Patch::new(
-    0x0043_8b7b,
-    &[0x74, 0x21],
-    &[0x90, 0x90],
-    "force dialog gate open",
-)];
+pub(crate) const DIALOG_PATCHES: &[PatchSite] = &[
+    PatchSite::nop(0x0043_8b7b, &[0x74, 0x21], "force dialog gate open"),
+    PatchSite::call(
+        DIALOG_BOX_CALL_VA,
+        &DIALOG_BOX_CALL_BYTES,
+        hook_dialog_box_param_a as *mut (),
+        "DialogBoxParamA call-site rewrite",
+    ),
+];
 
 iat_hook! {
     REAL_DIALOG_BOX_PARAM_A / real_dialog_box_param_a : "DialogBoxParamA"
@@ -70,12 +73,6 @@ unsafe extern "system" fn hook_dialog_box_param_a(
 
 pub(crate) unsafe fn install(host: HMODULE) {
     unsafe {
-        REAL_DIALOG_BOX_PARAM_A.install_with_call_site(
-            host,
-            hook_dialog_box_param_a,
-            DIALOG_BOX_CALL_VA,
-            &DIALOG_BOX_CALL_BYTES,
-        );
-        Patch::apply_all(DIALOG_PATCHES);
+        REAL_DIALOG_BOX_PARAM_A.install(host, hook_dialog_box_param_a);
     }
 }

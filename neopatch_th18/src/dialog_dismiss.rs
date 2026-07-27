@@ -2,7 +2,7 @@
 
 use crate::config::CONFIG;
 use neopatch_core::game_addr::GameAddr;
-use neopatch_core::patches::patch_jmp;
+use neopatch_core::patches::PatchSite;
 use tracing::info;
 
 const RADIO_INDEX_VA: GameAddr<u8> = unsafe { GameAddr::new(0x004c_d00b) };
@@ -31,13 +31,9 @@ unsafe extern "stdcall" fn dialog_short_circuit() {
     );
 }
 
-pub(crate) unsafe fn install() {
-    unsafe {
-        patch_jmp(
-            FUN_00474850,
-            &FUN_00474850_PROLOGUE,
-            dialog_short_circuit as *mut (),
-            "dialog short-circuit (fcn.00474850)",
-        );
-    }
-}
+pub(crate) const DIALOG_PATCHES: &[PatchSite] = &[PatchSite::jmp(
+    FUN_00474850,
+    &FUN_00474850_PROLOGUE,
+    dialog_short_circuit as *mut (),
+    "dialog short-circuit (fcn.00474850)",
+)];
