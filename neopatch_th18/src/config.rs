@@ -11,8 +11,8 @@ pub(crate) static CONFIG: OnceLock<Th18Config> = OnceLock::new();
 
 #[derive(Default)]
 pub(crate) struct Th18Config {
-    pub display_mode: Th18DisplayMode,
-    pub resolution: Resolution,
+    pub(crate) display_mode: Th18DisplayMode,
+    pub(crate) resolution: Resolution,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

@@ -24,7 +24,7 @@ impl ModuleRange {
 
     /// Returns whether the entirety of the half-open span `[addr, addr + len)` lies inside this range.
     /// A `len` of 0 or an `addr + len` that overflows is not contained.
-    pub(crate) fn contains_span(&self, addr: u32, len: usize) -> bool {
+    fn contains_span(&self, addr: u32, len: usize) -> bool {
         let Ok(len) = u32::try_from(len) else {
             return false;
         };
@@ -36,7 +36,7 @@ impl ModuleRange {
 }
 
 /// Returns the host executable's image range, or `None` if it can't be resolved.
-pub(crate) fn host_range() -> Option<ModuleRange> {
+fn host_range() -> Option<ModuleRange> {
     static HOST_RANGE: OnceLock<Option<ModuleRange>> = OnceLock::new();
     *HOST_RANGE.get_or_init(|| {
         let range = module_info(unsafe { GetModuleHandleW(null()) });

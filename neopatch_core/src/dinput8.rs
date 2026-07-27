@@ -1,7 +1,7 @@
 //! Generic `dinput8.dll` proxy that loads the real System32 export and forwards calls.
 //!
 //! Every game crate that ships as `dinput8.dll` should use this to keep the proxy export working even if hook installation fails:
-//! call [`init`] once from `DllMain` and re-export `DirectInput8Create` via the [`dinput8_export!`] macro.
+//! call [`init`] once from `DllMain` and re-export `DirectInput8Create` via the [`crate::dinput8_export!`] macro.
 
 use crate::vtable::{FnSlot, raw_to_fn_ptr};
 use std::ffi::c_void;
@@ -124,8 +124,7 @@ pub unsafe fn forward(
 macro_rules! dinput8_export {
     () => {
         #[unsafe(no_mangle)]
-        #[allow(non_snake_case)]
-        pub unsafe extern "system" fn DirectInput8Create(
+        unsafe extern "system" fn DirectInput8Create(
             hinst: ::windows_sys::Win32::Foundation::HINSTANCE,
             dw_version: u32,
             riidltf: *const ::windows_sys::core::GUID,

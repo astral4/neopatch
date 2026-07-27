@@ -32,12 +32,7 @@ const FRAMEBUFFER_SIZE: (u32, u32) = (640, 480);
 dinput8_export!();
 
 #[unsafe(no_mangle)]
-#[allow(non_snake_case, clippy::missing_safety_doc)]
-pub unsafe extern "system" fn DllMain(
-    hinst: HINSTANCE,
-    reason: u32,
-    _reserved: *mut c_void,
-) -> i32 {
+unsafe extern "system" fn DllMain(hinst: HINSTANCE, reason: u32, _reserved: *mut c_void) -> i32 {
     if reason != DLL_PROCESS_ATTACH {
         return 1;
     }

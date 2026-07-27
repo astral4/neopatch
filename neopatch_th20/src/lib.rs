@@ -34,12 +34,7 @@ use windows_sys::Win32::System::SystemServices::DLL_PROCESS_ATTACH;
 dinput8_export!();
 
 #[unsafe(no_mangle)]
-#[allow(non_snake_case, clippy::missing_safety_doc)]
-pub unsafe extern "system" fn DllMain(
-    hinst: HINSTANCE,
-    reason: u32,
-    _reserved: *mut c_void,
-) -> i32 {
+unsafe extern "system" fn DllMain(hinst: HINSTANCE, reason: u32, _reserved: *mut c_void) -> i32 {
     if reason != DLL_PROCESS_ATTACH {
         return 1;
     }

@@ -9,7 +9,7 @@ pub(crate) static CONFIG: OnceLock<Th16Config> = OnceLock::new();
 
 #[derive(Default)]
 pub(crate) struct Th16Config {
-    pub resolution: Resolution,
+    pub(crate) resolution: Resolution,
 }
 
 #[repr(u8)]
