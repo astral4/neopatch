@@ -1,7 +1,10 @@
 //! Loaded-module enumeration and address-to-module resolution.
 
-use std::ptr::null_mut;
+use std::ptr::{null, null_mut};
+use std::sync::OnceLock;
+use tracing::warn;
 use windows_sys::Win32::Foundation::{HMODULE, MAX_PATH};
+use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::ProcessStatus::{
     EnumProcessModules, GetModuleFileNameExW, GetModuleInformation, MODULEINFO,
 };
@@ -18,6 +21,35 @@ impl ModuleRange {
     pub(crate) fn contains(&self, addr: u32) -> bool {
         addr >= self.base && addr < self.end
     }
+
+    /// Returns whether the entirety of the half-open span `[addr, addr + len)` lies inside this range.
+    /// A `len` of 0 or an `addr + len` that overflows is not contained.
+    pub(crate) fn contains_span(&self, addr: u32, len: usize) -> bool {
+        let Ok(len) = u32::try_from(len) else {
+            return false;
+        };
+        let Some(last) = addr.checked_add(len) else {
+            return false;
+        };
+        len != 0 && addr >= self.base && last <= self.end
+    }
+}
+
+/// Returns the host executable's image range, or `None` if it can't be resolved.
+pub(crate) fn host_range() -> Option<ModuleRange> {
+    static HOST_RANGE: OnceLock<Option<ModuleRange>> = OnceLock::new();
+    *HOST_RANGE.get_or_init(|| {
+        let range = module_info(unsafe { GetModuleHandleW(null()) });
+        if range.is_none() {
+            warn!(kind = "host_range_unresolved");
+        }
+        range
+    })
+}
+
+/// Returns whether `[addr, addr + len)` is within the host executable's image range.
+pub(crate) fn in_host_image(addr: usize, len: usize) -> bool {
+    host_range().is_some_and(|r| u32::try_from(addr).is_ok_and(|addr| r.contains_span(addr, len)))
 }
 
 /// [`ModuleRange`] plus the leaf filename, for `name+0xoffset` annotations.

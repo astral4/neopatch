@@ -20,6 +20,7 @@ All notable changes to neopatch will be documented in this file.
 - Ctrl key detection for Touhou 18 and Touhou 20 no longer introduces a polling race that can drop keypress events.
 - In Touhou 18 and Touhou 20, holding Ctrl no longer fast-forwards replays while the game window is inactive.
 - Non-ASCII text in window titles and dialogs now correctly renders without mojibake even when using an incompatible system locale or ANSI code page.
+- neopatch no longer risks faulting from unmapped memory when the `dinput8.dll` file is loaded by a non-game executable.
 
 ## [0.9.1] - 2026-06-02
 

@@ -1,16 +1,19 @@
 //! Typed handles for fixed game-memory addresses.
 //!
 //! [`GameAddr<T>`] pairs a constant address with an asserted layout `T`. Each address is declared with `GameAddr::new(0x...)`.
-//! The address-to-layout pairing should be verified against the disassembly.
-//! Subsequent reads and writes through the typed handle are safe because of the asserted layout.
+//! The address-to-layout pairing should be verified against the disassembly. Subsequent reads and writes through the typed handle are safe
+//! because of the asserted layout, and all accesses are bounded to the host executable's image range.
 //!
 //! Pointer-derived addresses (e.g. `(*mgr).field` after dereferencing a game pointer we just read)
 //! aren't instances of `GameAddr<T>` since the address isn't fixed. Those sites keep using `read_volatile` directly.
 
+use crate::modules::in_host_image;
 use std::marker::PhantomData;
+use std::mem::zeroed;
 use std::ptr::{
     read_volatile, with_exposed_provenance, with_exposed_provenance_mut, write_volatile,
 };
+use tracing::warn;
 
 #[derive(Clone, Copy)]
 pub struct GameAddr<T> {
@@ -21,8 +24,9 @@ pub struct GameAddr<T> {
 impl<T: Copy> GameAddr<T> {
     /// # Safety
     /// `addr` must point to a value of layout `T` for the lifetime of the process in the game-binary version the call site targets.
-    /// `read` and `write` calls through the handle must not race with conflicting access from another thread;
-    /// the volatile ops are not atomic. The caller is responsible for verifying against the disassembly at the declaration site.
+    /// `T`'s all-zero bit pattern must be a valid `T`. `read` and `write` calls through the handle
+    /// must not race with conflicting access from another thread; the volatile ops are not atomic.
+    /// The caller is responsible for verifying against the disassembly at the declaration site.
     #[must_use]
     pub const unsafe fn new(addr: usize) -> Self {
         Self {
@@ -34,11 +38,26 @@ impl<T: Copy> GameAddr<T> {
     #[inline]
     #[must_use]
     pub fn read(self) -> T {
+        if !in_host_image(self.addr, size_of::<T>()) {
+            warn!(
+                kind = "game_addr_read_skipped",
+                addr = format_args!("{:#010x}", self.addr),
+            );
+            // SAFETY: `T`'s all-zero bit pattern is a valid `T` per `Self::new`'s contract.
+            return unsafe { zeroed() };
+        }
         unsafe { read_volatile(with_exposed_provenance(self.addr)) }
     }
 
     #[inline]
     pub fn write(self, v: T) {
+        if !in_host_image(self.addr, size_of::<T>()) {
+            warn!(
+                kind = "game_addr_write_skipped",
+                addr = format_args!("{:#010x}", self.addr),
+            );
+            return;
+        }
         unsafe { write_volatile(with_exposed_provenance_mut(self.addr), v) };
     }
 }
