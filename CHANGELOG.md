@@ -13,6 +13,7 @@ All notable changes to neopatch will be documented in this file.
 - Releases are now packaged as a single ZIP archive with one directory per game instead of a separate archive per game.
 - `[window]` geometry and frame settings now apply only to windowed-mode game windows.
 - Every patch site is now verified before modifying anything. If a patch site does not match, then nothing is installed and the game runs exactly as it would without neopatch.
+- A 16-bit back buffer refused by the adapter is now retried as 32-bit instead of immediately failing.
 
 ### Fixed
 

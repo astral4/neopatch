@@ -292,11 +292,15 @@ pub const fn call_site_rewrite<const N: usize>(
 pub(crate) struct PresentPolicy {
     /// Keep `D3DPRESENTFLAG_LOCKABLE_BACKBUFFER` instead of stripping it.
     pub(crate) keep_lockable_back_buffer: bool,
+    /// Substitute a 32-bit back buffer for a 16-bit request up front, rather than only after the device refuses one.
+    /// See [`run_with_present_failsafe`] for more details.
+    pub(crate) upgrade_16bit_back_buffer: bool,
 }
 
 /// The present-parameter policy that every device created through direct D3D9 gets.
 const DIRECT_POLICY: PresentPolicy = PresentPolicy {
     keep_lockable_back_buffer: false,
+    upgrade_16bit_back_buffer: false,
 };
 
 /// The `Direct3DCreate9` IAT-hook/call-site-rewrite target.
@@ -315,6 +319,7 @@ pub(crate) unsafe fn create_hooked_d3d9_with(
     log_at!(first => info / warn,
         kind = "present_params_policy",
         keep_lockable_back_buffer = effective.keep_lockable_back_buffer,
+        upgrade_16bit_back_buffer = effective.upgrade_16bit_back_buffer,
         status = if first { "OK" } else { "ALREADY_SET" },
     );
 
@@ -404,6 +409,14 @@ struct PresentParams {
 }
 
 impl PresentParams {
+    fn empty() -> Self {
+        Self {
+            before: None,
+            after: None,
+            display_mode: None,
+        }
+    }
+
     /// Returns a tuple of the game's requested fullscreen rate, the rate after rewriting,
     /// and whether an active display-mode override changed it.
     fn refresh_override(&self) -> (u32, u32, bool) {
@@ -453,17 +466,14 @@ unsafe fn prep_present_params(
     pp: *mut D3DPRESENT_PARAMETERS,
     adapter: Adapter<'_>,
     desktop_mode: Option<D3DDISPLAYMODEEX>,
+    upgrade_16bit_back_buffer: bool,
 ) -> PresentParams {
     unsafe {
         let Some(p) = pp.as_mut() else {
-            return PresentParams {
-                before: None,
-                after: None,
-                display_mode: None,
-            };
+            return PresentParams::empty();
         };
         let before = *p;
-        rewrite_present_params(p);
+        rewrite_present_params(p, upgrade_16bit_back_buffer);
         let display_mode = if p.Windowed.0 == 0 {
             let cfg = CONFIG.get().unwrap();
             apply_refresh_override(p, adapter, cfg.display.refresh_rate, desktop_mode);
@@ -488,8 +498,21 @@ fn present_policy() -> PresentPolicy {
     PRESENT_POLICY.get().copied().unwrap_or(DIRECT_POLICY)
 }
 
-fn rewrite_present_params(pp: &mut D3DPRESENT_PARAMETERS) {
-    rewrite_present_params_impl(pp, present_policy(), PACER.get().is_some());
+/// The 32-bit substitute for a 16-bit back buffer format, or `None` for a format that doesn't need substitution.
+fn upgraded_back_buffer_format(f: D3DFORMAT) -> Option<D3DFORMAT> {
+    match f {
+        D3DFMT_R5G6B5 | D3DFMT_X1R5G5B5 => Some(D3DFMT_X8R8G8B8),
+        D3DFMT_A1R5G5B5 => Some(D3DFMT_A8R8G8B8),
+        _ => None,
+    }
+}
+
+fn rewrite_present_params(pp: &mut D3DPRESENT_PARAMETERS, upgrade_16bit_back_buffer: bool) {
+    let policy = PresentPolicy {
+        keep_lockable_back_buffer: present_policy().keep_lockable_back_buffer,
+        upgrade_16bit_back_buffer,
+    };
+    rewrite_present_params_impl(pp, policy, PACER.get().is_some());
 }
 
 fn rewrite_present_params_impl(
@@ -502,6 +525,11 @@ fn rewrite_present_params_impl(
     }
     if controls_timing {
         pp.PresentationInterval = D3DPRESENT_INTERVAL_IMMEDIATE.cast_unsigned();
+    }
+    if policy.upgrade_16bit_back_buffer
+        && let Some(substituted) = upgraded_back_buffer_format(pp.BackBufferFormat)
+    {
+        substitute_back_buffer_format(pp, substituted, "16bit_back_buffer_upgraded");
     }
     // `CreateDeviceEx` rejects `A8R8G8B8` in fullscreen because it isn't scanout-compatible, so we substitute with `X8R8G8B8`.
     if pp.Windowed.0 == 0 && pp.BackBufferFormat == D3DFMT_A8R8G8B8 {
@@ -929,12 +957,10 @@ unsafe extern "system" fn hook_create_device(
 
         let desktop_before = sample_for_degradation_check(adapter, pp);
 
-        let mut prep = prep_present_params(pp, adapter, desktop_before);
-
         let mut dev: *mut c_void = null_mut();
-        let hr = run_with_refresh_failsafe(
+        let (hr, prep) = run_with_present_failsafe(
             pp,
-            &mut prep,
+            adapter,
             desktop_before,
             "create_device_refresh_failsafe",
             // `CreateDeviceEx` always takes the display mode, so `pp` must keep agreeing with it.
@@ -1364,12 +1390,11 @@ unsafe extern "system" fn hook_reset(this: *mut c_void, pp: *mut D3DPRESENT_PARA
         let adapter = parent.adapter();
         let desktop_before = sample_for_degradation_check(adapter, pp);
         // We reapply refresh rate selection so runtime rate toggles take effect at the next `Reset`.
-        let mut prep = prep_present_params(pp, adapter, desktop_before);
         let use_reset_ex = REAL_RESET_EX.try_get().is_some();
 
-        let hr = run_with_refresh_failsafe(
+        let (hr, prep) = run_with_present_failsafe(
             pp,
-            &mut prep,
+            adapter,
             desktop_before,
             "reset_refresh_failsafe",
             // Plain `Reset` ignores the display mode entirely, so on that path `pp` is the whole request.
@@ -1401,12 +1426,14 @@ unsafe fn run_with_refresh_failsafe(
     prep: &mut PresentParams,
     desktop_before: Option<D3DDISPLAYMODEEX>,
     failsafe_kind: &'static str,
+    base_attempt: u32,
     consumes_display_mode: bool,
     mut attempt: impl FnMut(*mut D3DDISPLAYMODEEX, u32) -> HRESULT,
 ) -> HRESULT {
     let (original_refresh, chosen_refresh, overrode_fs) = prep.refresh_override();
     info!(kind = "present_rewrite", pp_before = ?prep.before, pp_after = ?prep.after);
-    let hr = attempt(prep.display_mode_ptr(), 0);
+
+    let hr = attempt(prep.display_mode_ptr(), base_attempt);
     if hr.is_ok() || !overrode_fs {
         return hr;
     }
@@ -1438,7 +1465,58 @@ unsafe fn run_with_refresh_failsafe(
     let display_mode_ptr = unsafe {
         rollback_refresh_override(pp, prep, pp_refresh, chosen_refresh, failsafe_kind, hr)
     };
-    attempt(display_mode_ptr, 1)
+    attempt(display_mode_ptr, base_attempt + 1)
+}
+
+/// Prepares present params and runs `attempt` under [`run_with_refresh_failsafe`], escalating the back buffer format once
+/// if a 16-bit request was deliberately passed through and the device refused it.
+///
+/// `consumes_display_mode` indicates whether `attempt` will actually read the `D3DDISPLAYMODEEX` it is handed.
+/// `CreateDeviceEx` always does; `Reset` never does, and [`reset_once`] only reaches `ResetEx` when the device exposes it.
+unsafe fn run_with_present_failsafe(
+    pp: *mut D3DPRESENT_PARAMETERS,
+    adapter: Adapter<'_>,
+    desktop_before: Option<D3DDISPLAYMODEEX>,
+    failsafe_kind: &'static str,
+    consumes_display_mode: bool,
+    mut attempt: impl FnMut(*mut D3DDISPLAYMODEEX, u32) -> HRESULT,
+) -> (HRESULT, PresentParams) {
+    // The params exactly as the game handed them to us, needed to re-prepare from scratch on escalation.
+    let requested = unsafe { pp.as_ref().copied() };
+    let escalatable =
+        requested.is_some_and(|p| upgraded_back_buffer_format(p.BackBufferFormat).is_some());
+
+    let mut upgrade = present_policy().upgrade_16bit_back_buffer;
+    let mut round = 0;
+    loop {
+        let mut prep = unsafe { prep_present_params(pp, adapter, desktop_before, upgrade) };
+        let hr = unsafe {
+            run_with_refresh_failsafe(
+                pp,
+                &mut prep,
+                desktop_before,
+                failsafe_kind,
+                round * 2,
+                consumes_display_mode,
+                &mut attempt,
+            )
+        };
+        if hr.is_ok() || upgrade || !escalatable || is_transient_device_error(hr) {
+            return (hr, prep);
+        }
+
+        // A 16-bit fullscreen mode may simply not exist on this adapter, and a substituted format beats no device at all.
+        warn!(
+            kind = "back_buffer_upgrade_escalated",
+            context = failsafe_kind,
+            hr = %fmt_hr!(hr),
+        );
+        if let (Some(dst), Some(src)) = (unsafe { pp.as_mut() }, requested) {
+            *dst = src;
+        }
+        upgrade = true;
+        round += 1;
+    }
 }
 
 fn is_transient_device_error(hr: HRESULT) -> bool {
@@ -1568,7 +1646,7 @@ mod tests {
         D3DERR_OUTOFVIDEOMEMORY, PresentPolicy, RefreshRateMode, build_display_mode_ex,
         format_name, is_real_refresh_rate, is_transient_device_error, mode_refresh_rate,
         normalize_reported_rate, rewrite_behavior_flags, rewrite_present_params_impl,
-        select_refresh_rate, translate_managed_pool,
+        select_refresh_rate, translate_managed_pool, upgraded_back_buffer_format,
     };
     use crate::fmt_hr;
     use std::num::NonZero;
@@ -1587,7 +1665,65 @@ mod tests {
     fn policy(keep_lockable_back_buffer: bool) -> PresentPolicy {
         PresentPolicy {
             keep_lockable_back_buffer,
+            upgrade_16bit_back_buffer: false,
         }
+    }
+
+    fn upgrading() -> PresentPolicy {
+        PresentPolicy {
+            keep_lockable_back_buffer: false,
+            upgrade_16bit_back_buffer: true,
+        }
+    }
+
+    #[test]
+    fn upgraded_back_buffer_format_16bit_only() {
+        assert_eq!(
+            upgraded_back_buffer_format(D3DFMT_R5G6B5),
+            Some(D3DFMT_X8R8G8B8)
+        );
+        assert_eq!(
+            upgraded_back_buffer_format(D3DFMT_X1R5G5B5),
+            Some(D3DFMT_X8R8G8B8)
+        );
+        assert_eq!(
+            upgraded_back_buffer_format(D3DFMT_A1R5G5B5),
+            Some(D3DFMT_A8R8G8B8)
+        );
+        assert_eq!(upgraded_back_buffer_format(D3DFMT_X8R8G8B8), None);
+        assert_eq!(upgraded_back_buffer_format(D3DFMT_A8R8G8B8), None);
+    }
+
+    #[test]
+    fn back_buffer_upgrade_depends_on_policy() {
+        for (requested, upgraded) in [
+            (D3DFMT_R5G6B5, D3DFMT_X8R8G8B8),
+            (D3DFMT_X1R5G5B5, D3DFMT_X8R8G8B8),
+            // This is a windowed format, so the `A8R8G8B8` fullscreen rule below doesn't also fire.
+            (D3DFMT_A1R5G5B5, D3DFMT_A8R8G8B8),
+        ] {
+            let base = D3DPRESENT_PARAMETERS {
+                BackBufferFormat: requested,
+                Windowed: true.into(),
+                ..Default::default()
+            };
+
+            let mut off = base;
+            rewrite_present_params_impl(&mut off, policy(false), false);
+            assert_eq!(off.BackBufferFormat, requested);
+
+            let mut on = base;
+            rewrite_present_params_impl(&mut on, upgrading(), false);
+            assert_eq!(on.BackBufferFormat, upgraded);
+        }
+
+        let mut pp = D3DPRESENT_PARAMETERS {
+            BackBufferFormat: D3DFMT_A1R5G5B5,
+            Windowed: false.into(),
+            ..Default::default()
+        };
+        rewrite_present_params_impl(&mut pp, upgrading(), false);
+        assert_eq!(pp.BackBufferFormat, D3DFMT_X8R8G8B8);
     }
 
     fn nz(n: u32) -> NonZero<u32> {
