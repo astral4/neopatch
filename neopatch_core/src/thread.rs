@@ -20,10 +20,6 @@ use windows_sys::Win32::System::Threading::GetCurrentThreadId;
 
 static MAIN_TID: AtomicU32 = AtomicU32::new(0);
 
-pub(crate) fn main_id() -> u32 {
-    MAIN_TID.load(Ordering::Acquire)
-}
-
 /// ZST witness that the constructing thread is the render thread. Holding `&MainToken` is the compile-time proof required to call
 /// [`MainCell::get`] and [`MainCell::set`], as well as any other render-thread-only function in the codebase.
 ///

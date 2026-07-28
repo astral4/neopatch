@@ -98,10 +98,6 @@ fn replay_mode(tok: &MainToken) -> ReplayMode {
 
 static PRESENT_COUNT: AtomicU32 = AtomicU32::new(0);
 
-pub(crate) fn present_count() -> u32 {
-    PRESENT_COUNT.load(Ordering::Relaxed)
-}
-
 /// The most recent `Present` result and the frame at which it began.
 #[derive(Clone, Copy)]
 struct PresentState {
