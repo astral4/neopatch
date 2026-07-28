@@ -1,6 +1,8 @@
 //! Per-game replay-state probe.
 
-use crate::thread::MainToken;
+use crate::config::CONFIG;
+use crate::pacer::PacingPolicy;
+use crate::thread::{MainCell, MainToken};
 use std::ptr::{read_volatile, with_exposed_provenance};
 use std::sync::OnceLock;
 
@@ -37,7 +39,7 @@ pub(crate) enum ReplayMode {
 
 /// Classifies the registered probe's observations: focus requests slow-motion and wins; shoot, skip, or Ctrl request fast-forward.
 /// Returns [`ReplayMode::Normal`] when no probe is registered, replay playback is inactive, or no relevant key is held.
-pub(crate) fn get_replay_mode(tok: &MainToken) -> ReplayMode {
+fn replay_mode(tok: &MainToken) -> ReplayMode {
     let Some(keys) = PROBE.get().and_then(|probe| probe(tok)) else {
         return ReplayMode::Normal;
     };
@@ -48,6 +50,32 @@ pub(crate) fn get_replay_mode(tok: &MainToken) -> ReplayMode {
     } else {
         ReplayMode::Normal
     }
+}
+
+// `Pacer::apply_policy` resets the pacing deadline, so a transition is surfaced only on mode change.
+static MODE: MainCell<ReplayMode> = MainCell::new(ReplayMode::Normal);
+
+/// Re-classifies pacing intent and reports transitions. Returns `Some` only when the mode changed since the last call,
+/// with the pacer policy that mode calls for. The transition is latched immediately, so a returned policy must be applied to the pacer.
+pub(crate) fn policy_change(tok: &MainToken) -> Option<(ReplayMode, PacingPolicy)> {
+    let observed = replay_mode(tok);
+    if MODE.get(tok) == observed {
+        return None;
+    }
+    MODE.set(tok, observed);
+    let cfg = CONFIG.get().unwrap();
+    let policy = match observed {
+        ReplayMode::Normal => PacingPolicy::LiveInput {
+            target_fps: cfg.framerate.game_fps,
+        },
+        ReplayMode::Skip => PacingPolicy::InternalCadence {
+            target_fps: cfg.framerate.replay_skip_fps,
+        },
+        ReplayMode::Slow => PacingPolicy::InternalCadence {
+            target_fps: cfg.framerate.replay_slow_fps,
+        },
+    };
+    Some((observed, policy))
 }
 
 /// Layout of a game's replay-state globals. All addresses are absolute and must be 4-byte aligned.

@@ -17,9 +17,9 @@
 
 use crate::config::{CONFIG, RefreshRateMode};
 use crate::log::log_at;
-use crate::pacer::{PACER, PacingPolicy};
+use crate::pacer::PACER;
 use crate::patches::PatchSite;
-use crate::replay::{ReplayMode, get_replay_mode};
+use crate::replay::policy_change;
 use crate::screenshot::{on_device_creating, on_post_create_device, on_pre_present, on_pre_reset};
 use crate::thread::{MainCell, MainToken, on_main_thread};
 use crate::vtable::{capture_slot, install_vtable, vtable_field, vtable_sig, vtable_slot};
@@ -71,9 +71,6 @@ const D3DERR_DEVICELOST: HRESULT = HRESULT(0x8876_0868_u32.cast_signed());
 const D3DERR_DEVICEREMOVED: HRESULT = HRESULT(0x8876_0870_u32.cast_signed());
 const D3DERR_DEVICEHUNG: HRESULT = HRESULT(0x8876_0874_u32.cast_signed());
 const D3DERR_OUTOFVIDEOMEMORY: HRESULT = HRESULT(0x8876_017c_u32.cast_signed());
-
-// `Pacer::apply_policy` resets the deadline, so call it only on mode change.
-static MODE: MainCell<ReplayMode> = MainCell::new(ReplayMode::Normal);
 
 static PRESENT_COUNT: AtomicU32 = AtomicU32::new(0);
 
@@ -1245,25 +1242,10 @@ unsafe extern "system" fn hook_present(
     let tok = MainToken::new();
 
     if let Some(pacer) = PACER.get() {
-        let observed_mode = get_replay_mode(&tok);
-
-        if MODE.get(&tok) != observed_mode {
-            MODE.set(&tok, observed_mode);
-            let cfg = CONFIG.get().unwrap();
-            let policy = match observed_mode {
-                ReplayMode::Normal => PacingPolicy::LiveInput {
-                    target_fps: cfg.framerate.game_fps,
-                },
-                ReplayMode::Skip => PacingPolicy::InternalCadence {
-                    target_fps: cfg.framerate.replay_skip_fps,
-                },
-                ReplayMode::Slow => PacingPolicy::InternalCadence {
-                    target_fps: cfg.framerate.replay_slow_fps,
-                },
-            };
+        if let Some((mode, policy)) = policy_change(&tok) {
             info!(
                 kind = "replay_mode_change",
-                mode = ?observed_mode,
+                mode = ?mode,
                 target_fps = policy.target_fps(),
                 frame = PRESENT_COUNT.load(Ordering::Relaxed),
             );
