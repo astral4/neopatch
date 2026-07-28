@@ -94,7 +94,6 @@ unsafe fn install_hooks() {
         d3dx9::install(host_exe);
     }
 
-    d3d9::set_replay_mode_fn(state::replay_mode);
     _ = PACER.set(Pacer::new(PacingPolicy::LiveInput {
         target_fps: core_cfg.framerate.game_fps,
     }));

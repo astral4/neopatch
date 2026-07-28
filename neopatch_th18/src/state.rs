@@ -1,8 +1,7 @@
 //! Direct reads of game state for th18.exe v1.00a.
 
-use neopatch_core::d3d9::ReplayMode;
 use neopatch_core::iat_hook;
-use neopatch_core::replay::{InputAddr, ReplayStateLayout, read_replay_mode};
+use neopatch_core::replay::{HeldKeys, InputAddr, ReplayStateLayout, set_probe};
 use neopatch_core::thread::MainToken;
 use std::sync::atomic::{AtomicBool, Ordering};
 use windows_sys::Win32::Foundation::HMODULE;
@@ -26,16 +25,21 @@ iat_hook! {
 
 static CTRL_HELD: AtomicBool = AtomicBool::new(false);
 
-pub(crate) fn replay_mode(tok: &MainToken) -> ReplayMode {
-    read_replay_mode(tok, REPLAY_STATE, || CTRL_HELD.load(Ordering::Relaxed))
-}
-
-/// IAT-hooks `GetKeyboardState` against `host`'s import table.
+/// IAT-hooks `GetKeyboardState` against `host`'s import table and installs the replay key probe.
 ///
 /// # Safety
 /// `host` must be a loaded module handle.
 pub(crate) unsafe fn install(host: HMODULE) {
     unsafe { REAL_GET_KEYBOARD_STATE.install(host, hook_get_keyboard_state) };
+    set_probe(replay_keys);
+}
+
+fn replay_keys(tok: &MainToken) -> Option<HeldKeys> {
+    let keys = REPLAY_STATE.read_keys(tok)?;
+    Some(HeldKeys {
+        ctrl: CTRL_HELD.load(Ordering::Relaxed),
+        ..keys
+    })
 }
 
 unsafe extern "system" fn hook_get_keyboard_state(lp_key_state: *mut u8) -> i32 {

@@ -11,11 +11,12 @@ mod state;
 use crate::config::{CONFIG, Th15Config, parse_config, write_manifest_extras};
 use crate::dialog_dismiss::DIALOG_PATCHES;
 use crate::patches::PATCHES;
+use crate::state::replay_keys;
 use neopatch_core::config::{CONFIG as CORE_CONFIG, CoreConfig, decode_text};
 use neopatch_core::pacer::{PACER, Pacer, PacingPolicy};
 use neopatch_core::patches::install_all;
 use neopatch_core::{
-    crash, d3d9, d3dx9, dinput8, dinput8_export, exit_hooks, gdi_caps, input, log, process,
+    crash, d3d9, d3dx9, dinput8, dinput8_export, exit_hooks, gdi_caps, input, log, process, replay,
     timer_period, vtable, window,
 };
 use std::env::current_exe;
@@ -88,7 +89,7 @@ unsafe fn install_hooks() {
         d3dx9::install(host_exe);
     }
 
-    d3d9::set_replay_mode_fn(state::replay_mode);
+    replay::set_probe(replay_keys);
     _ = PACER.set(Pacer::new(PacingPolicy::LiveInput {
         target_fps: core_cfg.framerate.game_fps,
     }));

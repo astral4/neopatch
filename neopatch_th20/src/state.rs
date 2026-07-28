@@ -1,7 +1,6 @@
 //! Direct reads of game state for th20.exe v1.00a.
 
-use neopatch_core::d3d9::{ReplayMode, set_replay_mode_fn};
-use neopatch_core::replay::{InputAddr, ReplayStateLayout, read_replay_mode};
+use neopatch_core::replay::{HeldKeys, InputAddr, ReplayStateLayout, set_probe};
 use neopatch_core::thread::MainToken;
 use std::ptr::{read_volatile, with_exposed_provenance};
 use std::sync::OnceLock;
@@ -50,14 +49,18 @@ pub(crate) fn install(slide: usize) {
     };
     state.layout.validate();
     let _ = REPLAY_STATE.set(state);
-    set_replay_mode_fn(replay_mode);
+    set_probe(replay_keys);
 }
 
-fn replay_mode(tok: &MainToken) -> ReplayMode {
+fn replay_keys(tok: &MainToken) -> Option<HeldKeys> {
     let state = *REPLAY_STATE
         .get()
-        .expect("state::install must run before the first replay_mode call");
-    read_replay_mode(tok, state.layout, || ctrl_held(state.input_mgr_ptr_addr))
+        .expect("state::install must run before the first replay_keys call");
+    let keys = state.layout.read_keys(tok)?;
+    Some(HeldKeys {
+        ctrl: ctrl_held(state.input_mgr_ptr_addr),
+        ..keys
+    })
 }
 
 fn ctrl_held(input_mgr_ptr_addr: usize) -> bool {

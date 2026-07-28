@@ -19,6 +19,7 @@ use crate::config::{CONFIG, RefreshRateMode};
 use crate::log::log_at;
 use crate::pacer::{PACER, PacingPolicy};
 use crate::patches::PatchSite;
+use crate::replay::{ReplayMode, get_replay_mode};
 use crate::screenshot::{on_device_creating, on_post_create_device, on_pre_present, on_pre_reset};
 use crate::thread::{MainCell, MainToken, on_main_thread};
 use crate::vtable::{capture_slot, install_vtable, vtable_field, vtable_sig, vtable_slot};
@@ -71,48 +72,8 @@ const D3DERR_DEVICEREMOVED: HRESULT = HRESULT(0x8876_0870_u32.cast_signed());
 const D3DERR_DEVICEHUNG: HRESULT = HRESULT(0x8876_0874_u32.cast_signed());
 const D3DERR_OUTOFVIDEOMEMORY: HRESULT = HRESULT(0x8876_017c_u32.cast_signed());
 
-/// Replay-speed state observed by game-specific crates, queried each `Present` to decide whether to switch the pacer policy.
-#[repr(u32)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ReplayMode {
-    Normal = 0,
-    Skip = 1,
-    Slow = 2,
-}
-
-impl ReplayMode {
-    // TODO: Rethink this API
-    #[must_use]
-    pub fn from_held(focus_held: bool, fast_held: bool) -> Self {
-        if focus_held {
-            Self::Slow
-        } else if fast_held {
-            Self::Skip
-        } else {
-            Self::Normal
-        }
-    }
-}
-
 // `Pacer::apply_policy` resets the deadline, so call it only on mode change.
 static MODE: MainCell<ReplayMode> = MainCell::new(ReplayMode::Normal);
-
-/// Callback registered by game-specific crates via [`set_replay_mode_fn`].
-/// Defaults to `Normal` before `install` or for games without replay-speed control.
-static REPLAY_MODE_FN: OnceLock<fn(&MainToken) -> ReplayMode> = OnceLock::new();
-
-/// Registers the game-specific replay-mode probe; first caller wins.
-/// This is read lazily on each `Present`, so any registration before the first `Present` is in time.
-pub fn set_replay_mode_fn(f: fn(&MainToken) -> ReplayMode) {
-    let _ = REPLAY_MODE_FN.set(f);
-}
-
-fn replay_mode(tok: &MainToken) -> ReplayMode {
-    REPLAY_MODE_FN
-        .get()
-        .copied()
-        .map_or(ReplayMode::Normal, |f| f(tok))
-}
 
 static PRESENT_COUNT: AtomicU32 = AtomicU32::new(0);
 
@@ -1284,7 +1245,7 @@ unsafe extern "system" fn hook_present(
     let tok = MainToken::new();
 
     if let Some(pacer) = PACER.get() {
-        let observed_mode = replay_mode(&tok);
+        let observed_mode = get_replay_mode(&tok);
 
         if MODE.get(&tok) != observed_mode {
             MODE.set(&tok, observed_mode);

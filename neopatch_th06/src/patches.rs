@@ -4,15 +4,16 @@
 //! the freshest input by a frame, and pacing is split between a `timeGetTime` software limiter (windowed / "force 60 fps") and vsync (fullscreen).
 //! The patches here restructure it into calc -> draw -> `Present` with our pacer as the only timing source.
 
-use crate::state::record_input;
+use crate::state::{record_input, replay_keys};
 use neopatch_core::config::{CONFIG, DisplayMode};
 use neopatch_core::d3d8::{
     D3DViewport8, call_begin_scene, call_clear, call_end_scene, call_set_texture,
     call_set_viewport, call_site_rewrite, set_pre_create_fn,
 };
-use neopatch_core::d3d9::{active_back_buffer_format, set_replay_mode_fn};
+use neopatch_core::d3d9::active_back_buffer_format;
 use neopatch_core::game_addr::{GameAddr, game_fn};
 use neopatch_core::patches::PatchSite;
+use neopatch_core::replay::set_probe;
 use std::ffi::c_void;
 use std::ptr::{null, null_mut, with_exposed_provenance_mut};
 use std::sync::OnceLock;
@@ -362,5 +363,5 @@ pub(crate) const PATCH_GROUPS: &[&[PatchSite]] =
 
 pub(crate) fn install() {
     set_pre_create_fn(apply_display_override);
-    set_replay_mode_fn(crate::state::replay_mode);
+    set_probe(replay_keys);
 }

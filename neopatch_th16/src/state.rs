@@ -1,7 +1,6 @@
 //! Direct reads of game state for th16.exe v1.00a.
 
-use neopatch_core::d3d9::ReplayMode;
-use neopatch_core::replay::{InputAddr, ReplayStateLayout, read_replay_mode};
+use neopatch_core::replay::{HeldKeys, InputAddr, ReplayStateLayout};
 use neopatch_core::thread::MainToken;
 
 const REPLAY_STATE: ReplayStateLayout = ReplayStateLayout {
@@ -15,6 +14,6 @@ const REPLAY_STATE: ReplayStateLayout = ReplayStateLayout {
 };
 const _: () = REPLAY_STATE.validate();
 
-pub(crate) fn replay_mode(tok: &MainToken) -> ReplayMode {
-    read_replay_mode(tok, REPLAY_STATE, || false)
+pub(crate) fn replay_keys(tok: &MainToken) -> Option<HeldKeys> {
+    REPLAY_STATE.read_keys(tok)
 }

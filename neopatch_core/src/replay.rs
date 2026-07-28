@@ -1,10 +1,54 @@
 //! Per-game replay-state probe.
-//!
-//! Each game-specific crate declares a [`ReplayStateLayout`] with the values for that game.
 
-use crate::d3d9::ReplayMode;
 use crate::thread::MainToken;
 use std::ptr::{read_volatile, with_exposed_provenance};
+use std::sync::OnceLock;
+
+/// State of replay-relevant inputs.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Clone, Copy)]
+pub struct HeldKeys {
+    /// The game's "shoot" input is held.
+    pub shoot: bool,
+    /// The game's "focus" input is held.
+    pub focus: bool,
+    /// The game's "skip" input is held.
+    pub skip: bool,
+    /// Ctrl is held. Games with an extra fast-forward source should set this; the rest should leave it `false`.
+    pub ctrl: bool,
+}
+
+/// Probe registered by game-specific crates via [`set_probe`].
+static PROBE: OnceLock<fn(&MainToken) -> Option<HeldKeys>> = OnceLock::new();
+
+/// Registers the game-specific probe for replay-relevant held keys; first caller wins. The probe returns `None`
+/// while replay playback is inactive. It is read lazily on each `Present`, so any registration before the first `Present` is in time.
+pub fn set_probe(f: fn(&MainToken) -> Option<HeldKeys>) {
+    let _ = PROBE.set(f);
+}
+
+/// Pacing intent during replay playback, rechecked each `Present` to decide whether to switch the pacer policy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReplayMode {
+    Normal,
+    Skip,
+    Slow,
+}
+
+/// Classifies the registered probe's observations: focus requests slow-motion and wins; shoot, skip, or Ctrl request fast-forward.
+/// Returns [`ReplayMode::Normal`] when no probe is registered, replay playback is inactive, or no relevant key is held.
+pub(crate) fn get_replay_mode(tok: &MainToken) -> ReplayMode {
+    let Some(keys) = PROBE.get().and_then(|probe| probe(tok)) else {
+        return ReplayMode::Normal;
+    };
+    if keys.focus {
+        ReplayMode::Slow
+    } else if keys.shoot || keys.skip || keys.ctrl {
+        ReplayMode::Skip
+    } else {
+        ReplayMode::Normal
+    }
+}
 
 /// Layout of a game's replay-state globals. All addresses are absolute and must be 4-byte aligned.
 #[derive(Clone, Copy)]
@@ -59,6 +103,30 @@ impl ReplayStateLayout {
             "ReplayStateLayout::input_addr must be 4-byte aligned",
         );
     }
+
+    /// Reads the held keys named by this layout. Returns `None` outside the replay menu, when not
+    /// in viewer mode, or before the input object is live. `ctrl` is always `false` here; games
+    /// with an extra fast-forward source set it on the result.
+    #[must_use]
+    pub fn read_keys(&self, _tok: &MainToken) -> Option<HeldKeys> {
+        let mgr: *const u8 = unsafe { read_volatile(with_exposed_provenance(self.mgr_ptr_addr)) };
+        if mgr.is_null() {
+            return None;
+        }
+        // SAFETY: `mode_ptr` is `mgr + mgr_mode_offset`; both are 4-byte aligned.
+        let mode_ptr: *const i32 = mgr.wrapping_add(self.mgr_mode_offset).cast();
+        let mode = unsafe { read_volatile(mode_ptr) };
+        if mode != self.viewer_mode {
+            return None;
+        }
+        let input = read_input_bits(self.input_addr)?;
+        Some(HeldKeys {
+            shoot: input & self.input_shoot_bit != 0,
+            focus: input & self.input_focus_bit != 0,
+            skip: input & self.input_skip_bit != 0,
+            ctrl: false,
+        })
+    }
 }
 
 /// Input bitfield addressing method.
@@ -70,36 +138,9 @@ pub enum InputAddr {
     Indirect(usize),
 }
 
-/// Classifies the current pacing intent for a game with replay-speed control.
-/// Returns `Normal` outside the replay menu, when not in viewer mode, or when no relevant input is held.
-#[must_use]
-pub fn read_replay_mode(
-    _tok: &MainToken,
-    layout: ReplayStateLayout,
-    skip_held: impl FnOnce() -> bool,
-) -> ReplayMode {
-    let mgr: *const u8 = unsafe { read_volatile(with_exposed_provenance(layout.mgr_ptr_addr)) };
-    if mgr.is_null() {
-        return ReplayMode::Normal;
-    }
-    // SAFETY: `mode_ptr` is `mgr + mgr_mode_offset`; both are 4-byte aligned.
-    let mode_ptr: *const i32 = mgr.wrapping_add(layout.mgr_mode_offset).cast();
-    let mode = unsafe { read_volatile(mode_ptr) };
-    if mode != layout.viewer_mode {
-        return ReplayMode::Normal;
-    }
-    let Some(input) = read_input_bits(layout) else {
-        return ReplayMode::Normal;
-    };
-    ReplayMode::from_held(
-        input & layout.input_focus_bit != 0,
-        input & (layout.input_shoot_bit | layout.input_skip_bit) != 0 || skip_held(),
-    )
-}
-
-/// Reads the held-input bitfield named by `layout`. Returns `None` if the input object isn't live yet.
-fn read_input_bits(layout: ReplayStateLayout) -> Option<u32> {
-    let bits_ptr = match layout.input_addr {
+/// Reads the held-input bitfield at `input_addr`. Returns `None` if the input object isn't live yet.
+fn read_input_bits(input_addr: InputAddr) -> Option<u32> {
+    let bits_ptr = match input_addr {
         InputAddr::Direct(addr) => with_exposed_provenance(addr),
         InputAddr::Indirect(addr) => {
             let obj: *const u8 = unsafe { read_volatile(with_exposed_provenance(addr)) };

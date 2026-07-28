@@ -1,8 +1,8 @@
 //! Direct reads of game state for 東方紅魔郷.exe v1.02h.
 
 use crate::patches::G_SUPERVISOR;
-use neopatch_core::d3d9::ReplayMode;
 use neopatch_core::game_addr::GameAddr;
+use neopatch_core::replay::HeldKeys;
 use neopatch_core::thread::MainToken;
 use std::sync::atomic::{AtomicU16, Ordering};
 
@@ -28,12 +28,12 @@ pub(crate) fn record_input(input: u16) {
     OBSERVED_INPUT.store(input, Ordering::Relaxed);
 }
 
-pub(crate) fn replay_mode(_tok: &MainToken) -> ReplayMode {
+pub(crate) fn replay_keys(_tok: &MainToken) -> Option<HeldKeys> {
     let in_stage = SUPERVISOR_REQUESTED_STATE_VA.read() == STATE_GAME
         || SUPERVISOR_SETTLED_STATE_VA.read() == STATE_GAME;
 
     if !in_stage || IS_IN_REPLAY_VA.read() == 0 {
-        return ReplayMode::Normal;
+        return None;
     }
 
     let mut input = u32::from(OBSERVED_INPUT.load(Ordering::Relaxed));
@@ -41,8 +41,10 @@ pub(crate) fn replay_mode(_tok: &MainToken) -> ReplayMode {
         input &= !INPUT_FOCUS;
     }
 
-    ReplayMode::from_held(
-        input & INPUT_FOCUS != 0,
-        input & (INPUT_SHOOT | INPUT_SKIP) != 0,
-    )
+    Some(HeldKeys {
+        shoot: input & INPUT_SHOOT != 0,
+        focus: input & INPUT_FOCUS != 0,
+        skip: input & INPUT_SKIP != 0,
+        ctrl: false,
+    })
 }
