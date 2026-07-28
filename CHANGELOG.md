@@ -6,6 +6,7 @@ All notable changes to neopatch will be documented in this file.
 
 ### Added
 
+- Support for Touhou 6 ~ Embodiment of Scarlet Devil (`東方紅魔郷.exe v1.02h`).
 - Support for Touhou 12.8 ~ Great Fairy Wars (`th128.exe v1.00a`).
 
 ### Changed
