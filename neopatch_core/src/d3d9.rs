@@ -20,7 +20,7 @@ use crate::log::log_at;
 use crate::pacer::{PACER, PacingPolicy};
 use crate::patches::PatchSite;
 use crate::screenshot::{on_device_creating, on_post_create_device, on_pre_present, on_pre_reset};
-use crate::thread::{MainCell, MainToken};
+use crate::thread::{MainCell, MainToken, on_main_thread};
 use crate::vtable::{capture_slot, install_vtable, vtable_field, vtable_sig, vtable_slot};
 use crate::{fmt_hr, iat_hook, match_named};
 use std::cmp::min;
@@ -1270,6 +1270,15 @@ unsafe extern "system" fn hook_present(
     dest_window_override: HWND,
     dirty_region: *const RGNDATA,
 ) -> HRESULT {
+    // `install_device_hooks` patches the `IDirect3DDevice9Ex` vtable in place, and every device in the process shares it,
+    // so an injected overlay's own device reaches this hook too. On its own thread, claiming a `MainToken` would abort the process
+    // over something that isn't our bug, so we hand those straight through.
+    if !on_main_thread() {
+        return unsafe {
+            call_real_present(this, src_rect, dst_rect, dest_window_override, dirty_region)
+        };
+    }
+
     let tok = MainToken::new();
 
     if let Some(pacer) = PACER.get() {

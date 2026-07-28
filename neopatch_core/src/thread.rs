@@ -20,6 +20,12 @@ use windows_sys::Win32::System::Threading::GetCurrentThreadId;
 
 static MAIN_TID: AtomicU32 = AtomicU32::new(0);
 
+/// Returns whether the caller is the thread that claimed [`MAIN_TID`] or no thread has claimed it yet.
+pub(crate) fn on_main_thread() -> bool {
+    let claimed = MAIN_TID.load(Ordering::Acquire);
+    claimed == 0 || claimed == unsafe { GetCurrentThreadId() }
+}
+
 /// ZST witness that the constructing thread is the render thread. Holding `&MainToken` is the compile-time proof required to call
 /// [`MainCell::get`] and [`MainCell::set`], as well as any other render-thread-only function in the codebase.
 ///
