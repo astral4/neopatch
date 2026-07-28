@@ -1,9 +1,9 @@
 //! Screenshot capture primitives.
 //!
-//! We strip `D3DPRESENTFLAG_LOCKABLE_BACKBUFFER` in `rewrite_present_params` for performance and correctness.
-//! However, this breaks screenshot functionality in the games, since they use `IDirect3DSurface9::LockRect`.
-//! We restore functionality via `GetRenderTargetData` into a `D3DPOOL_SYSTEMMEM` offscreen surface,
-//! which is lockable regardless of presentation flags.
+//! The implementations we replace lock the back buffer (`IDirect3DSurface9::LockRect`), which requires `D3DPRESENTFLAG_LOCKABLE_BACKBUFFER`.
+//! Whether that flag survives our present-params rewrite is out of scope for this module. Therefore, our screenshot capture functions
+//! never lock the back buffer themselves. Instead, we round-trip through `GetRenderTargetData` into a `D3DPOOL_SYSTEMMEM` offscreen surface,
+//! which is lockable regardless of the presentation flags.
 //!
 //! A game's screenshot save function runs either before or after `Present`:
 //! - th11–th18 ([`save_screenshot_live_bmp`]), th20 ([`save_screenshot_live_png`]): before `Present`,

@@ -287,7 +287,37 @@ pub const fn call_site_rewrite<const N: usize>(
     )
 }
 
+/// Present-parameter policy for the devices created from one `IDirect3D9Ex` object.
+#[derive(Clone, Copy)]
+pub(crate) struct PresentPolicy {
+    /// Keep `D3DPRESENTFLAG_LOCKABLE_BACKBUFFER` instead of stripping it.
+    pub(crate) keep_lockable_back_buffer: bool,
+}
+
+/// The present-parameter policy that every device created through direct D3D9 gets.
+const DIRECT_POLICY: PresentPolicy = PresentPolicy {
+    keep_lockable_back_buffer: false,
+};
+
+/// The `Direct3DCreate9` IAT-hook/call-site-rewrite target.
 unsafe extern "system" fn create_hooked_d3d9(sdk_version: u32) -> *mut c_void {
+    unsafe { create_hooked_d3d9_with(sdk_version, DIRECT_POLICY) }
+}
+
+/// Creates an `IDirect3D9Ex` with our vtable hooks installed, exactly as if the game had called `Direct3DCreate9`.
+/// `policy` determines the present-parameter rewrites applied to every device created from it; see [`rewrite_present_params`].
+pub(crate) unsafe fn create_hooked_d3d9_with(
+    sdk_version: u32,
+    policy: PresentPolicy,
+) -> *mut c_void {
+    let first = PRESENT_POLICY.set(policy).is_ok();
+    let effective = present_policy();
+    log_at!(first => info / warn,
+        kind = "present_params_policy",
+        keep_lockable_back_buffer = effective.keep_lockable_back_buffer,
+        status = if first { "OK" } else { "ALREADY_SET" },
+    );
+
     unsafe {
         // The Ex object's first 17 vtable slots are the `IDirect3D9` vtable,
         // so the game can keep using the returned pointer as plain `IDirect3D9` while we get the Ex methods.
@@ -450,27 +480,43 @@ unsafe fn prep_present_params(
     }
 }
 
-fn rewrite_present_params(pp: &mut D3DPRESENT_PARAMETERS) {
-    rewrite_present_params_impl(pp, PACER.get().is_some());
+/// The process-wide policy recorded by [`create_hooked_d3d9_with`]. See [`PresentPolicy`].
+static PRESENT_POLICY: OnceLock<PresentPolicy> = OnceLock::new();
+
+/// The recorded policy, or [`DIRECT_POLICY`] before one exists.
+fn present_policy() -> PresentPolicy {
+    PRESENT_POLICY.get().copied().unwrap_or(DIRECT_POLICY)
 }
 
-fn rewrite_present_params_impl(pp: &mut D3DPRESENT_PARAMETERS, controls_timing: bool) {
-    pp.Flags &= !D3DPRESENTFLAG_LOCKABLE_BACKBUFFER;
+fn rewrite_present_params(pp: &mut D3DPRESENT_PARAMETERS) {
+    rewrite_present_params_impl(pp, present_policy(), PACER.get().is_some());
+}
+
+fn rewrite_present_params_impl(
+    pp: &mut D3DPRESENT_PARAMETERS,
+    policy: PresentPolicy,
+    controls_timing: bool,
+) {
+    if !policy.keep_lockable_back_buffer {
+        pp.Flags &= !D3DPRESENTFLAG_LOCKABLE_BACKBUFFER;
+    }
     if controls_timing {
         pp.PresentationInterval = D3DPRESENT_INTERVAL_IMMEDIATE.cast_unsigned();
     }
     // `CreateDeviceEx` rejects `A8R8G8B8` in fullscreen because it isn't scanout-compatible, so we substitute with `X8R8G8B8`.
     if pp.Windowed.0 == 0 && pp.BackBufferFormat == D3DFMT_A8R8G8B8 {
-        let original_format = pp.BackBufferFormat;
-        pp.BackBufferFormat = D3DFMT_X8R8G8B8;
-        info!(
-            kind = "back_buffer_format_substituted",
-            original = format_name(original_format),
-            original_n = original_format.0,
-            forced = format_name(D3DFMT_X8R8G8B8),
-            forced_n = D3DFMT_X8R8G8B8.0,
-        );
+        substitute_back_buffer_format(pp, D3DFMT_X8R8G8B8, "back_buffer_format_substituted");
     }
+}
+
+fn substitute_back_buffer_format(
+    pp: &mut D3DPRESENT_PARAMETERS,
+    new: D3DFORMAT,
+    kind: &'static str,
+) {
+    let old = pp.BackBufferFormat;
+    pp.BackBufferFormat = new;
+    info!(kind, old = format_name(old), new = format_name(new));
 }
 
 /// Overrides the game's hard-coded 60 Hz in `pp.FullScreen_RefreshRateInHz` with the result of [`pick_refresh_rate`],
@@ -1519,8 +1565,8 @@ unsafe extern "system" fn hook_create_vertex_buffer(
 mod tests {
     use super::{
         Adapter, D3DDISPLAYMODEEX_SIZE, D3DERR_DEVICEHUNG, D3DERR_DEVICELOST, D3DERR_DEVICEREMOVED,
-        D3DERR_OUTOFVIDEOMEMORY, RefreshRateMode, build_display_mode_ex, format_name,
-        is_real_refresh_rate, is_transient_device_error, mode_refresh_rate,
+        D3DERR_OUTOFVIDEOMEMORY, PresentPolicy, RefreshRateMode, build_display_mode_ex,
+        format_name, is_real_refresh_rate, is_transient_device_error, mode_refresh_rate,
         normalize_reported_rate, rewrite_behavior_flags, rewrite_present_params_impl,
         select_refresh_rate, translate_managed_pool,
     };
@@ -1538,6 +1584,12 @@ mod tests {
     };
     use windows::core::HRESULT;
 
+    fn policy(keep_lockable_back_buffer: bool) -> PresentPolicy {
+        PresentPolicy {
+            keep_lockable_back_buffer,
+        }
+    }
+
     fn nz(n: u32) -> NonZero<u32> {
         NonZero::new(n).unwrap()
     }
@@ -1553,7 +1605,7 @@ mod tests {
                 PresentationInterval: original,
                 ..Default::default()
             };
-            rewrite_present_params_impl(&mut pp, true);
+            rewrite_present_params_impl(&mut pp, policy(false), true);
             assert_eq!(
                 pp.PresentationInterval,
                 D3DPRESENT_INTERVAL_IMMEDIATE.cast_unsigned(),
@@ -1563,20 +1615,27 @@ mod tests {
     }
 
     #[test]
-    fn rewrite_present_params_strips_lockable_back_buffer() {
+    fn rewrite_present_params_lockable_back_buffer() {
         let mut pp = D3DPRESENT_PARAMETERS {
             Flags: D3DPRESENTFLAG_LOCKABLE_BACKBUFFER,
             ..Default::default()
         };
-        rewrite_present_params_impl(&mut pp, true);
+        rewrite_present_params_impl(&mut pp, policy(false), true);
         assert_eq!(pp.Flags, 0);
 
         let mut pp = D3DPRESENT_PARAMETERS {
             Flags: D3DPRESENTFLAG_LOCKABLE_BACKBUFFER | D3DPRESENTFLAG_DISCARD_DEPTHSTENCIL,
             ..Default::default()
         };
-        rewrite_present_params_impl(&mut pp, true);
+        rewrite_present_params_impl(&mut pp, policy(false), true);
         assert_eq!(pp.Flags, D3DPRESENTFLAG_DISCARD_DEPTHSTENCIL);
+
+        let mut pp = D3DPRESENT_PARAMETERS {
+            Flags: D3DPRESENTFLAG_LOCKABLE_BACKBUFFER,
+            ..Default::default()
+        };
+        rewrite_present_params_impl(&mut pp, policy(true), true);
+        assert_eq!(pp.Flags, D3DPRESENTFLAG_LOCKABLE_BACKBUFFER);
     }
 
     #[test]
@@ -1586,7 +1645,7 @@ mod tests {
             PresentationInterval: D3DPRESENT_INTERVAL_ONE.cast_unsigned(),
             ..Default::default()
         };
-        rewrite_present_params_impl(&mut pp, false);
+        rewrite_present_params_impl(&mut pp, policy(false), false);
         assert_eq!(
             pp.PresentationInterval,
             D3DPRESENT_INTERVAL_ONE.cast_unsigned()
@@ -1611,7 +1670,7 @@ mod tests {
             ..Default::default()
         };
         let mut pp = baseline;
-        rewrite_present_params_impl(&mut pp, true);
+        rewrite_present_params_impl(&mut pp, policy(false), true);
         assert_eq!(pp.BackBufferWidth, baseline.BackBufferWidth);
         assert_eq!(pp.BackBufferHeight, baseline.BackBufferHeight);
         assert_eq!(pp.BackBufferFormat, baseline.BackBufferFormat);
@@ -1647,7 +1706,7 @@ mod tests {
                 Windowed: windowed.into(),
                 ..Default::default()
             };
-            rewrite_present_params_impl(&mut pp, true);
+            rewrite_present_params_impl(&mut pp, policy(false), true);
             assert_eq!(
                 pp.BackBufferFormat, expected,
                 "src={src:?} windowed={windowed}",
