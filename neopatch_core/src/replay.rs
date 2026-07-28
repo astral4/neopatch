@@ -91,13 +91,10 @@ pub fn read_replay_mode(
     let Some(input) = read_input_bits(layout) else {
         return ReplayMode::Normal;
     };
-    if input & layout.input_focus_bit != 0 {
-        ReplayMode::Slow
-    } else if input & (layout.input_shoot_bit | layout.input_skip_bit) != 0 || skip_held() {
-        ReplayMode::Skip
-    } else {
-        ReplayMode::Normal
-    }
+    ReplayMode::from_held(
+        input & layout.input_focus_bit != 0,
+        input & (layout.input_shoot_bit | layout.input_skip_bit) != 0 || skip_held(),
+    )
 }
 
 /// Reads the held-input bitfield named by `layout`. Returns `None` if the input object isn't live yet.

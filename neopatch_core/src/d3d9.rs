@@ -77,6 +77,20 @@ pub enum ReplayMode {
     Slow = 2,
 }
 
+impl ReplayMode {
+    // TODO: Rethink this API
+    #[must_use]
+    pub fn from_held(focus_held: bool, fast_held: bool) -> Self {
+        if focus_held {
+            Self::Slow
+        } else if fast_held {
+            Self::Skip
+        } else {
+            Self::Normal
+        }
+    }
+}
+
 // `Pacer::apply_policy` resets the deadline, so call it only on mode change.
 static MODE: MainCell<ReplayMode> = MainCell::new(ReplayMode::Normal);
 
