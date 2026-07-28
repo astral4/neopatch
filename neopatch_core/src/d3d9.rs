@@ -498,6 +498,28 @@ fn present_policy() -> PresentPolicy {
     PRESENT_POLICY.get().copied().unwrap_or(DIRECT_POLICY)
 }
 
+/// The back buffer format of the live device, or `D3DFMT_UNKNOWN` before one exists.
+static ACTIVE_BACK_BUFFER_FORMAT: AtomicU32 = AtomicU32::new(D3DFMT_UNKNOWN.0);
+
+/// The back buffer format the live device was actually created or last reset with, or `None` before the first device exists.
+/// This isn't necessarily what the game requested, since [`rewrite_present_params_impl`] and [`run_with_present_failsafe`]
+/// both change the format without the in-game caller knowing.
+pub fn active_back_buffer_format() -> Option<D3DFORMAT> {
+    let format = D3DFORMAT(ACTIVE_BACK_BUFFER_FORMAT.load(Ordering::Relaxed));
+    (format != D3DFMT_UNKNOWN).then_some(format)
+}
+
+/// Records the format the device ended up with once one is known to be alive.
+fn record_back_buffer_format(prep: &PresentParams) {
+    // `prep.after` is the request as we rewrote it, snapshotted before the device call. `D3DFMT_UNKNOWN` means the game
+    // let the runtime choose, so there is no concrete format to reconcile against and it is not recorded.
+    if let Some(format) = prep.after.map(|a| a.BackBufferFormat)
+        && format != D3DFMT_UNKNOWN
+    {
+        ACTIVE_BACK_BUFFER_FORMAT.store(format.0, Ordering::Relaxed);
+    }
+}
+
 /// The 32-bit substitute for a 16-bit back buffer format, or `None` for a format that doesn't need substitution.
 fn upgraded_back_buffer_format(f: D3DFORMAT) -> Option<D3DFORMAT> {
     match f {
@@ -1009,7 +1031,7 @@ unsafe extern "system" fn hook_create_device(
             );
 
             install_device_hooks(dev);
-            post_device_alive(&tok, dev);
+            post_device_alive(&tok, dev, &prep);
 
             if let Some(before) = desktop_before {
                 warn_if_exclusive_degraded(adapter, before, &prep);
@@ -1235,9 +1257,10 @@ unsafe fn apply_device_ex_tunables(dev: NonNull<c_void>) {
 
 /// Re-applies the device tunables, since D3D9Ex preserves them across `Reset` but a translation layer might not.
 /// Also refreshes `ACTIVE_DEVICE`. Fires after successful `CreateDeviceEx` and successful `Reset` / `ResetEx`.
-unsafe fn post_device_alive(tok: &MainToken, dev: NonNull<c_void>) {
+unsafe fn post_device_alive(tok: &MainToken, dev: NonNull<c_void>, prep: &PresentParams) {
     unsafe { apply_device_ex_tunables(dev) };
     on_post_create_device(tok, dev);
+    record_back_buffer_format(prep);
 }
 
 unsafe extern "system" fn hook_present(
@@ -1407,7 +1430,7 @@ unsafe extern "system" fn hook_reset(this: *mut c_void, pp: *mut D3DPRESENT_PARA
         if hr.is_ok() {
             // SAFETY: `this` was already dereferenced by `call_real_reset` / `call_real_reset_ex` above.
             let dev = NonNull::new_unchecked(this);
-            post_device_alive(&tok, dev);
+            post_device_alive(&tok, dev, &prep);
             if let Some(before) = desktop_before {
                 warn_if_exclusive_degraded(adapter, before, &prep);
             }
