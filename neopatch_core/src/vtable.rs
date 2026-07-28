@@ -227,21 +227,6 @@ impl<V, F> SlotProjection<V, F> {
     }
 }
 
-// TODO: Tighten to `F: FnPtr` if the `fn_ptr_trait` feature stabilizes.
-impl<V, F> SlotProjection<V, F>
-where
-    F: Copy + Send + Sync + Unpin + 'static,
-{
-    /// Reads the function pointer at this slot from `vtbl`.
-    ///
-    /// # Safety
-    /// `vtbl` must point to an initialized `V` whose allocation covers `size_of::<V>()` bytes.
-    /// The slot at `self.offset` must hold a valid function pointer with the ABI and signature of `F`.
-    pub(crate) unsafe fn read(self, vtbl: *mut V) -> F {
-        unsafe { *self.slot_ptr(vtbl) }
-    }
-}
-
 /// Reads a vtable slot we trampoline through but don't patch and publishes the function pointer into `dst` if the slot is non-null.
 ///
 /// This operation is idempotent. A subsequent call with the same slot value does nothing, since re-creation of the COM object

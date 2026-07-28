@@ -19,7 +19,7 @@ use crate::config::{CONFIG, RefreshRateMode};
 use crate::log::log_at;
 use crate::pacer::{PACER, PacingPolicy};
 use crate::patches::PatchSite;
-use crate::screenshot::{on_post_create_device, on_pre_present, on_pre_reset};
+use crate::screenshot::{on_device_creating, on_post_create_device, on_pre_present, on_pre_reset};
 use crate::thread::{MainCell, MainToken};
 use crate::vtable::{capture_slot, install_vtable, vtable_field, vtable_sig, vtable_slot};
 use crate::{fmt_hr, iat_hook, match_named};
@@ -801,6 +801,8 @@ unsafe extern "system" fn hook_create_device(
 ) -> HRESULT {
     let tok = MainToken::new();
     unsafe {
+        on_device_creating(&tok);
+
         let behavior_flags_in = behavior_flags;
         let behavior_flags = rewrite_behavior_flags(behavior_flags);
 
@@ -1073,7 +1075,7 @@ unsafe fn apply_device_ex_tunables(dev: NonNull<c_void>) {
 /// Also refreshes `ACTIVE_DEVICE`. Fires after successful `CreateDeviceEx` and successful `Reset` / `ResetEx`.
 unsafe fn post_device_alive(tok: &MainToken, dev: NonNull<c_void>) {
     unsafe { apply_device_ex_tunables(dev) };
-    on_post_create_device(tok, dev.as_ptr());
+    on_post_create_device(tok, dev);
 }
 
 unsafe extern "system" fn hook_present(
@@ -1112,7 +1114,8 @@ unsafe extern "system" fn hook_present(
         }
         pacer.wait(&tok);
 
-        on_pre_present(&tok);
+        // SAFETY: `this` is the device that `Present` was invoked on, so it is a live `IDirect3DDevice9Ex`.
+        on_pre_present(&tok, NonNull::new_unchecked(this));
 
         // We increment before `Present` so `PRESENT_COUNT` uses the in-flight frame.
         // This way, a crash inside `Present` leaves the count at the attempted frame, not the last completed.
