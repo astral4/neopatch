@@ -150,7 +150,7 @@ pub(crate) fn dump_dir() -> Option<&'static Path> {
 
 /// Returns the number of seconds since `init`. Returns `0.0` before `init`.
 fn elapsed_secs() -> f64 {
-    START.get().map_or(0.0, |s| s.elapsed().as_secs_f64())
+    START.get().map_or(0., |s| s.elapsed().as_secs_f64())
 }
 
 /// Returns the number of milliseconds since `init`. Returns `0` before `init`.

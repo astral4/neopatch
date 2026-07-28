@@ -18,8 +18,8 @@
 use crate::config::{CONFIG, RefreshRateMode};
 use crate::log::log_at;
 use crate::pacer::{PACER, PacingPolicy};
-use crate::screenshot::{on_post_create_device, on_pre_present, on_pre_reset};
 use crate::patches::PatchSite;
+use crate::screenshot::{on_post_create_device, on_pre_present, on_pre_reset};
 use crate::thread::{MainCell, MainToken};
 use crate::vtable::{capture_slot, install_vtable, vtable_field, vtable_sig, vtable_slot};
 use crate::{fmt_hr, iat_hook, match_named};
@@ -84,7 +84,8 @@ static MODE: MainCell<ReplayMode> = MainCell::new(ReplayMode::Normal);
 /// Defaults to `Normal` before `install` or for games without replay-speed control.
 static REPLAY_MODE_FN: OnceLock<fn(&MainToken) -> ReplayMode> = OnceLock::new();
 
-/// Registers the game-specific replay-mode probe; first caller wins. Call before [`install`].
+/// Registers the game-specific replay-mode probe; first caller wins.
+/// This is read lazily on each `Present`, so any registration before the first `Present` is in time.
 pub fn set_replay_mode_fn(f: fn(&MainToken) -> ReplayMode) {
     let _ = REPLAY_MODE_FN.set(f);
 }
@@ -110,8 +111,8 @@ static LAST_PRESENT: MainCell<PresentState> = MainCell::new(PresentState {
     since_frame: 0,
 });
 
-// At most one `IDirect3D9` and one device are alive at a time in the game, so each slot is a single global. Read-only slots
-// are populated via `capture_slot` and never patched. The trampolines exist so call sites don't have to manually transmute.
+// At most one `IDirect3D9` and one device are alive at a time in the game, so each slot is a single global.
+// Read-only slots are populated via `capture_slot` and never patched. The trampolines exist so call sites don't have to manually transmute.
 vtable_slot! {
     REAL_CREATE_DEVICE_EX / call_real_create_device_ex :
         as fn(
@@ -299,7 +300,7 @@ unsafe extern "system" fn create_hooked_d3d9(sdk_version: u32) -> *mut c_void {
 
 unsafe fn install_d3d9_hooks(d3d9_ex: NonNull<c_void>) {
     unsafe {
-        let vtbl: *mut IDirect3D9Ex_Vtbl = *d3d9_ex.as_ptr().cast();
+        let vtbl = *d3d9_ex.as_ptr().cast();
         let Some(vtbl) = NonNull::new(vtbl) else {
             warn!(kind = "d3d9_vtbl_null", p_ex = format_args!("{d3d9_ex:p}"));
             return;
@@ -374,7 +375,7 @@ impl PresentParams {
     fn display_mode_ptr(&mut self) -> *mut D3DDISPLAYMODEEX {
         self.display_mode
             .as_mut()
-            .map_or(null_mut(), |m| &raw mut *m)
+            .map_or_else(null_mut, |m| &raw mut *m)
     }
 }
 
@@ -647,7 +648,7 @@ fn win32_current_refresh_rate(device: Option<&[u16; 32]>) -> Option<u32> {
         dmSize: u16::try_from(size_of::<DEVMODEW>()).unwrap_or(0),
         ..DEVMODEW::default()
     };
-    let name = device.map_or(null(), |d| d.as_ptr());
+    let name = device.map_or_else(null, |d| d.as_ptr());
     let ok = unsafe { EnumDisplaySettingsExW(name, ENUM_CURRENT_SETTINGS, &raw mut dm, 0) };
     if ok == 0 {
         return None;
@@ -1401,13 +1402,25 @@ unsafe extern "system" fn hook_create_vertex_buffer(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{
+        D3DDISPLAYMODEEX_SIZE, D3DERR_DEVICEHUNG, D3DERR_DEVICELOST, D3DERR_DEVICEREMOVED,
+        D3DERR_OUTOFVIDEOMEMORY, RefreshRateMode, build_display_mode_ex, format_name,
+        is_real_refresh_rate, is_transient_device_error, normalize_reported_rate,
+        rewrite_behavior_flags, rewrite_present_params, select_refresh_rate,
+        translate_managed_pool,
+    };
+    use crate::fmt_hr;
     use std::num::NonZero;
     use windows::Win32::Graphics::Direct3D9::{
-        D3DCREATE_HARDWARE_VERTEXPROCESSING, D3DFMT_R5G6B5, D3DPOOL_SCRATCH, D3DPOOL_SYSTEMMEM,
-        D3DPRESENT_INTERVAL_ONE, D3DPRESENTFLAG_DISCARD_DEPTHSTENCIL, D3DSWAPEFFECT_DISCARD,
+        D3DCREATE_HARDWARE_VERTEXPROCESSING, D3DCREATE_MULTITHREADED, D3DFMT_A1R5G5B5,
+        D3DFMT_A8R8G8B8, D3DFMT_R5G6B5, D3DFMT_X1R5G5B5, D3DFMT_X8R8G8B8, D3DFORMAT,
+        D3DPOOL_DEFAULT, D3DPOOL_MANAGED, D3DPOOL_SCRATCH, D3DPOOL_SYSTEMMEM,
+        D3DPRESENT_INTERVAL_IMMEDIATE, D3DPRESENT_INTERVAL_ONE, D3DPRESENT_PARAMETERS,
+        D3DPRESENTFLAG_DISCARD_DEPTHSTENCIL, D3DPRESENTFLAG_LOCKABLE_BACKBUFFER,
+        D3DSCANLINEORDERING_PROGRESSIVE, D3DSWAPEFFECT_DISCARD, D3DUSAGE_DYNAMIC,
         D3DUSAGE_WRITEONLY,
     };
+    use windows::core::HRESULT;
 
     fn nz(n: u32) -> NonZero<u32> {
         NonZero::new(n).unwrap()
@@ -1484,7 +1497,7 @@ mod tests {
 
     #[test]
     fn rewrite_present_params_substitutes_only_fullscreen_a8r8g8b8() {
-        let cases: &[(D3DFORMAT, bool, D3DFORMAT)] = &[
+        let cases = &[
             // A8R8G8B8 is a valid windowed back buffer but an invalid fullscreen adapter format.
             (D3DFMT_A8R8G8B8, true, D3DFMT_A8R8G8B8),
             (D3DFMT_A8R8G8B8, false, D3DFMT_X8R8G8B8),
@@ -1512,16 +1525,13 @@ mod tests {
     }
 
     #[test]
-    fn translate_managed_pool_swaps_managed_for_default_dynamic() {
+    fn translate_managed_pool_translation() {
         let mut pool = D3DPOOL_MANAGED;
         let mut usage = 0;
         assert!(translate_managed_pool(&mut pool, &mut usage));
         assert_eq!(pool, D3DPOOL_DEFAULT);
         assert_eq!(usage, D3DUSAGE_DYNAMIC.cast_unsigned());
-    }
 
-    #[test]
-    fn translate_managed_pool_preserves_existing_usage_bits() {
         let mut pool = D3DPOOL_MANAGED;
         let mut usage = D3DUSAGE_WRITEONLY.cast_unsigned();
         assert!(translate_managed_pool(&mut pool, &mut usage));
@@ -1530,10 +1540,7 @@ mod tests {
             usage,
             D3DUSAGE_DYNAMIC.cast_unsigned() | D3DUSAGE_WRITEONLY.cast_unsigned(),
         );
-    }
 
-    #[test]
-    fn translate_managed_pool_leaves_non_managed_pools_alone() {
         for pool_in in [D3DPOOL_DEFAULT, D3DPOOL_SYSTEMMEM, D3DPOOL_SCRATCH] {
             let mut pool = pool_in;
             let mut usage = 0;

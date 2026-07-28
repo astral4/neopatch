@@ -54,9 +54,8 @@ impl MainToken {
 /// Interior-mutable cell for state that is single-thread by construction but lives in a `Sync`-required slot
 /// (e.g. a `static`, or inside a `OnceLock`). Prefer this over atomic types when there is no cross-thread sharing;
 /// atomics would misleadingly signal lock-free synchronization that isn't present.
-// The `T: Copy` bound is required by `Cell::get`. It also has the useful side effect of forbidding `Drop` on `T`,
-// since `Copy` and `Drop` are mutually exclusive. So, even a hypothetical off-thread drop of a `MainCell`
-// (if one ever lived outside a `static`) runs no thread-affine destructor.
+// `Copy` and `Drop` are mutually exclusive, so nothing stored here can carry a thread-affine destructor.
+// Therefore, even a hypothetical off-thread drop of a `MainCell` (if one ever lived outside a `static`) runs nothing.
 pub(crate) struct MainCell<T: Copy>(Cell<T>);
 
 // SAFETY: Cross-thread access is prevented at the type level. `get` and `set` require `&MainToken` with `MainToken: !Send + !Sync`
