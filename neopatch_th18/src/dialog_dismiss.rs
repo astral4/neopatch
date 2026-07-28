@@ -7,7 +7,7 @@ use tracing::info;
 
 const RADIO_INDEX_VA: GameAddr<u8> = unsafe { GameAddr::new(0x004c_d00b) };
 const SCALE_INDEX_VA: GameAddr<u8> = unsafe { GameAddr::new(0x004c_d012) };
-const DIALOG_LIFECYCLE_FLAGS: GameAddr<u32> = unsafe { GameAddr::new(0x0056_ac70) };
+const DIALOG_LIFECYCLE_FLAGS_VA: GameAddr<u32> = unsafe { GameAddr::new(0x0056_ac70) };
 const DIALOG_LIFECYCLE_BITS: u32 = 0x300;
 
 const FUN_00474850: usize = 0x0047_4850;
@@ -21,7 +21,7 @@ unsafe extern "stdcall" fn dialog_short_circuit() {
 
     RADIO_INDEX_VA.write(radio_index);
     SCALE_INDEX_VA.write(scale_index);
-    DIALOG_LIFECYCLE_FLAGS.write(DIALOG_LIFECYCLE_FLAGS.read() & !DIALOG_LIFECYCLE_BITS);
+    DIALOG_LIFECYCLE_FLAGS_VA.write(DIALOG_LIFECYCLE_FLAGS_VA.read() & !DIALOG_LIFECYCLE_BITS);
     info!(
         kind = "dialog_short_circuited",
         resolution = %cfg.resolution,
