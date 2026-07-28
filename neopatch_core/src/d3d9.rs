@@ -63,7 +63,9 @@ const D3DDISPLAYMODEFILTER_SIZE: u32 = size_of::<D3DDISPLAYMODEFILTER>() as u32;
 const MAX_ENUM_RATES: usize = 64;
 const MAX_ENUM_SCAN: u32 = 4096;
 
-const D3DERR_INVALIDCALL: HRESULT = HRESULT(0x8876_086c_u32.cast_signed());
+pub(crate) const D3D_OK: HRESULT = HRESULT(0);
+pub(crate) const D3DERR_INVALIDCALL: HRESULT = HRESULT(0x8876_086c_u32.cast_signed());
+pub(crate) const D3DERR_NOTAVAILABLE: HRESULT = HRESULT(0x8876_086a_u32.cast_signed());
 const D3DERR_DEVICELOST: HRESULT = HRESULT(0x8876_0868_u32.cast_signed());
 const D3DERR_DEVICEREMOVED: HRESULT = HRESULT(0x8876_0870_u32.cast_signed());
 const D3DERR_DEVICEHUNG: HRESULT = HRESULT(0x8876_0874_u32.cast_signed());
@@ -511,8 +513,9 @@ pub fn active_back_buffer_format() -> Option<D3DFORMAT> {
 
 /// Records the format the device ended up with once one is known to be alive.
 fn record_back_buffer_format(prep: &PresentParams) {
-    // `prep.after` is the request as we rewrote it, snapshotted before the device call. `D3DFMT_UNKNOWN` means the game
-    // let the runtime choose, so there is no concrete format to reconcile against and it is not recorded.
+    // `prep.after` is the request as we rewrote it, snapshotted before the device call, whereas `d3d8::sync_present_params_back`
+    // reads what the runtime wrote back after the device call. `D3DFMT_UNKNOWN` means the game let the runtime choose,
+    // so there is no concrete format to reconcile against and it is not recorded.
     if let Some(format) = prep.after.map(|a| a.BackBufferFormat)
         && format != D3DFMT_UNKNOWN
     {
@@ -1551,7 +1554,7 @@ unsafe fn run_with_present_failsafe(
     }
 }
 
-fn is_transient_device_error(hr: HRESULT) -> bool {
+pub(crate) fn is_transient_device_error(hr: HRESULT) -> bool {
     matches!(
         hr,
         D3DERR_DEVICELOST | D3DERR_DEVICEREMOVED | D3DERR_DEVICEHUNG | D3DERR_OUTOFVIDEOMEMORY
@@ -1674,11 +1677,12 @@ unsafe extern "system" fn hook_create_vertex_buffer(
 #[cfg(test)]
 mod tests {
     use super::{
-        Adapter, D3DDISPLAYMODEEX_SIZE, D3DERR_DEVICEHUNG, D3DERR_DEVICELOST, D3DERR_DEVICEREMOVED,
-        D3DERR_OUTOFVIDEOMEMORY, PresentPolicy, RefreshRateMode, build_display_mode_ex,
-        format_name, is_real_refresh_rate, is_transient_device_error, mode_refresh_rate,
-        normalize_reported_rate, rewrite_behavior_flags, rewrite_present_params_impl,
-        select_refresh_rate, translate_managed_pool, upgraded_back_buffer_format,
+        Adapter, D3D_OK, D3DDISPLAYMODEEX_SIZE, D3DERR_DEVICEHUNG, D3DERR_DEVICELOST,
+        D3DERR_DEVICEREMOVED, D3DERR_INVALIDCALL, D3DERR_OUTOFVIDEOMEMORY, PresentPolicy,
+        RefreshRateMode, build_display_mode_ex, format_name, is_real_refresh_rate,
+        is_transient_device_error, mode_refresh_rate, normalize_reported_rate,
+        rewrite_behavior_flags, rewrite_present_params_impl, select_refresh_rate,
+        translate_managed_pool, upgraded_back_buffer_format,
     };
     use crate::fmt_hr;
     use std::num::NonZero;
@@ -1692,7 +1696,6 @@ mod tests {
         D3DSCANLINEORDERING_PROGRESSIVE, D3DSWAPEFFECT_DISCARD, D3DUSAGE_DYNAMIC,
         D3DUSAGE_WRITEONLY,
     };
-    use windows::core::HRESULT;
 
     fn policy(keep_lockable_back_buffer: bool) -> PresentPolicy {
         PresentPolicy {
@@ -2114,9 +2117,7 @@ mod tests {
         ] {
             assert!(is_transient_device_error(hr), "{}", fmt_hr!(hr));
         }
-        assert!(!is_transient_device_error(HRESULT(
-            0x8876_086c_u32.cast_signed()
-        )));
-        assert!(!is_transient_device_error(HRESULT(0)));
+        assert!(!is_transient_device_error(D3DERR_INVALIDCALL));
+        assert!(!is_transient_device_error(D3D_OK));
     }
 }

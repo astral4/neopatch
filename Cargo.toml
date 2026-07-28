@@ -32,6 +32,7 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["r
 windows = { version = "0.62", default-features = false, features = [
     "Win32_Devices_HumanInterfaceDevice",
     "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
     "Win32_Graphics_Direct3D9",
     "Win32_Graphics_Gdi",
 ] }
