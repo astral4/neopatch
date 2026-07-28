@@ -437,7 +437,8 @@ unsafe fn prep_present_params(
         let display_mode = if p.Windowed.0 == 0 {
             let cfg = CONFIG.get().unwrap();
             apply_refresh_override(p, adapter, cfg.display.refresh_rate, desktop_mode);
-            Some(build_display_mode_ex(p, p.FullScreen_RefreshRateInHz))
+            p.FullScreen_RefreshRateInHz = mode_refresh_rate(p, adapter, desktop_mode);
+            Some(build_display_mode_ex(p))
         } else {
             None
         };
@@ -484,6 +485,37 @@ unsafe fn apply_refresh_override(
             pp.BackBufferHeight,
         )
     };
+}
+
+/// The refresh rate for a fullscreen `D3DDISPLAYMODEEX`.
+///
+/// [`run_with_refresh_failsafe`] resolves this differently on purpose: by the time it runs,
+/// the rate picked here has already been rejected, so re-picking it would just fail again.
+unsafe fn mode_refresh_rate(
+    pp: &D3DPRESENT_PARAMETERS,
+    adapter: Adapter<'_>,
+    desktop_mode: Option<D3DDISPLAYMODEEX>,
+) -> u32 {
+    if is_real_refresh_rate(pp.FullScreen_RefreshRateInHz) {
+        return pp.FullScreen_RefreshRateInHz;
+    }
+
+    let chosen = unsafe {
+        pick_refresh_rate(
+            adapter,
+            RefreshRateMode::Native,
+            desktop_mode,
+            pp.BackBufferFormat,
+            pp.BackBufferWidth,
+            pp.BackBufferHeight,
+        )
+    };
+    info!(
+        kind = "display_mode_refresh_defaulted",
+        requested_hz = pp.FullScreen_RefreshRateInHz,
+        chosen_hz = chosen,
+    );
+    chosen
 }
 
 /// Returns the distinct refresh rates advertised by the adapter at exactly `width` × `height` in `format`,
@@ -698,15 +730,17 @@ fn win32_current_refresh_rate(device: Option<&[u16; 32]>) -> Option<u32> {
     is_real_refresh_rate(hz).then_some(hz)
 }
 
-/// Populates a `D3DDISPLAYMODEEX` from the present-params back buffer and an explicit refresh rate.
+/// Populates a `D3DDISPLAYMODEEX` from the present params.
+/// Callers should normalize `pp.FullScreen_RefreshRateInHz` (see [`mode_refresh_rate`]) beforehand.
+///
 /// The Ex `CreateDevice` and `Reset` signatures require a fully-filled struct for exclusive fullscreen and a null pointer for windowed
 /// (a non-null struct there is `D3DERR_INVALIDCALL`), so callers should only use this when `Windowed == FALSE` holds.
-fn build_display_mode_ex(pp: &D3DPRESENT_PARAMETERS, refresh: u32) -> D3DDISPLAYMODEEX {
+fn build_display_mode_ex(pp: &D3DPRESENT_PARAMETERS) -> D3DDISPLAYMODEEX {
     D3DDISPLAYMODEEX {
         Size: D3DDISPLAYMODEEX_SIZE,
         Width: pp.BackBufferWidth,
         Height: pp.BackBufferHeight,
-        RefreshRate: refresh,
+        RefreshRate: pp.FullScreen_RefreshRateInHz,
         Format: pp.BackBufferFormat,
         ScanLineOrdering: D3DSCANLINEORDERING_PROGRESSIVE,
     }
@@ -847,6 +881,8 @@ unsafe extern "system" fn hook_create_device(
             &mut prep,
             desktop_before,
             "create_device_refresh_failsafe",
+            // `CreateDeviceEx` always takes the display mode, so `pp` must keep agreeing with it.
+            true,
             |display_mode_ptr, attempt| {
                 let (hr, d) = create_device_once(
                     adapter,
@@ -1279,6 +1315,8 @@ unsafe extern "system" fn hook_reset(this: *mut c_void, pp: *mut D3DPRESENT_PARA
             &mut prep,
             desktop_before,
             "reset_refresh_failsafe",
+            // Plain `Reset` ignores the display mode entirely, so on that path `pp` is the whole request.
+            use_reset_ex,
             |display_mode_ptr, attempt| {
                 reset_once(this, pp, display_mode_ptr, use_reset_ex, attempt)
             },
@@ -1306,6 +1344,7 @@ unsafe fn run_with_refresh_failsafe(
     prep: &mut PresentParams,
     desktop_before: Option<D3DDISPLAYMODEEX>,
     failsafe_kind: &'static str,
+    consumes_display_mode: bool,
     mut attempt: impl FnMut(*mut D3DDISPLAYMODEEX, u32) -> HRESULT,
 ) -> HRESULT {
     let (original_refresh, chosen_refresh, overrode_fs) = prep.refresh_override();
@@ -1323,8 +1362,9 @@ unsafe fn run_with_refresh_failsafe(
         );
         return hr;
     }
-    // The game's original rate rolls back to `pp` as-is (0 is legal there),
-    // but an Ex display mode needs a real rate, so 0 falls back to the sampled desktop rate.
+    // We roll back to the game's original rate, resolving `D3DPRESENT_RATE_DEFAULT` to the sampled desktop rate for the Ex display mode,
+    // which must specify a real one. We don't use `mode_refresh_rate`'s `Native` pick because that rate has just been rejected
+    // and re-deriving it would fail the same way.
     let mode_refresh = if is_real_refresh_rate(original_refresh) {
         original_refresh
     } else {
@@ -1333,16 +1373,13 @@ unsafe fn run_with_refresh_failsafe(
             .filter(|&r| is_real_refresh_rate(r))
             .unwrap_or(60)
     };
+    let pp_refresh = if consumes_display_mode {
+        mode_refresh
+    } else {
+        original_refresh
+    };
     let display_mode_ptr = unsafe {
-        rollback_refresh_override(
-            pp,
-            prep,
-            original_refresh,
-            mode_refresh,
-            chosen_refresh,
-            failsafe_kind,
-            hr,
-        )
+        rollback_refresh_override(pp, prep, pp_refresh, chosen_refresh, failsafe_kind, hr)
     };
     attempt(display_mode_ptr, 1)
 }
@@ -1354,13 +1391,11 @@ fn is_transient_device_error(hr: HRESULT) -> bool {
     )
 }
 
-/// Rewrites `pp` and `prep` back to the game's original refresh rate after a failed attempt.
-/// `mode_refresh` is the rate for the rebuilt Ex display mode.
+/// Rewrites `pp` and `prep` back to `pp_refresh` after a failed attempt, keeping the present params and the Ex display mode in agreement.
 unsafe fn rollback_refresh_override(
     pp: *mut D3DPRESENT_PARAMETERS,
     prep: &mut PresentParams,
-    original_refresh: u32,
-    mode_refresh: u32,
+    pp_refresh: u32,
     chosen_refresh: u32,
     kind: &'static str,
     first_hr: HRESULT,
@@ -1370,14 +1405,13 @@ unsafe fn rollback_refresh_override(
             // We discard any driver write-back from the failed attempt.
             *pp = clean;
         }
-        (*pp).FullScreen_RefreshRateInHz = original_refresh;
-        prep.display_mode = Some(build_display_mode_ex(&*pp, mode_refresh));
+        (*pp).FullScreen_RefreshRateInHz = pp_refresh;
+        prep.display_mode = Some(build_display_mode_ex(&*pp));
         prep.after = Some(*pp);
         warn!(
             kind = kind,
             from_hz = chosen_refresh,
-            to_hz = original_refresh,
-            display_mode_hz = mode_refresh,
+            to_hz = pp_refresh,
             first_hr = fmt_hr!(first_hr),
         );
         prep.display_mode_ptr()
@@ -1473,14 +1507,15 @@ unsafe extern "system" fn hook_create_vertex_buffer(
 #[cfg(test)]
 mod tests {
     use super::{
-        D3DDISPLAYMODEEX_SIZE, D3DERR_DEVICEHUNG, D3DERR_DEVICELOST, D3DERR_DEVICEREMOVED,
+        Adapter, D3DDISPLAYMODEEX_SIZE, D3DERR_DEVICEHUNG, D3DERR_DEVICELOST, D3DERR_DEVICEREMOVED,
         D3DERR_OUTOFVIDEOMEMORY, RefreshRateMode, build_display_mode_ex, format_name,
-        is_real_refresh_rate, is_transient_device_error, normalize_reported_rate,
-        rewrite_behavior_flags, rewrite_present_params, select_refresh_rate,
-        translate_managed_pool,
+        is_real_refresh_rate, is_transient_device_error, mode_refresh_rate,
+        normalize_reported_rate, rewrite_behavior_flags, rewrite_present_params,
+        select_refresh_rate, translate_managed_pool,
     };
     use crate::fmt_hr;
     use std::num::NonZero;
+    use std::ptr::NonNull;
     use windows::Win32::Graphics::Direct3D9::{
         D3DCREATE_HARDWARE_VERTEXPROCESSING, D3DCREATE_MULTITHREADED, D3DFMT_A1R5G5B5,
         D3DFMT_A8R8G8B8, D3DFMT_R5G6B5, D3DFMT_X1R5G5B5, D3DFMT_X8R8G8B8, D3DFORMAT,
@@ -1631,22 +1666,35 @@ mod tests {
     }
 
     #[test]
-    fn build_display_mode_ex_copies_pp_fields_and_uses_param_refresh() {
+    fn build_display_mode_ex_derive_fields_from_pp() {
         let pp = D3DPRESENT_PARAMETERS {
             BackBufferWidth: 1280,
             BackBufferHeight: 960,
             BackBufferFormat: D3DFMT_X8R8G8B8,
-            // This is deliberately wrong on `pp`. `build_display_mode_ex` must use the explicit `refresh` arg, not this field.
-            FullScreen_RefreshRateInHz: 999,
+            FullScreen_RefreshRateInHz: 120,
             ..Default::default()
         };
-        let mode = build_display_mode_ex(&pp, 120);
+        let mode = build_display_mode_ex(&pp);
         assert_eq!(mode.Size, D3DDISPLAYMODEEX_SIZE);
-        assert_eq!(mode.Width, 1280);
-        assert_eq!(mode.Height, 960);
-        assert_eq!(mode.Format, D3DFMT_X8R8G8B8);
-        assert_eq!(mode.RefreshRate, 120);
+        assert_eq!(mode.Width, pp.BackBufferWidth);
+        assert_eq!(mode.Height, pp.BackBufferHeight);
+        assert_eq!(mode.Format, pp.BackBufferFormat);
+        assert_eq!(mode.RefreshRate, pp.FullScreen_RefreshRateInHz);
         assert_eq!(mode.ScanLineOrdering, D3DSCANLINEORDERING_PROGRESSIVE);
+    }
+
+    #[test]
+    fn mode_refresh_rate_real_rate_passes_through() {
+        // `slot` is never dereferenced since a real rate returns before the interface is read.
+        let slot = NonNull::dangling().as_ptr();
+        let adapter = unsafe { Adapter::from_hook(&slot, 0) }.expect("dangling is not null");
+        for hz in [60, 120, 143] {
+            let pp = D3DPRESENT_PARAMETERS {
+                FullScreen_RefreshRateInHz: hz,
+                ..Default::default()
+            };
+            assert_eq!(unsafe { mode_refresh_rate(&pp, adapter, None) }, hz);
+        }
     }
 
     #[test]
