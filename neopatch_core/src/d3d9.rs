@@ -451,8 +451,14 @@ unsafe fn prep_present_params(
 }
 
 fn rewrite_present_params(pp: &mut D3DPRESENT_PARAMETERS) {
-    pp.PresentationInterval = D3DPRESENT_INTERVAL_IMMEDIATE.cast_unsigned();
+    rewrite_present_params_impl(pp, PACER.get().is_some());
+}
+
+fn rewrite_present_params_impl(pp: &mut D3DPRESENT_PARAMETERS, controls_timing: bool) {
     pp.Flags &= !D3DPRESENTFLAG_LOCKABLE_BACKBUFFER;
+    if controls_timing {
+        pp.PresentationInterval = D3DPRESENT_INTERVAL_IMMEDIATE.cast_unsigned();
+    }
     // `CreateDeviceEx` rejects `A8R8G8B8` in fullscreen because it isn't scanout-compatible, so we substitute with `X8R8G8B8`.
     if pp.Windowed.0 == 0 && pp.BackBufferFormat == D3DFMT_A8R8G8B8 {
         let original_format = pp.BackBufferFormat;
@@ -475,6 +481,10 @@ unsafe fn apply_refresh_override(
     mode: RefreshRateMode,
     desktop_mode: Option<D3DDISPLAYMODEEX>,
 ) {
+    if PACER.get().is_none() {
+        return;
+    }
+
     pp.FullScreen_RefreshRateInHz = unsafe {
         pick_refresh_rate(
             adapter,
@@ -1166,8 +1176,8 @@ unsafe extern "system" fn hook_present(
     dirty_region: *const RGNDATA,
 ) -> HRESULT {
     let tok = MainToken::new();
-    unsafe {
-        let pacer = PACER.get().unwrap();
+
+    if let Some(pacer) = PACER.get() {
         let observed_mode = replay_mode(&tok);
 
         if MODE.get(&tok) != observed_mode {
@@ -1193,18 +1203,19 @@ unsafe extern "system" fn hook_present(
             pacer.apply_policy(&tok, policy);
         }
         pacer.wait(&tok);
-
-        // SAFETY: `this` is the device that `Present` was invoked on, so it is a live `IDirect3DDevice9Ex`.
-        on_pre_present(&tok, NonNull::new_unchecked(this));
-
-        // We increment before `Present` so `PRESENT_COUNT` uses the in-flight frame.
-        // This way, a crash inside `Present` leaves the count at the attempted frame, not the last completed.
-        PRESENT_COUNT.fetch_add(1, Ordering::Relaxed);
-
-        let hr = call_real_present(this, src_rect, dst_rect, dest_window_override, dirty_region);
-        log_present_outcome(&tok, hr);
-        hr
     }
+
+    // SAFETY: `this` is the device that `Present` was invoked on, so it is a live `IDirect3DDevice9Ex`.
+    on_pre_present(&tok, unsafe { NonNull::new_unchecked(this) });
+
+    // We increment before `Present` so `PRESENT_COUNT` uses the in-flight frame.
+    // This way, a crash inside `Present` leaves the count at the attempted frame, not the last completed.
+    PRESENT_COUNT.fetch_add(1, Ordering::Relaxed);
+
+    let hr =
+        unsafe { call_real_present(this, src_rect, dst_rect, dest_window_override, dirty_region) };
+    log_present_outcome(&tok, hr);
+    hr
 }
 
 /// Emits a log event whenever the result of `Present` differs from the previous call's result.
@@ -1510,7 +1521,7 @@ mod tests {
         Adapter, D3DDISPLAYMODEEX_SIZE, D3DERR_DEVICEHUNG, D3DERR_DEVICELOST, D3DERR_DEVICEREMOVED,
         D3DERR_OUTOFVIDEOMEMORY, RefreshRateMode, build_display_mode_ex, format_name,
         is_real_refresh_rate, is_transient_device_error, mode_refresh_rate,
-        normalize_reported_rate, rewrite_behavior_flags, rewrite_present_params,
+        normalize_reported_rate, rewrite_behavior_flags, rewrite_present_params_impl,
         select_refresh_rate, translate_managed_pool,
     };
     use crate::fmt_hr;
@@ -1542,7 +1553,7 @@ mod tests {
                 PresentationInterval: original,
                 ..Default::default()
             };
-            rewrite_present_params(&mut pp);
+            rewrite_present_params_impl(&mut pp, true);
             assert_eq!(
                 pp.PresentationInterval,
                 D3DPRESENT_INTERVAL_IMMEDIATE.cast_unsigned(),
@@ -1557,15 +1568,30 @@ mod tests {
             Flags: D3DPRESENTFLAG_LOCKABLE_BACKBUFFER,
             ..Default::default()
         };
-        rewrite_present_params(&mut pp);
+        rewrite_present_params_impl(&mut pp, true);
         assert_eq!(pp.Flags, 0);
 
         let mut pp = D3DPRESENT_PARAMETERS {
             Flags: D3DPRESENTFLAG_LOCKABLE_BACKBUFFER | D3DPRESENTFLAG_DISCARD_DEPTHSTENCIL,
             ..Default::default()
         };
-        rewrite_present_params(&mut pp);
+        rewrite_present_params_impl(&mut pp, true);
         assert_eq!(pp.Flags, D3DPRESENTFLAG_DISCARD_DEPTHSTENCIL);
+    }
+
+    #[test]
+    fn rewrite_present_params_presentation_interval() {
+        let mut pp = D3DPRESENT_PARAMETERS {
+            Flags: D3DPRESENTFLAG_LOCKABLE_BACKBUFFER,
+            PresentationInterval: D3DPRESENT_INTERVAL_ONE.cast_unsigned(),
+            ..Default::default()
+        };
+        rewrite_present_params_impl(&mut pp, false);
+        assert_eq!(
+            pp.PresentationInterval,
+            D3DPRESENT_INTERVAL_ONE.cast_unsigned()
+        );
+        assert_eq!(pp.Flags, 0);
     }
 
     #[test]
@@ -1585,7 +1611,7 @@ mod tests {
             ..Default::default()
         };
         let mut pp = baseline;
-        rewrite_present_params(&mut pp);
+        rewrite_present_params_impl(&mut pp, true);
         assert_eq!(pp.BackBufferWidth, baseline.BackBufferWidth);
         assert_eq!(pp.BackBufferHeight, baseline.BackBufferHeight);
         assert_eq!(pp.BackBufferFormat, baseline.BackBufferFormat);
@@ -1621,7 +1647,7 @@ mod tests {
                 Windowed: windowed.into(),
                 ..Default::default()
             };
-            rewrite_present_params(&mut pp);
+            rewrite_present_params_impl(&mut pp, true);
             assert_eq!(
                 pp.BackBufferFormat, expected,
                 "src={src:?} windowed={windowed}",
