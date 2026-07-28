@@ -8,6 +8,7 @@
 //! aren't instances of `GameAddr<T>` since the address isn't fixed. Those sites keep using `read_volatile` directly.
 
 use crate::modules::in_host_image;
+use crate::vtable::raw_to_fn_ptr;
 use std::marker::PhantomData;
 use std::mem::zeroed;
 use std::ptr::{
@@ -19,6 +20,23 @@ use tracing::warn;
 pub struct GameAddr<T> {
     addr: usize,
     _t: PhantomData<*mut T>,
+}
+
+/// Reinterprets a fixed game-code address as a callable function pointer `F`.
+///
+/// # Panics
+/// Panics if `addr` is 0.
+///
+/// # Safety
+/// `addr` must hold a function with `F`'s ABI and signature in the game binary version that the call site targets.
+/// `F` must be a function-pointer type.
+// TODO: Tighten to `F: FnPtr` if the `fn_ptr_trait` feature stabilizes.
+#[must_use]
+pub unsafe fn game_fn<F>(addr: usize) -> F
+where
+    F: Copy + Send + Sync + Unpin + 'static,
+{
+    unsafe { raw_to_fn_ptr(with_exposed_provenance_mut(addr)) }.expect("game_fn: null address")
 }
 
 impl<T: Copy> GameAddr<T> {
