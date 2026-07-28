@@ -63,6 +63,7 @@ const D3DDISPLAYMODEFILTER_SIZE: u32 = size_of::<D3DDISPLAYMODEFILTER>() as u32;
 const MAX_ENUM_RATES: usize = 64;
 const MAX_ENUM_SCAN: u32 = 4096;
 
+const D3DERR_INVALIDCALL: HRESULT = HRESULT(0x8876_086c_u32.cast_signed());
 const D3DERR_DEVICELOST: HRESULT = HRESULT(0x8876_0868_u32.cast_signed());
 const D3DERR_DEVICEREMOVED: HRESULT = HRESULT(0x8876_0870_u32.cast_signed());
 const D3DERR_DEVICEHUNG: HRESULT = HRESULT(0x8876_0874_u32.cast_signed());
@@ -393,12 +394,34 @@ impl PresentParams {
     }
 }
 
+/// The `IDirect3D9Ex` an adapter is reached through, paired with its ordinal.
+#[derive(Clone, Copy)]
+struct Adapter<'a> {
+    d3d9: &'a IDirect3D9,
+    ordinal: u32,
+}
+
+impl<'a> Adapter<'a> {
+    /// Borrows the interface pointer a hook was invoked on. Returns `None` if `this` is null.
+    ///
+    /// # Safety
+    /// `this` must be null or a live `IDirect3D9Ex`, and must outlive the returned context.
+    unsafe fn from_hook(this: &'a *mut c_void, ordinal: u32) -> Option<Self> {
+        let d3d9 = unsafe { IDirect3D9::from_raw_borrowed(this)? };
+        Some(Self { d3d9, ordinal })
+    }
+
+    /// The ABI pointer for the captured `REAL_*` slots, which take `this` raw.
+    fn raw(self) -> *mut c_void {
+        self.d3d9.as_raw()
+    }
+}
+
 /// Snapshots, rewrites, and (if exclusive fullscreen) populates a `D3DDISPLAYMODEEX`
 /// for the present-params block needed by both `CreateDeviceEx` and `ResetEx`.
 unsafe fn prep_present_params(
     pp: *mut D3DPRESENT_PARAMETERS,
-    d3d9: *mut c_void,
-    adapter: u32,
+    adapter: Adapter<'_>,
     desktop_mode: Option<D3DDISPLAYMODEEX>,
 ) -> PresentParams {
     unsafe {
@@ -413,7 +436,7 @@ unsafe fn prep_present_params(
         rewrite_present_params(p);
         let display_mode = if p.Windowed.0 == 0 {
             let cfg = CONFIG.get().unwrap();
-            apply_refresh_override(p, d3d9, adapter, cfg.display.refresh_rate, desktop_mode);
+            apply_refresh_override(p, adapter, cfg.display.refresh_rate, desktop_mode);
             Some(build_display_mode_ex(p, p.FullScreen_RefreshRateInHz))
         } else {
             None
@@ -447,14 +470,12 @@ fn rewrite_present_params(pp: &mut D3DPRESENT_PARAMETERS) {
 /// validated against the back buffer format/dimensions.
 unsafe fn apply_refresh_override(
     pp: &mut D3DPRESENT_PARAMETERS,
-    d3d9: *mut c_void,
-    adapter: u32,
+    adapter: Adapter<'_>,
     mode: RefreshRateMode,
     desktop_mode: Option<D3DDISPLAYMODEEX>,
 ) {
     pp.FullScreen_RefreshRateInHz = unsafe {
         pick_refresh_rate(
-            d3d9,
             adapter,
             mode,
             desktop_mode,
@@ -469,8 +490,7 @@ unsafe fn apply_refresh_override(
 /// plus the count of valid entries. The count is 0 on any failure.
 /// At most [`MAX_ENUM_SCAN`] modes are scanned and at most [`MAX_ENUM_RATES`] distinct rates are kept.
 unsafe fn enumerate_supported_rates(
-    this: *mut c_void,
-    adapter: u32,
+    adapter: Adapter<'_>,
     format: D3DFORMAT,
     width: u32,
     height: u32,
@@ -491,7 +511,7 @@ unsafe fn enumerate_supported_rates(
         ScanLineOrdering: D3DSCANLINEORDERING_PROGRESSIVE,
     };
 
-    let count = unsafe { count_fn(this, adapter, &raw const filter) };
+    let count = unsafe { count_fn(adapter.raw(), adapter.ordinal, &raw const filter) };
     if count > MAX_ENUM_SCAN {
         warn!(kind = "mode_enum_truncated", count, max = MAX_ENUM_SCAN);
     }
@@ -508,7 +528,15 @@ unsafe fn enumerate_supported_rates(
             Size: D3DDISPLAYMODEEX_SIZE,
             ..D3DDISPLAYMODEEX::default()
         };
-        let hr = unsafe { enum_fn(this, adapter, &raw const filter, i, &raw mut mode) };
+        let hr = unsafe {
+            enum_fn(
+                adapter.raw(),
+                adapter.ordinal,
+                &raw const filter,
+                i,
+                &raw mut mode,
+            )
+        };
         if hr.is_ok()
             && mode.Width == width
             && mode.Height == height
@@ -525,20 +553,19 @@ unsafe fn enumerate_supported_rates(
 /// Chooses the fullscreen refresh rate for `mode`, validated against the modes the adapter advertises at `width` x `height` in `format`.
 /// `desktop_mode` is the desktop mode already sampled by the caller, or `None` if the read failed.
 unsafe fn pick_refresh_rate(
-    this: *mut c_void,
-    adapter: u32,
+    adapter: Adapter<'_>,
     mode: RefreshRateMode,
     desktop_mode: Option<D3DDISPLAYMODEEX>,
     format: D3DFORMAT,
     width: u32,
     height: u32,
 ) -> u32 {
-    let (rates, n) = unsafe { enumerate_supported_rates(this, adapter, format, width, height) };
+    let (rates, n) = unsafe { enumerate_supported_rates(adapter, format, width, height) };
     let reported_hz = desktop_mode.map(|m| m.RefreshRate);
     let desktop_rate = match reported_hz {
         Some(hz) if is_real_refresh_rate(hz) => hz,
         _ => {
-            let device = unsafe { adapter_display_device(this, adapter) };
+            let device = unsafe { adapter_display_device(adapter) };
             let win32_rate = win32_current_refresh_rate(device.as_ref());
             let fallback = win32_rate.unwrap_or(60);
             warn!(
@@ -638,9 +665,9 @@ fn normalize_reported_rate(rate: u32) -> u32 {
 }
 
 /// Resolves the GDI device name of `adapter`'s monitor for Win32 display queries.
-unsafe fn adapter_display_device(d3d9: *mut c_void, adapter: u32) -> Option<[u16; 32]> {
+unsafe fn adapter_display_device(adapter: Adapter<'_>) -> Option<[u16; 32]> {
     let monitor_fn = REAL_GET_ADAPTER_MONITOR.try_get()?;
-    let monitor = unsafe { monitor_fn(d3d9, adapter) };
+    let monitor = unsafe { monitor_fn(adapter.raw(), adapter.ordinal) };
     if monitor.is_invalid() {
         return None;
     }
@@ -741,8 +768,7 @@ pub(crate) fn format_name(f: D3DFORMAT) -> &'static str {
 
 #[allow(clippy::too_many_arguments)]
 unsafe fn create_device_once(
-    this: *mut c_void,
-    adapter: u32,
+    adapter: Adapter<'_>,
     device_type: D3DDEVTYPE,
     focus_window: HWND,
     behavior_flags_in: u32,
@@ -756,8 +782,8 @@ unsafe fn create_device_once(
         info!(
             kind = "create_device_call",
             attempt,
-            this = format_args!("{this:p}"),
-            adapter,
+            this = format_args!("{:p}", adapter.raw()),
+            adapter = adapter.ordinal,
             device_type = ?device_type,
             behavior_flags_in = format_args!("{behavior_flags_in:#x}"),
             behavior_flags = format_args!("{behavior_flags:#x}"),
@@ -766,8 +792,8 @@ unsafe fn create_device_once(
             display_mode = if display_mode_ptr.is_null() { "null" } else { "set" },
         );
         let hr = call_real_create_device_ex(
-            this,
-            adapter,
+            adapter.raw(),
+            adapter.ordinal,
             device_type,
             focus_window,
             behavior_flags,
@@ -806,9 +832,14 @@ unsafe extern "system" fn hook_create_device(
         let behavior_flags_in = behavior_flags;
         let behavior_flags = rewrite_behavior_flags(behavior_flags);
 
-        let desktop_before = sample_for_degradation_check(this, adapter, pp);
+        let Some(adapter) = Adapter::from_hook(&this, adapter) else {
+            warn!(kind = "d3d9_null_this", call = "IDirect3D9::CreateDevice");
+            return D3DERR_INVALIDCALL;
+        };
 
-        let mut prep = prep_present_params(pp, this, adapter, desktop_before);
+        let desktop_before = sample_for_degradation_check(adapter, pp);
+
+        let mut prep = prep_present_params(pp, adapter, desktop_before);
 
         let mut dev: *mut c_void = null_mut();
         let hr = run_with_refresh_failsafe(
@@ -818,7 +849,6 @@ unsafe extern "system" fn hook_create_device(
             "create_device_refresh_failsafe",
             |display_mode_ptr, attempt| {
                 let (hr, d) = create_device_once(
-                    this,
                     adapter,
                     device_type,
                     focus_window,
@@ -834,9 +864,20 @@ unsafe extern "system" fn hook_create_device(
             },
         );
 
-        if hr.is_ok()
-            && let Some(dev) = NonNull::new(dev)
-        {
+        if hr.is_ok() {
+            let Some(dev) = NonNull::new(dev) else {
+                warn!(
+                    kind = "d3d9_null_on_success",
+                    call = "IDirect3D9Ex::CreateDeviceEx",
+                    out_param = if returned_device.is_null() {
+                        "caller_null"
+                    } else {
+                        "written_null"
+                    },
+                );
+                return D3DERR_INVALIDCALL;
+            };
+
             // Apparently D3D9Ex breaks the window style on `CreateDeviceEx`.
             // OILP's `CreateDevice_hook` applies the same `SWP_SHOWWINDOW` fix.
             SetWindowPos(
@@ -853,7 +894,7 @@ unsafe extern "system" fn hook_create_device(
             post_device_alive(&tok, dev);
 
             if let Some(before) = desktop_before {
-                warn_if_exclusive_degraded(this, adapter, before, &prep);
+                warn_if_exclusive_degraded(adapter, before, &prep);
             }
         }
         hr
@@ -866,13 +907,18 @@ fn rewrite_behavior_flags(flags: u32) -> u32 {
 }
 
 /// Reads the display mode of `adapter`. Returns `None` on failure.
-unsafe fn sample_adapter_display_mode(d3d9: *mut c_void, adapter: u32) -> Option<D3DDISPLAYMODEEX> {
+unsafe fn sample_adapter_display_mode(adapter: Adapter<'_>) -> Option<D3DDISPLAYMODEEX> {
     unsafe {
         let mut current = D3DDISPLAYMODEEX {
             Size: D3DDISPLAYMODEEX_SIZE,
             ..D3DDISPLAYMODEEX::default()
         };
-        let hr = call_real_get_adapter_display_mode_ex(d3d9, adapter, &raw mut current, null_mut());
+        let hr = call_real_get_adapter_display_mode_ex(
+            adapter.raw(),
+            adapter.ordinal,
+            &raw mut current,
+            null_mut(),
+        );
         if hr.is_ok() { Some(current) } else { None }
     }
 }
@@ -880,15 +926,14 @@ unsafe fn sample_adapter_display_mode(d3d9: *mut c_void, adapter: u32) -> Option
 /// Captures the adapter mode before a `CreateDevice` or `Reset` call, but only when exclusive fullscreen is requested
 /// (i.e. `pp.Windowed == FALSE`). Returns `None` if no sample is needed or the read failed.
 unsafe fn sample_for_degradation_check(
-    d3d9: *mut c_void,
-    adapter: u32,
+    adapter: Adapter<'_>,
     pp: *mut D3DPRESENT_PARAMETERS,
 ) -> Option<D3DDISPLAYMODEEX> {
     let pp = unsafe { pp.as_ref()? };
     if pp.Windowed.0 != 0 {
         return None;
     }
-    unsafe { sample_adapter_display_mode(d3d9, adapter) }
+    unsafe { sample_adapter_display_mode(adapter) }
 }
 
 /// Heuristic warning for situations where exclusive fullscreen is silently degraded to windowed presentation.
@@ -898,8 +943,7 @@ unsafe fn sample_for_degradation_check(
 /// The check is skipped when the requested presentation parameters matches the desktop mode:
 /// no mode switch was needed, and exclusive fullscreen vs. windowed are indistinguishable in this case.
 unsafe fn warn_if_exclusive_degraded(
-    d3d9: *mut c_void,
-    adapter: u32,
+    adapter: Adapter<'_>,
     before: D3DDISPLAYMODEEX,
     prep: &PresentParams,
 ) {
@@ -914,7 +958,7 @@ unsafe fn warn_if_exclusive_degraded(
     if requested_matches_desktop {
         return;
     }
-    let Some(after) = (unsafe { sample_adapter_display_mode(d3d9, adapter) }) else {
+    let Some(after) = (unsafe { sample_adapter_display_mode(adapter) }) else {
         return;
     };
     let adapter_unchanged = after.Width == before.Width
@@ -1208,6 +1252,15 @@ impl DeviceParent {
             }
         }
     }
+
+    /// Borrows the owned interface for the adapter queries. The context must not outlive `self`,
+    /// which holds the reference returned by `GetDirect3D`.
+    fn adapter(&self) -> Adapter<'_> {
+        Adapter {
+            d3d9: &self.d3d9,
+            ordinal: self.adapter,
+        }
+    }
 }
 
 unsafe extern "system" fn hook_reset(this: *mut c_void, pp: *mut D3DPRESENT_PARAMETERS) -> HRESULT {
@@ -1215,10 +1268,10 @@ unsafe extern "system" fn hook_reset(this: *mut c_void, pp: *mut D3DPRESENT_PARA
     on_pre_reset(&tok);
     unsafe {
         let parent = DeviceParent::new(this);
-        let desktop_before = sample_for_degradation_check(parent.d3d9.as_raw(), parent.adapter, pp);
+        let adapter = parent.adapter();
+        let desktop_before = sample_for_degradation_check(adapter, pp);
         // We reapply refresh rate selection so runtime rate toggles take effect at the next `Reset`.
-        let mut prep =
-            prep_present_params(pp, parent.d3d9.as_raw(), parent.adapter, desktop_before);
+        let mut prep = prep_present_params(pp, adapter, desktop_before);
         let use_reset_ex = REAL_RESET_EX.try_get().is_some();
 
         let hr = run_with_refresh_failsafe(
@@ -1236,7 +1289,7 @@ unsafe extern "system" fn hook_reset(this: *mut c_void, pp: *mut D3DPRESENT_PARA
             let dev = NonNull::new_unchecked(this);
             post_device_alive(&tok, dev);
             if let Some(before) = desktop_before {
-                warn_if_exclusive_degraded(parent.d3d9.as_raw(), parent.adapter, before, &prep);
+                warn_if_exclusive_degraded(adapter, before, &prep);
             }
         }
         hr
