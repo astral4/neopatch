@@ -397,43 +397,38 @@ unsafe extern "system" fn wrap_query_interface(
     riid: *const GUID,
     out: *mut *mut c_void,
 ) -> HRESULT {
-    unsafe {
-        warn!(kind = "d3d8_stub", method = "QueryInterface", riid = ?riid.as_ref());
-        if out.is_null() {
-            return D3DERR_INVALIDCALL;
-        }
-        *out = null_mut();
-        E_NOINTERFACE
+    let riid_dbg = unsafe { riid.as_ref() };
+    warn!(kind = "d3d8_stub", method = "QueryInterface", riid = ?riid_dbg);
+    if out.is_null() {
+        return D3DERR_INVALIDCALL;
     }
+    unsafe { *out = null_mut() };
+    E_NOINTERFACE
 }
 
 unsafe extern "system" fn wrap_add_ref(this: *mut c_void) -> u32 {
-    unsafe {
-        let h = &*this.cast::<ComHeader>();
-        // A dead wrapper's inner reference is gone. Resurrecting it would AddRef a possibly destroyed D3D9 object.
-        if h.refs.get() == 0 {
-            warn!(kind = "wrapper_add_ref_after_death");
-            return 0;
-        }
-        com_add_ref(h.inner.get());
-        let n = h.refs.get() + 1;
-        h.refs.set(n);
-        n
+    let h = unsafe { &*this.cast::<ComHeader>() };
+    // A dead wrapper's inner reference is gone. Resurrecting it would AddRef a possibly destroyed D3D9 object.
+    if h.refs.get() == 0 {
+        warn!(kind = "wrapper_add_ref_after_death");
+        return 0;
     }
+    unsafe { com_add_ref(h.inner.get()) };
+    let n = h.refs.get() + 1;
+    h.refs.set(n);
+    n
 }
 
 unsafe fn com_header_release(this: *mut c_void, wrapper: &'static str) -> Option<u32> {
-    unsafe {
-        let h = &*this.cast::<ComHeader>();
-        if h.refs.get() == 0 {
-            warn!(kind = "wrapper_over_release", wrapper);
-            return None;
-        }
-        com_release(h.inner.get());
-        let n = h.refs.get() - 1;
-        h.refs.set(n);
-        Some(n)
+    let h = unsafe { &*this.cast::<ComHeader>() };
+    if h.refs.get() == 0 {
+        warn!(kind = "wrapper_over_release", wrapper);
+        return None;
     }
+    unsafe { com_release(h.inner.get()) };
+    let n = h.refs.get() - 1;
+    h.refs.set(n);
+    Some(n)
 }
 
 macro_rules! vtable_accessors {
@@ -482,10 +477,8 @@ impl Resource8 {
         device: *mut Device8,
         lockable: bool,
     ) -> *mut c_void {
-        unsafe {
-            if !device.is_null() {
-                wrap_add_ref(device.cast());
-            }
+        if !device.is_null() {
+            unsafe { wrap_add_ref(device.cast()) };
         }
 
         Box::into_raw(Box::new(Self {
@@ -522,12 +515,8 @@ impl Resource8 {
         // NOTE/TODO: We assume the result of `GetBackBuffer(0, MONO)` is stable. Adopting a different surface onto a live wrapper
         // would silently ref all of them to the new one, over-releasing it while orphaning the old one.
         // If a game requests more than one back buffer or holds a surface across a `Present`, then we need to revisit this.
-        if self.header.refs.get() == 0 {
-            unsafe {
-                if !self.device.is_null() {
-                    wrap_add_ref(self.device.cast());
-                }
-            }
+        if self.header.refs.get() == 0 && !self.device.is_null() {
+            unsafe { wrap_add_ref(self.device.cast()) };
         }
         // A dead wrapper's stored surface may have been destroyed by a `Reset` and must not be reused, so we always overwrite.
         self.header.inner.set(inner);
@@ -545,59 +534,55 @@ unsafe fn wrap_created(
     lockable: bool,
     out: *mut *mut c_void,
 ) -> HRESULT {
-    unsafe {
-        if out.is_null() {
-            // The D3D9 object already exists; without this a null out-pointer leaks one reference per call.
-            if hr.is_ok() && !inner.is_null() {
-                com_release(inner);
-            }
-            return D3DERR_INVALIDCALL;
+    if out.is_null() {
+        // The D3D9 object already exists; without this a null out-pointer leaks one reference per call.
+        if hr.is_ok() && !inner.is_null() {
+            unsafe { com_release(inner) };
         }
-        if hr.is_err() {
-            *out = null_mut();
-            return hr;
-        }
-        if inner.is_null() {
-            warn!(kind = "d3d9_null_on_success", call);
-            *out = null_mut();
-            return D3DERR_INVALIDCALL;
-        }
-        *out = Resource8::new_raw(vtbl, inner, device, lockable);
-        hr
+        return D3DERR_INVALIDCALL;
     }
+    if hr.is_err() {
+        unsafe { *out = null_mut() };
+        return hr;
+    }
+    if inner.is_null() {
+        warn!(kind = "d3d9_null_on_success", call);
+        unsafe { *out = null_mut() };
+        return D3DERR_INVALIDCALL;
+    }
+    unsafe { *out = Resource8::new_raw(vtbl, inner, device, lockable) };
+    hr
 }
 
 unsafe extern "system" fn resource8_release(this: *mut c_void) -> u32 {
-    unsafe {
-        let Some(n) = com_header_release(this, "resource8") else {
-            return 0;
-        };
-        if n == 0 {
-            // The dead wrapper stays behind to catch over-release. Freeing here can't be made unconditional anyway,
-            // since this is the `release` slot for the device's embedded `back_buffer`, which is a field of the `Device8` allocation.
-            // Calling `Box::from_raw` would free the middle of a live device, so we retain and leak the boxes.
-            let h = &*this.cast::<Resource8>();
-            if !h.device.is_null() {
-                device8_release(h.device.cast());
-            }
+    let Some(n) = (unsafe { com_header_release(this, "resource8") }) else {
+        return 0;
+    };
+    if n == 0 {
+        // The dead wrapper stays behind to catch over-release. Freeing here can't be made unconditional anyway,
+        // since this is the `release` slot for the device's embedded `back_buffer`, which is a field of the `Device8` allocation.
+        // Calling `Box::from_raw` would free the middle of a live device, so we retain and leak the boxes.
+        let h = unsafe { &*this.cast::<Resource8>() };
+        if !h.device.is_null() {
+            unsafe { device8_release(h.device.cast()) };
         }
-        n
     }
+    n
 }
 
 unsafe extern "system" fn resource8_get_device(
     this: *mut c_void,
     out: *mut *mut c_void,
 ) -> HRESULT {
+    let h = unsafe { &*this.cast::<Resource8>() };
+    if out.is_null() || h.device.is_null() {
+        return D3DERR_INVALIDCALL;
+    }
     unsafe {
-        let h = &*this.cast::<Resource8>();
-        if out.is_null() || h.device.is_null() {
-            return D3DERR_INVALIDCALL;
-        }
         wrap_add_ref(h.device.cast());
         *out = h.device.cast();
-        D3D_OK
     }
+    D3D_OK
 }
 
 stub8!(resource8_set_private_data, "IDirect3DResource8::SetPrivateData"(_refguid: *const GUID, _data: *const c_void, _size: u32, _flags: u32) -> D3D_OK);
@@ -671,40 +656,36 @@ unsafe extern "system" fn surface8_get_container(
     riid: *const GUID,
     out: *mut *mut c_void,
 ) -> HRESULT {
-    unsafe {
-        if !out.is_null() {
-            *out = null_mut();
-        }
-        let riid = riid.as_ref();
-        if riid == Some(&IID_IDIRECT3D_BASE_TEXTURE8) || riid == Some(&IID_IDIRECT3D_TEXTURE8) {
-            debug!(kind = "d3d8_get_container_not_texture");
-        } else {
-            warn!(
-                kind = "d3d8_stub",
-                method = "IDirect3DSurface8::GetContainer",
-                riid = ?riid,
-            );
-        }
-        // We assume every surface the games lock through the helper is the back buffer or a render target, so refusing outright is correct.
-        E_NOINTERFACE
+    if !out.is_null() {
+        unsafe { *out = null_mut() };
     }
+    let riid = unsafe { riid.as_ref() };
+    if riid == Some(&IID_IDIRECT3D_BASE_TEXTURE8) || riid == Some(&IID_IDIRECT3D_TEXTURE8) {
+        debug!(kind = "d3d8_get_container_not_texture");
+    } else {
+        warn!(
+            kind = "d3d8_stub",
+            method = "IDirect3DSurface8::GetContainer",
+            riid = ?riid,
+        );
+    }
+    // We assume every surface the games lock through the helper is the back buffer or a render target, so refusing outright is correct.
+    E_NOINTERFACE
 }
 
 unsafe extern "system" fn surface8_get_desc(
     this: *mut c_void,
     out: *mut D3DSurfaceDesc8,
 ) -> HRESULT {
-    unsafe {
-        if out.is_null() {
-            return D3DERR_INVALIDCALL;
+    if out.is_null() {
+        return D3DERR_INVALIDCALL;
+    }
+    match unsafe { surface_desc9(unwrap8(this)) } {
+        Ok(d9) => {
+            unsafe { *out = surface_desc_9_to_8(&d9) };
+            D3D_OK
         }
-        match surface_desc9(unwrap8(this)) {
-            Ok(d9) => {
-                *out = surface_desc_9_to_8(&d9);
-                D3D_OK
-            }
-            Err(hr) => hr,
-        }
+        Err(hr) => hr,
     }
 }
 
@@ -768,18 +749,16 @@ unsafe extern "system" fn texture8_get_level_desc(
     level: u32,
     out: *mut D3DSurfaceDesc8,
 ) -> HRESULT {
-    unsafe {
-        if out.is_null() {
-            return D3DERR_INVALIDCALL;
-        }
-        let inner = unwrap8(this);
-        let mut d9 = D3DSURFACE_DESC::default();
-        let hr = (tex9_vt(inner).GetLevelDesc)(inner, level, &raw mut d9);
-        if hr.is_ok() {
-            *out = surface_desc_9_to_8(&d9);
-        }
-        hr
+    if out.is_null() {
+        return D3DERR_INVALIDCALL;
     }
+    let inner = unsafe { unwrap8(this) };
+    let mut d9 = D3DSURFACE_DESC::default();
+    let hr = unsafe { (tex9_vt(inner).GetLevelDesc)(inner, level, &raw mut d9) };
+    if hr.is_ok() {
+        unsafe { *out = surface_desc_9_to_8(&d9) };
+    }
+    hr
 }
 
 unsafe extern "system" fn texture8_get_surface_level(
@@ -787,12 +766,12 @@ unsafe extern "system" fn texture8_get_surface_level(
     level: u32,
     out: *mut *mut c_void,
 ) -> HRESULT {
+    let h = unsafe { &*this.cast::<Resource8>() };
+    let mut s9 = null_mut();
+    let inner = h.header.inner.get();
+    let hr = unsafe { (tex9_vt(inner).GetSurfaceLevel)(inner, level, &raw mut s9) };
+    // Texture levels are not directly lockable surfaces in the internal-flags sense.
     unsafe {
-        let h = &*this.cast::<Resource8>();
-        let mut s9 = null_mut();
-        let inner = h.header.inner.get();
-        let hr = (tex9_vt(inner).GetSurfaceLevel)(inner, level, &raw mut s9);
-        // Texture levels are not directly lockable surfaces in the internal-flags sense.
         wrap_created(
             "IDirect3DTexture9::GetSurfaceLevel",
             hr,
@@ -1120,20 +1099,18 @@ static DEVICE8_VTBL: Device8Vtbl = Device8Vtbl {
 };
 
 unsafe extern "system" fn device8_release(this: *mut c_void) -> u32 {
-    unsafe {
-        let Some(n) = com_header_release(this, "device8") else {
-            return 0;
-        };
-        if n == 0 {
-            let d = device8(this);
-            info!(kind = "d3d8_device_released");
-            // The dead wrapper stays behind to catch over-release.
-            if !d.parent.is_null() {
-                d3d8_release(d.parent.cast());
-            }
+    let Some(n) = (unsafe { com_header_release(this, "device8") }) else {
+        return 0;
+    };
+    if n == 0 {
+        let d = unsafe { device8(this) };
+        info!(kind = "d3d8_device_released");
+        // The dead wrapper stays behind to catch over-release.
+        if !d.parent.is_null() {
+            unsafe { d3d8_release(d.parent.cast()) };
         }
-        n
     }
+    n
 }
 
 forward8!(device8_test_cooperative_level, dev9 / dev9_vt.base__.TestCooperativeLevel() -> HRESULT);
@@ -1146,33 +1123,31 @@ unsafe extern "system" fn device8_get_direct3d(
     this: *mut c_void,
     out: *mut *mut c_void,
 ) -> HRESULT {
+    let d = unsafe { device8(this) };
+    if out.is_null() || d.parent.is_null() {
+        return D3DERR_INVALIDCALL;
+    }
     unsafe {
-        let d = device8(this);
-        if out.is_null() || d.parent.is_null() {
-            return D3DERR_INVALIDCALL;
-        }
         wrap_add_ref(d.parent.cast());
         *out = d.parent.cast();
-        D3D_OK
     }
+    D3D_OK
 }
 
 unsafe extern "system" fn device8_get_device_caps(
     this: *mut c_void,
     out: *mut D3DCaps8,
 ) -> HRESULT {
-    unsafe {
-        if out.is_null() {
-            return D3DERR_INVALIDCALL;
-        }
-        let p = dev9(this);
-        let mut caps9 = D3DCAPS9::default();
-        let hr = (dev9_vt(p).base__.GetDeviceCaps)(p, &raw mut caps9);
-        if hr.is_ok() {
-            *out = caps_9_to_8(&caps9);
-        }
-        hr
+    if out.is_null() {
+        return D3DERR_INVALIDCALL;
     }
+    let p = unsafe { dev9(this) };
+    let mut caps9 = D3DCAPS9::default();
+    let hr = unsafe { (dev9_vt(p).base__.GetDeviceCaps)(p, &raw mut caps9) };
+    if hr.is_ok() {
+        unsafe { *out = caps_9_to_8(&caps9) };
+    }
+    hr
 }
 
 forward8!(device8_get_display_mode, dev9 / dev9_vt.base__.GetDisplayMode(out: *mut D3DDISPLAYMODE) -> HRESULT => (0, out));
@@ -1186,19 +1161,17 @@ unsafe extern "system" fn device8_reset(
     this: *mut c_void,
     pp8: *mut D3DPresentParameters8,
 ) -> HRESULT {
-    unsafe {
-        let Some(pp8) = pp8.as_mut() else {
-            return D3DERR_INVALIDCALL;
-        };
-        info!(kind = "d3d8_reset", pp8 = ?pp8);
-        let d = device8(this);
-        let mut pp9 = convert_present_params(pp8);
-        let hr = (dev9_vt(d.inner()).base__.Reset)(d.inner(), &raw mut pp9);
-        if hr.is_ok() {
-            sync_present_params_back(pp8, &pp9);
-        }
-        hr
+    let Some(pp8) = (unsafe { pp8.as_mut() }) else {
+        return D3DERR_INVALIDCALL;
+    };
+    info!(kind = "d3d8_reset", pp8 = ?pp8);
+    let d = unsafe { device8(this) };
+    let mut pp9 = convert_present_params(pp8);
+    let hr = unsafe { (dev9_vt(d.inner()).base__.Reset)(d.inner(), &raw mut pp9) };
+    if hr.is_ok() {
+        sync_present_params_back(pp8, &pp9);
     }
+    hr
 }
 
 forward8!(device8_present, dev9 / dev9_vt.base__.Present(src: *const RECT, dst: *const RECT, window_override: HWND, dirty: *const RGNDATA) -> HRESULT);
@@ -1209,19 +1182,20 @@ unsafe extern "system" fn device8_get_back_buffer(
     ty: D3DBACKBUFFER_TYPE,
     out: *mut *mut c_void,
 ) -> HRESULT {
-    unsafe {
-        let d = device8(this);
+    let d = unsafe { device8(this) };
 
-        let embedded = back_buffer == 0 && ty == D3DBACKBUFFER_TYPE_MONO;
-        if embedded && out.is_null() {
-            return D3DERR_INVALIDCALL;
-        }
+    let embedded = back_buffer == 0 && ty == D3DBACKBUFFER_TYPE_MONO;
+    if embedded && out.is_null() {
+        return D3DERR_INVALIDCALL;
+    }
 
-        let mut s9 = null_mut();
-        let hr =
-            (dev9_vt(d.inner()).base__.GetBackBuffer)(d.inner(), 0, back_buffer, ty, &raw mut s9);
-        if !embedded {
-            return wrap_created(
+    let mut s9 = null_mut();
+    let hr = unsafe {
+        (dev9_vt(d.inner()).base__.GetBackBuffer)(d.inner(), 0, back_buffer, ty, &raw mut s9)
+    };
+    if !embedded {
+        return unsafe {
+            wrap_created(
                 "IDirect3DDevice9::GetBackBuffer",
                 hr,
                 s9,
@@ -1229,24 +1203,26 @@ unsafe extern "system" fn device8_get_back_buffer(
                 this.cast::<Device8>(),
                 true,
                 out,
-            );
-        }
-        if hr.is_err() {
-            *out = null_mut();
-            return hr;
-        }
-        if s9.is_null() {
-            warn!(
-                kind = "d3d9_null_on_success",
-                call = "IDirect3DDevice9::GetBackBuffer",
-            );
-            *out = null_mut();
-            return D3DERR_INVALIDCALL;
-        }
+            )
+        };
+    }
+    if hr.is_err() {
+        unsafe { *out = null_mut() };
+        return hr;
+    }
+    if s9.is_null() {
+        warn!(
+            kind = "d3d9_null_on_success",
+            call = "IDirect3DDevice9::GetBackBuffer",
+        );
+        unsafe { *out = null_mut() };
+        return D3DERR_INVALIDCALL;
+    }
+    unsafe {
         d.back_buffer.adopt(s9);
         *out = (&raw const d.back_buffer).cast_mut().cast();
-        hr
     }
+    hr
 }
 
 forward8!(device8_get_raster_status, dev9 / dev9_vt.base__.GetRasterStatus(out: *mut D3DRASTER_STATUS) -> HRESULT => (0, out));
@@ -1279,10 +1255,10 @@ unsafe extern "system" fn device8_create_texture(
     pool: D3DPOOL,
     out: *mut *mut c_void,
 ) -> HRESULT {
-    unsafe {
-        let d = device8(this);
-        let mut t9 = null_mut();
-        let hr = (dev9_vt(d.inner()).base__.CreateTexture)(
+    let d = unsafe { device8(this) };
+    let mut t9 = null_mut();
+    let hr = unsafe {
+        (dev9_vt(d.inner()).base__.CreateTexture)(
             d.inner(),
             width,
             height,
@@ -1292,7 +1268,9 @@ unsafe extern "system" fn device8_create_texture(
             pool,
             &raw mut t9,
             null_mut(),
-        );
+        )
+    };
+    unsafe {
         wrap_created(
             "IDirect3DDevice9::CreateTexture",
             hr,
@@ -1316,10 +1294,10 @@ unsafe extern "system" fn device8_create_vertex_buffer(
     pool: D3DPOOL,
     out: *mut *mut c_void,
 ) -> HRESULT {
-    unsafe {
-        let d = device8(this);
-        let mut vb9 = null_mut();
-        let hr = (dev9_vt(d.inner()).base__.CreateVertexBuffer)(
+    let d = unsafe { device8(this) };
+    let mut vb9 = null_mut();
+    let hr = unsafe {
+        (dev9_vt(d.inner()).base__.CreateVertexBuffer)(
             d.inner(),
             length,
             usage,
@@ -1327,7 +1305,9 @@ unsafe extern "system" fn device8_create_vertex_buffer(
             pool,
             &raw mut vb9,
             null_mut(),
-        );
+        )
+    };
+    unsafe {
         wrap_created(
             "IDirect3DDevice9::CreateVertexBuffer",
             hr,
@@ -1351,10 +1331,10 @@ unsafe extern "system" fn device8_create_render_target(
     lockable: BOOL,
     out: *mut *mut c_void,
 ) -> HRESULT {
-    unsafe {
-        let d = device8(this);
-        let mut s9 = null_mut();
-        let hr = (dev9_vt(d.inner()).base__.CreateRenderTarget)(
+    let d = unsafe { device8(this) };
+    let mut s9 = null_mut();
+    let hr = unsafe {
+        (dev9_vt(d.inner()).base__.CreateRenderTarget)(
             d.inner(),
             width,
             height,
@@ -1364,7 +1344,9 @@ unsafe extern "system" fn device8_create_render_target(
             lockable,
             &raw mut s9,
             null_mut(),
-        );
+        )
+    };
+    unsafe {
         wrap_created(
             "IDirect3DDevice9::CreateRenderTarget",
             hr,
@@ -1388,10 +1370,10 @@ unsafe extern "system" fn device8_create_image_surface(
     format: D3DFORMAT,
     out: *mut *mut c_void,
 ) -> HRESULT {
-    unsafe {
-        let d = device8(this);
-        let mut s9 = null_mut();
-        let hr = (dev9_vt(d.inner()).base__.CreateOffscreenPlainSurface)(
+    let d = unsafe { device8(this) };
+    let mut s9 = null_mut();
+    let hr = unsafe {
+        (dev9_vt(d.inner()).base__.CreateOffscreenPlainSurface)(
             d.inner(),
             width,
             height,
@@ -1399,8 +1381,10 @@ unsafe extern "system" fn device8_create_image_surface(
             D3DPOOL_SYSTEMMEM,
             &raw mut s9,
             null_mut(),
-        );
-        // Offscreen sysmem surfaces are always lockable.
+        )
+    };
+    // Offscreen sysmem surfaces are always lockable.
+    unsafe {
         wrap_created(
             "IDirect3DDevice9::CreateOffscreenPlainSurface",
             hr,
@@ -1414,11 +1398,9 @@ unsafe extern "system" fn device8_create_image_surface(
 }
 
 unsafe fn surface_desc9(s9: *mut c_void) -> Result<D3DSURFACE_DESC, HRESULT> {
-    unsafe {
-        let mut d = D3DSURFACE_DESC::default();
-        let hr = (surf9_vt(s9).GetDesc)(s9, &raw mut d);
-        if hr.is_ok() { Ok(d) } else { Err(hr) }
-    }
+    let mut d = D3DSURFACE_DESC::default();
+    let hr = unsafe { (surf9_vt(s9).GetDesc)(s9, &raw mut d) };
+    if hr.is_ok() { Ok(d) } else { Err(hr) }
 }
 
 /// Returns whether `r` is a positive-extent rect inside the source surface and `pt` places its extent inside the destination surface.
@@ -1459,50 +1441,43 @@ unsafe fn copy_one_rect(
     r: &RECT,
     pt: &POINT,
 ) -> HRESULT {
-    unsafe {
-        let vt = dev9_vt(dev9);
-        // Each of D3D9's direction-specific calls carries a restriction D3D8's `CopyRects` doesn't:
-        // `UpdateSurface` refuses a render-target destination (which the games' back buffer is),
-        // `GetRenderTargetData` is whole-surface only, and `StretchRect` refuses some pool/usage pairs.
-        // Rather than model every rule, we take the call that fits the pool pair and fall back to a locked copy.
-        let hr = match (sd.Pool, dd.Pool) {
-            (D3DPOOL_SYSTEMMEM, D3DPOOL_DEFAULT) => {
-                Some((vt.base__.UpdateSurface)(dev9, src9, r, dst9, pt))
-            }
-            (D3DPOOL_DEFAULT, D3DPOOL_SYSTEMMEM) => {
-                // `GetRenderTargetData` is whole-surface only and needs identical dimensions.
-                let full_surface = r.left == 0
-                    && r.top == 0
-                    && r.right.cast_unsigned() == sd.Width
-                    && r.bottom.cast_unsigned() == sd.Height
-                    && pt.x == 0
-                    && pt.y == 0
-                    && sd.Width == dd.Width
-                    && sd.Height == dd.Height;
-                full_surface.then(|| (vt.base__.GetRenderTargetData)(dev9, src9, dst9))
-            }
-            (D3DPOOL_DEFAULT, D3DPOOL_DEFAULT) => {
-                let dst_rect = dest_rect(r, pt);
-                Some((vt.base__.StretchRect)(
-                    dev9,
-                    src9,
-                    r,
-                    dst9,
-                    &raw const dst_rect,
-                    D3DTEXF_NONE,
-                ))
-            }
-            _ => None,
-        };
-
-        if let Some(hr) = hr {
-            if hr.is_ok() {
-                return hr;
-            }
-            info!(kind = "d3d8_copy_rects_fallback", hr = %fmt_hr!(hr));
+    let vt = unsafe { dev9_vt(dev9) };
+    // Each of D3D9's direction-specific calls carries a restriction D3D8's `CopyRects` doesn't:
+    // `UpdateSurface` refuses a render-target destination (which the games' back buffer is),
+    // `GetRenderTargetData` is whole-surface only, and `StretchRect` refuses some pool/usage pairs.
+    // Rather than model every rule, we take the call that fits the pool pair and fall back to a locked copy.
+    let hr = match (sd.Pool, dd.Pool) {
+        (D3DPOOL_SYSTEMMEM, D3DPOOL_DEFAULT) => {
+            Some(unsafe { (vt.base__.UpdateSurface)(dev9, src9, r, dst9, pt) })
         }
-        copy_locked(src9, dst9, sd.Format, r, pt)
+        (D3DPOOL_DEFAULT, D3DPOOL_SYSTEMMEM) => {
+            // `GetRenderTargetData` is whole-surface only and needs identical dimensions.
+            let full_surface = r.left == 0
+                && r.top == 0
+                && r.right.cast_unsigned() == sd.Width
+                && r.bottom.cast_unsigned() == sd.Height
+                && pt.x == 0
+                && pt.y == 0
+                && sd.Width == dd.Width
+                && sd.Height == dd.Height;
+            full_surface.then(|| unsafe { (vt.base__.GetRenderTargetData)(dev9, src9, dst9) })
+        }
+        (D3DPOOL_DEFAULT, D3DPOOL_DEFAULT) => {
+            let dst_rect = dest_rect(r, pt);
+            Some(unsafe {
+                (vt.base__.StretchRect)(dev9, src9, r, dst9, &raw const dst_rect, D3DTEXF_NONE)
+            })
+        }
+        _ => None,
+    };
+
+    if let Some(hr) = hr {
+        if hr.is_ok() {
+            return hr;
+        }
+        info!(kind = "d3d8_copy_rects_fallback", hr = %fmt_hr!(hr));
     }
+    unsafe { copy_locked(src9, dst9, sd.Format, r, pt) }
 }
 
 /// An owned `LockRect` on a D3D9 surface. Dropping it performs the paired `UnlockRect`.
@@ -1515,15 +1490,13 @@ impl SurfaceLock {
     /// # Safety
     /// `surface` must be a live `IDirect3DSurface9`.
     unsafe fn lock(surface: *mut c_void, rect: &RECT, flags: u32) -> Result<Self, HRESULT> {
-        unsafe {
-            let mut locked = D3DLOCKED_RECT::default();
-            let hr = (surf9_vt(surface).LockRect)(surface, &raw mut locked, rect, flags);
-            if hr.is_ok() {
-                com_add_ref(surface);
-                Ok(Self { surface, locked })
-            } else {
-                Err(hr)
-            }
+        let mut locked = D3DLOCKED_RECT::default();
+        let hr = unsafe { (surf9_vt(surface).LockRect)(surface, &raw mut locked, rect, flags) };
+        if hr.is_ok() {
+            unsafe { com_add_ref(surface) };
+            Ok(Self { surface, locked })
+        } else {
+            Err(hr)
         }
     }
 }
@@ -1546,50 +1519,52 @@ unsafe fn copy_locked(
     r: &RECT,
     pt: &POINT,
 ) -> HRESULT {
-    unsafe {
-        let Some(bytes_pp) = bytes_per_pixel(format) else {
-            warn!(
-                kind = "copy_rects_unsupported_format",
-                format = format_name(format),
-                raw = format.0,
-            );
-            return D3DERR_INVALIDCALL;
-        };
-        // Each getter creates a fresh wrapper, so two D3D8 wrappers can hold the same inner surface.
-        // However, none of the games self-copy, so we refuse rather than lock one surface twice.
-        if src9 == dst9 {
-            warn!(kind = "d3d8_copy_rects_self_copy_unsupported");
-            return D3DERR_INVALIDCALL;
-        }
-        let width_bytes = (r.right - r.left).cast_unsigned() * bytes_pp;
-        let rows = (r.bottom - r.top).cast_unsigned();
-        let dst_rect = dest_rect(r, pt);
-
-        let src_lock = match SurfaceLock::lock(src9, r, D3DLOCK_READONLY.cast_unsigned()) {
-            Ok(lock) => lock,
-            Err(hr) => return hr,
-        };
-        let dst_lock = match SurfaceLock::lock(dst9, &dst_rect, 0) {
-            Ok(lock) => lock,
-            Err(hr) => return hr,
-        };
-
-        for row in 0..rows {
-            let src_row = src_lock
-                .locked
-                .pBits
-                .cast::<u8>()
-                .offset((row.cast_signed() * src_lock.locked.Pitch) as isize);
-            let dst_row = dst_lock
-                .locked
-                .pBits
-                .cast::<u8>()
-                .offset((row.cast_signed() * dst_lock.locked.Pitch) as isize);
-            copy_nonoverlapping(src_row, dst_row, width_bytes as usize);
-        }
-
-        D3D_OK
+    let Some(bytes_pp) = bytes_per_pixel(format) else {
+        warn!(
+            kind = "copy_rects_unsupported_format",
+            format = format_name(format),
+            raw = format.0,
+        );
+        return D3DERR_INVALIDCALL;
+    };
+    // Each getter creates a fresh wrapper, so two D3D8 wrappers can hold the same inner surface.
+    // However, none of the games self-copy, so we refuse rather than lock one surface twice.
+    if src9 == dst9 {
+        warn!(kind = "d3d8_copy_rects_self_copy_unsupported");
+        return D3DERR_INVALIDCALL;
     }
+    let width_bytes = (r.right - r.left).cast_unsigned() * bytes_pp;
+    let rows = (r.bottom - r.top).cast_unsigned();
+    let dst_rect = dest_rect(r, pt);
+
+    let src_lock = match unsafe { SurfaceLock::lock(src9, r, D3DLOCK_READONLY.cast_unsigned()) } {
+        Ok(lock) => lock,
+        Err(hr) => return hr,
+    };
+    let dst_lock = match unsafe { SurfaceLock::lock(dst9, &dst_rect, 0) } {
+        Ok(lock) => lock,
+        Err(hr) => return hr,
+    };
+
+    for row in 0..rows {
+        let src_row = unsafe {
+            src_lock
+                .locked
+                .pBits
+                .cast::<u8>()
+                .offset((row.cast_signed() * src_lock.locked.Pitch) as isize)
+        };
+        let dst_row = unsafe {
+            dst_lock
+                .locked
+                .pBits
+                .cast::<u8>()
+                .offset((row.cast_signed() * dst_lock.locked.Pitch) as isize)
+        };
+        unsafe { copy_nonoverlapping(src_row, dst_row, width_bytes as usize) };
+    }
+
+    D3D_OK
 }
 
 unsafe extern "system" fn device8_copy_rects(
@@ -1600,70 +1575,70 @@ unsafe extern "system" fn device8_copy_rects(
     dst8: *mut c_void,
     points: *const POINT,
 ) -> HRESULT {
-    unsafe {
-        let src9 = unwrap8(src8);
-        let dst9 = unwrap8(dst8);
+    let src9 = unsafe { unwrap8(src8) };
+    let dst9 = unsafe { unwrap8(dst8) };
 
-        if src9.is_null() || dst9.is_null() {
-            return D3DERR_INVALIDCALL;
-        }
-        let (Ok(sd), Ok(dd)) = (surface_desc9(src9), surface_desc9(dst9)) else {
-            return D3DERR_INVALIDCALL;
-        };
-        if sd.Format != dd.Format {
-            warn!(
-                kind = "d3d8_copy_rects_format_mismatch",
-                src = format_name(sd.Format),
-                dst = format_name(dd.Format),
-            );
-            return D3DERR_INVALIDCALL;
-        }
-
-        let p = dev9(this);
-
-        // Every call site in the games passes either zero or one rects.
-        if rect_count > 1 {
-            warn!(kind = "d3d8_copy_rects_multi_rect_unsupported", rect_count);
-            return D3DERR_INVALIDCALL;
-        }
-
-        let (r, pt) = if rects.is_null() || rect_count == 0 {
-            let r = RECT {
-                left: 0,
-                top: 0,
-                right: sd.Width.cast_signed(),
-                bottom: sd.Height.cast_signed(),
-            };
-            (r, POINT { x: 0, y: 0 })
-        } else {
-            let r = *rects;
-            // A null point array means the rect copies to its own top-left position.
-            let pt = if points.is_null() {
-                POINT {
-                    x: r.left,
-                    y: r.top,
-                }
-            } else {
-                *points
-            };
-            (r, pt)
-        };
-        if !copy_rect_valid(&r, &pt, &sd, &dd) {
-            warn!(kind = "d3d8_copy_rects_invalid_rect");
-            return D3DERR_INVALIDCALL;
-        }
-
-        let hr = copy_one_rect(p, src9, &sd, dst9, &dd, &r, &pt);
-        if hr.is_err() {
-            log_at!(is_transient_device_error(hr) => debug / warn,
-                kind = "d3d8_copy_rects_failed",
-                hr = %fmt_hr!(hr),
-                src_pool = sd.Pool.0,
-                dst_pool = dd.Pool.0,
-            );
-        }
-        hr
+    if src9.is_null() || dst9.is_null() {
+        return D3DERR_INVALIDCALL;
     }
+    let (Ok(sd), Ok(dd)) = (unsafe { surface_desc9(src9) }, unsafe {
+        surface_desc9(dst9)
+    }) else {
+        return D3DERR_INVALIDCALL;
+    };
+    if sd.Format != dd.Format {
+        warn!(
+            kind = "d3d8_copy_rects_format_mismatch",
+            src = format_name(sd.Format),
+            dst = format_name(dd.Format),
+        );
+        return D3DERR_INVALIDCALL;
+    }
+
+    let p = unsafe { dev9(this) };
+
+    // Every call site in the games passes either zero or one rects.
+    if rect_count > 1 {
+        warn!(kind = "d3d8_copy_rects_multi_rect_unsupported", rect_count);
+        return D3DERR_INVALIDCALL;
+    }
+
+    let (r, pt) = if rects.is_null() || rect_count == 0 {
+        let r = RECT {
+            left: 0,
+            top: 0,
+            right: sd.Width.cast_signed(),
+            bottom: sd.Height.cast_signed(),
+        };
+        (r, POINT { x: 0, y: 0 })
+    } else {
+        let r = unsafe { *rects };
+        // A null point array means the rect copies to its own top-left position.
+        let pt = if points.is_null() {
+            POINT {
+                x: r.left,
+                y: r.top,
+            }
+        } else {
+            unsafe { *points }
+        };
+        (r, pt)
+    };
+    if !copy_rect_valid(&r, &pt, &sd, &dd) {
+        warn!(kind = "d3d8_copy_rects_invalid_rect");
+        return D3DERR_INVALIDCALL;
+    }
+
+    let hr = unsafe { copy_one_rect(p, src9, &sd, dst9, &dd, &r, &pt) };
+    if hr.is_err() {
+        log_at!(is_transient_device_error(hr) => debug / warn,
+            kind = "d3d8_copy_rects_failed",
+            hr = %fmt_hr!(hr),
+            src_pool = sd.Pool.0,
+            dst_pool = dd.Pool.0,
+        );
+    }
+    hr
 }
 
 forward8!(device8_update_texture, dev9 / dev9_vt.base__.UpdateTexture(src8: *mut c_void, dst8: *mut c_void) -> HRESULT => (unwrap8(src8), unwrap8(dst8)));
@@ -1703,28 +1678,28 @@ unsafe extern "system" fn device8_set_render_state(
     const D3DRS8_SOFTWAREVERTEXPROCESSING: u32 = 153;
     const D3DRS8_PATCHSEGMENTS: u32 = 164;
 
-    unsafe {
-        match state {
-            // th07/th08 unconditionally set this to 0 (disabled) at initialization, so dropping this is fine.
-            D3DRS8_EDGEANTIALIAS => {
-                debug!(kind = "d3d8_render_state_dropped", state, value);
-                D3D_OK
-            }
-            // LINEPATTERN and ZVISIBLE have no D3D9 equivalent. ZBIAS has only a lossy heuristic translation to DEPTHBIAS, so it's dropped.
-            D3DRS8_LINEPATTERN | D3DRS8_ZVISIBLE | D3DRS8_ZBIAS => {
-                warn!(kind = "d3d8_render_state_dropped", state, value);
-                D3D_OK
-            }
-            D3DRS8_SOFTWAREVERTEXPROCESSING => {
-                let p = dev9(this);
-                (dev9_vt(p).base__.SetSoftwareVertexProcessing)(p, BOOL(value.cast_signed()))
-            }
-            D3DRS8_PATCHSEGMENTS => {
-                let p = dev9(this);
-                (dev9_vt(p).base__.SetNPatchMode)(p, f32::from_bits(value))
-            }
-            _ => {
-                let p = dev9(this);
+    match state {
+        // th07/th08 unconditionally set this to 0 (disabled) at initialization, so dropping this is fine.
+        D3DRS8_EDGEANTIALIAS => {
+            debug!(kind = "d3d8_render_state_dropped", state, value);
+            D3D_OK
+        }
+        // LINEPATTERN and ZVISIBLE have no D3D9 equivalent. ZBIAS has only a lossy heuristic translation to DEPTHBIAS, so it's dropped.
+        D3DRS8_LINEPATTERN | D3DRS8_ZVISIBLE | D3DRS8_ZBIAS => {
+            warn!(kind = "d3d8_render_state_dropped", state, value);
+            D3D_OK
+        }
+        D3DRS8_SOFTWAREVERTEXPROCESSING => {
+            let p = unsafe { dev9(this) };
+            unsafe { (dev9_vt(p).base__.SetSoftwareVertexProcessing)(p, BOOL(value.cast_signed())) }
+        }
+        D3DRS8_PATCHSEGMENTS => {
+            let p = unsafe { dev9(this) };
+            unsafe { (dev9_vt(p).base__.SetNPatchMode)(p, f32::from_bits(value)) }
+        }
+        _ => {
+            let p = unsafe { dev9(this) };
+            unsafe {
                 (dev9_vt(p).base__.SetRenderState)(
                     p,
                     D3DRENDERSTATETYPE(state.cast_signed()),
@@ -1754,17 +1729,17 @@ unsafe extern "system" fn device8_set_texture_stage_state(
     ty: u32,
     value: u32,
 ) -> HRESULT {
-    unsafe {
-        let p = dev9(this);
-        match tss_to_sampler_state(ty) {
-            Some(sampler) => (dev9_vt(p).base__.SetSamplerState)(p, stage, sampler, value),
-            None => (dev9_vt(p).base__.SetTextureStageState)(
+    let p = unsafe { dev9(this) };
+    match tss_to_sampler_state(ty) {
+        Some(sampler) => unsafe { (dev9_vt(p).base__.SetSamplerState)(p, stage, sampler, value) },
+        None => unsafe {
+            (dev9_vt(p).base__.SetTextureStageState)(
                 p,
                 stage,
                 D3DTEXTURESTAGESTATETYPE(ty.cast_signed()),
                 value,
-            ),
-        }
+            )
+        },
     }
 }
 
@@ -1869,15 +1844,13 @@ static D3D8_VTBL: D3d8Vtbl = D3d8Vtbl {
 };
 
 unsafe extern "system" fn d3d8_release(this: *mut c_void) -> u32 {
-    unsafe {
-        let Some(n) = com_header_release(this, "d3d8") else {
-            return 0;
-        };
-        if n == 0 {
-            info!(kind = "d3d8_released");
-        }
-        n
+    let Some(n) = (unsafe { com_header_release(this, "d3d8") }) else {
+        return 0;
+    };
+    if n == 0 {
+        info!(kind = "d3d8_released");
     }
+    n
 }
 
 stub8!(d3d8_register_software_device, "IDirect3D8::RegisterSoftwareDevice"(_init_fn: *mut c_void) -> D3D_OK);
@@ -1937,21 +1910,21 @@ unsafe extern "system" fn d3d8_create_device(
     pp8: *mut D3DPresentParameters8,
     out: *mut *mut c_void,
 ) -> HRESULT {
-    unsafe {
-        if out.is_null() {
-            return D3DERR_INVALIDCALL;
-        }
-        *out = null_mut();
+    if out.is_null() {
+        return D3DERR_INVALIDCALL;
+    }
+    unsafe { *out = null_mut() };
 
-        let Some(pp8_ref) = pp8.as_mut() else {
-            return D3DERR_INVALIDCALL;
-        };
-        info!(kind = "d3d8_create_device", pp8 = ?pp8_ref);
+    let Some(pp8_ref) = (unsafe { pp8.as_mut() }) else {
+        return D3DERR_INVALIDCALL;
+    };
+    info!(kind = "d3d8_create_device", pp8 = ?pp8_ref);
 
-        let d = d3d8(this);
-        let mut pp9 = convert_present_params(pp8_ref);
-        let mut dev9_ptr = null_mut();
-        let hr = (d3d9_vt(d.inner()).base__.CreateDevice)(
+    let d = unsafe { d3d8(this) };
+    let mut pp9 = convert_present_params(pp8_ref);
+    let mut dev9_ptr = null_mut();
+    let hr = unsafe {
+        (d3d9_vt(d.inner()).base__.CreateDevice)(
             d.inner(),
             adapter,
             device_type,
@@ -1959,53 +1932,55 @@ unsafe extern "system" fn d3d8_create_device(
             behavior_flags,
             &raw mut pp9,
             &raw mut dev9_ptr,
+        )
+    };
+    if hr.is_err() {
+        warn!(kind = "d3d8_create_device_failed", hr = %fmt_hr!(hr));
+        return hr;
+    }
+    if dev9_ptr.is_null() {
+        warn!(
+            kind = "d3d9_null_on_success",
+            call = "IDirect3D9::CreateDevice",
         );
-        if hr.is_err() {
-            warn!(kind = "d3d8_create_device_failed", hr = %fmt_hr!(hr));
-            return hr;
-        }
-        if dev9_ptr.is_null() {
-            warn!(
-                kind = "d3d9_null_on_success",
-                call = "IDirect3D9::CreateDevice",
-            );
-            warn!(kind = "d3d8_create_device_failed", hr = %fmt_hr!(D3DERR_INVALIDCALL));
-            return D3DERR_INVALIDCALL;
-        }
+        warn!(kind = "d3d8_create_device_failed", hr = %fmt_hr!(D3DERR_INVALIDCALL));
+        return D3DERR_INVALIDCALL;
+    }
 
-        sync_present_params_back(pp8_ref, &pp9);
+    sync_present_params_back(pp8_ref, &pp9);
 
-        // We use a real reference on the parent for the device's lifetime
-        // so doing `CreateDevice(...); parent->Release()` can't leave `GetDirect3D` dangling.
-        wrap_add_ref(this);
-        let device = Box::into_raw(Box::new(Device8 {
+    // We use a real reference on the parent for the device's lifetime
+    // so doing `CreateDevice(...); parent->Release()` can't leave `GetDirect3D` dangling.
+    unsafe { wrap_add_ref(this) };
+    let device = Box::into_raw(Box::new(Device8 {
+        header: ComHeader {
+            vtbl: (&raw const DEVICE8_VTBL).cast(),
+            refs: Cell::new(1),
+            inner: Cell::new(dev9_ptr),
+        },
+        parent: this.cast(),
+        back_buffer: Resource8 {
             header: ComHeader {
-                vtbl: (&raw const DEVICE8_VTBL).cast(),
-                refs: Cell::new(1),
-                inner: Cell::new(dev9_ptr),
+                vtbl: (&raw const SURFACE8_VTBL).cast(),
+                refs: Cell::new(0),
+                inner: Cell::new(null_mut()),
             },
-            parent: this.cast(),
-            back_buffer: Resource8 {
-                header: ComHeader {
-                    vtbl: (&raw const SURFACE8_VTBL).cast(),
-                    refs: Cell::new(0),
-                    inner: Cell::new(null_mut()),
-                },
-                // Set below; the backpointer only exists once the box has an address.
-                device: null_mut(),
-                internal_flags: D3D8_INTERNAL_LOCKABLE,
-            },
-        }));
+            // Set below; the backpointer only exists once the box has an address.
+            device: null_mut(),
+            internal_flags: D3D8_INTERNAL_LOCKABLE,
+        },
+    }));
+    unsafe {
         (*device).back_buffer.device = device;
         *out = device.cast();
-
-        info!(
-            kind = "d3d8_device_created",
-            device8 = format_args!("{device:p}"),
-            device9 = format_args!("{dev9_ptr:p}"),
-        );
-        hr
     }
+
+    info!(
+        kind = "d3d8_device_created",
+        device8 = format_args!("{device:p}"),
+        device9 = format_args!("{dev9_ptr:p}"),
+    );
+    hr
 }
 
 iat_hook! {
@@ -2029,9 +2004,7 @@ pub fn set_pre_create_fn(f: fn()) {
 /// # Safety
 /// `host` must be a loaded module handle.
 pub unsafe fn install(host: HMODULE) {
-    unsafe {
-        REAL_DIRECT3D_CREATE8.install(host, hook_direct3dcreate8);
-    }
+    unsafe { REAL_DIRECT3D_CREATE8.install(host, hook_direct3dcreate8) };
 }
 
 /// Returns a patch that rewrites a `Direct3DCreate8` call site to a direct call to our hook, bypassing any downstream IAT hook.
@@ -2061,36 +2034,34 @@ const SHIM_POLICY: PresentPolicy = PresentPolicy {
 };
 
 unsafe extern "system" fn hook_direct3dcreate8(sdk_version: u32) -> *mut c_void {
-    unsafe {
-        if let Some(f) = PRE_CREATE_FN.get() {
-            f();
-        }
-
-        let d3d9 = create_hooked_d3d9_with(D3D_SDK_VERSION, SHIM_POLICY);
-        if d3d9.is_null() {
-            warn!(
-                kind = "d3d8_init_failed",
-                sdk_version = format_args!("{sdk_version:#x}"),
-            );
-            return null_mut();
-        }
-
-        let wrapper = Box::into_raw(Box::new(D3d8 {
-            header: ComHeader {
-                vtbl: (&raw const D3D8_VTBL).cast(),
-                refs: Cell::new(1),
-                inner: Cell::new(d3d9),
-            },
-        }));
-
-        info!(
-            kind = "d3d8_init",
-            sdk_version = format_args!("{sdk_version:#x}"),
-            wrapper = format_args!("{wrapper:p}"),
-        );
-
-        wrapper.cast()
+    if let Some(f) = PRE_CREATE_FN.get() {
+        f();
     }
+
+    let d3d9 = unsafe { create_hooked_d3d9_with(D3D_SDK_VERSION, SHIM_POLICY) };
+    if d3d9.is_null() {
+        warn!(
+            kind = "d3d8_init_failed",
+            sdk_version = format_args!("{sdk_version:#x}"),
+        );
+        return null_mut();
+    }
+
+    let wrapper = Box::into_raw(Box::new(D3d8 {
+        header: ComHeader {
+            vtbl: (&raw const D3D8_VTBL).cast(),
+            refs: Cell::new(1),
+            inner: Cell::new(d3d9),
+        },
+    }));
+
+    info!(
+        kind = "d3d8_init",
+        sdk_version = format_args!("{sdk_version:#x}"),
+        wrapper = format_args!("{wrapper:p}"),
+    );
+
+    wrapper.cast()
 }
 
 #[cfg(test)]
@@ -2230,18 +2201,14 @@ mod tests {
     }
 
     unsafe extern "system" fn mock_com_add_ref(this: *mut c_void) -> u32 {
-        unsafe {
-            let m = &*this.cast::<MockCom>();
-            m.adds.update(|n| n + 1);
-        }
+        let m = unsafe { &*this.cast::<MockCom>() };
+        m.adds.update(|n| n + 1);
         1
     }
 
     unsafe extern "system" fn mock_com_release(this: *mut c_void) -> u32 {
-        unsafe {
-            let m = &*this.cast::<MockCom>();
-            m.releases.update(|n| n + 1);
-        }
+        let m = unsafe { &*this.cast::<MockCom>() };
+        m.releases.update(|n| n + 1);
         0
     }
 
@@ -2318,29 +2285,30 @@ mod tests {
 
     #[test]
     fn embedded_back_buffer_lifecycle() {
-        unsafe {
-            let dev9 = MockCom::new();
-            let surf_a = MockCom::new();
-            let surf_b = MockCom::new();
+        let dev9 = MockCom::new();
+        let surf_a = MockCom::new();
+        let surf_b = MockCom::new();
 
-            // Mirrors construction in `d3d8_create_device` with a mock D3D9 device.
-            let device = Box::into_raw(Box::new(Device8 {
+        // Mirrors construction in `d3d8_create_device` with a mock D3D9 device.
+        let device = Box::into_raw(Box::new(Device8 {
+            header: ComHeader {
+                vtbl: (&raw const DEVICE8_VTBL).cast(),
+                refs: Cell::new(1),
+                inner: Cell::new(dev9.ptr()),
+            },
+            parent: null_mut(),
+            back_buffer: Resource8 {
                 header: ComHeader {
-                    vtbl: (&raw const DEVICE8_VTBL).cast(),
-                    refs: Cell::new(1),
-                    inner: Cell::new(dev9.ptr()),
+                    vtbl: (&raw const SURFACE8_VTBL).cast(),
+                    refs: Cell::new(0),
+                    inner: Cell::new(null_mut()),
                 },
-                parent: null_mut(),
-                back_buffer: Resource8 {
-                    header: ComHeader {
-                        vtbl: (&raw const SURFACE8_VTBL).cast(),
-                        refs: Cell::new(0),
-                        inner: Cell::new(null_mut()),
-                    },
-                    device: null_mut(),
-                    internal_flags: D3D8_INTERNAL_LOCKABLE,
-                },
-            }));
+                device: null_mut(),
+                internal_flags: D3D8_INTERNAL_LOCKABLE,
+            },
+        }));
+
+        unsafe {
             (*device).back_buffer.device = device;
 
             let wrapper = (&raw const (*device).back_buffer).cast_mut().cast();

@@ -113,9 +113,7 @@ unsafe fn write_minidump(info: *const EXCEPTION_POINTERS, label: &str) -> Option
             null(),
         )
     };
-    unsafe {
-        CloseHandle(file);
-    }
+    unsafe { CloseHandle(file) };
 
     if ok != 0 { Some(path) } else { None }
 }

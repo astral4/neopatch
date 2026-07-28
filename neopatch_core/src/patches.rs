@@ -114,15 +114,13 @@ impl PatchSite {
     /// `self.addr` must be a valid, committed, readable code address with protection that `VirtualProtect` can modify.
     #[must_use]
     unsafe fn apply(&self) -> bool {
-        unsafe {
-            let mut buf = [0u8; MAX_PATCH_LEN];
-            let written = self.written_bytes(&mut buf);
-            if !patch_bytes(self.addr, written) {
-                return false;
-            }
-            self.verify(written);
-            true
+        let mut buf = [0u8; MAX_PATCH_LEN];
+        let written = self.written_bytes(&mut buf);
+        if !unsafe { patch_bytes(self.addr, written) } {
+            return false;
         }
+        unsafe { self.verify(written) };
+        true
     }
 
     /// Reports whether the expected bytes currently hold at the site.
@@ -304,20 +302,18 @@ fn bytes_hex(bs: &[u8]) -> String {
 /// Writes `src` over the bytes at `addr`. Returns whether the protection window could be opened.
 #[must_use]
 unsafe fn patch_bytes(addr: usize, src: &[u8]) -> bool {
+    let dst = with_exposed_provenance_mut(addr);
     unsafe {
-        let dst = with_exposed_provenance_mut(addr);
         with_writable(dst, src.len(), |p| {
             copy_nonoverlapping(src.as_ptr(), p, src.len());
         })
-        .is_some()
     }
+    .is_some()
 }
 
 /// Reads `len` bytes at `addr` into `buf` and returns the bytes.
 unsafe fn read_at(addr: usize, len: usize, buf: &mut [u8; MAX_PATCH_LEN]) -> &[u8] {
-    unsafe {
-        copy_nonoverlapping(with_exposed_provenance(addr), buf.as_mut_ptr(), len);
-    }
+    unsafe { copy_nonoverlapping(with_exposed_provenance(addr), buf.as_mut_ptr(), len) };
     &buf[..len]
 }
 

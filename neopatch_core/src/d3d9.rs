@@ -266,9 +266,7 @@ iat_hook! {
 /// # Safety
 /// `host` must be a loaded module handle.
 pub unsafe fn install(host: HMODULE) {
-    unsafe {
-        REAL_DIRECT3D_CREATE9.install(host, create_hooked_d3d9);
-    }
+    unsafe { REAL_DIRECT3D_CREATE9.install(host, create_hooked_d3d9) };
 }
 
 /// Returns a patch that rewrites a `Direct3DCreate9` call site to a 5-byte direct call to our hook.
@@ -325,39 +323,37 @@ pub(crate) unsafe fn create_hooked_d3d9_with(
         status = if first { "OK" } else { "ALREADY_SET" },
     );
 
-    unsafe {
-        // The Ex object's first 17 vtable slots are the `IDirect3D9` vtable,
-        // so the game can keep using the returned pointer as plain `IDirect3D9` while we get the Ex methods.
-        let ex = match Direct3DCreate9Ex(sdk_version) {
-            Ok(ex) => ex,
-            Err(e) => {
-                warn!(
-                    kind = "d3d9_init_failed",
-                    sdk_version = format_args!("{sdk_version:#x}"),
-                    hr = %fmt_hr!(e.code()),
-                );
-                return null_mut();
-            }
-        };
-        // `into_raw` transfers the ref to the game without `Release`.
-        let p_ex = ex.into_raw();
-        let Some(p_ex_nn) = NonNull::new(p_ex) else {
+    // The Ex object's first 17 vtable slots are the `IDirect3D9` vtable,
+    // so the game can keep using the returned pointer as plain `IDirect3D9` while we get the Ex methods.
+    let ex = match unsafe { Direct3DCreate9Ex(sdk_version) } {
+        Ok(ex) => ex,
+        Err(e) => {
+            warn!(
+                kind = "d3d9_init_failed",
+                sdk_version = format_args!("{sdk_version:#x}"),
+                hr = %fmt_hr!(e.code()),
+            );
             return null_mut();
-        };
-        install_d3d9_hooks(p_ex_nn);
-        info!(kind = "d3d9_init", p_ex = format_args!("{p_ex:p}"));
-        p_ex
-    }
+        }
+    };
+    // `into_raw` transfers the ref to the game without `Release`.
+    let p_ex = ex.into_raw();
+    let Some(p_ex_nn) = NonNull::new(p_ex) else {
+        return null_mut();
+    };
+    unsafe { install_d3d9_hooks(p_ex_nn) };
+    info!(kind = "d3d9_init", p_ex = format_args!("{p_ex:p}"));
+    p_ex
 }
 
 unsafe fn install_d3d9_hooks(d3d9_ex: NonNull<c_void>) {
-    unsafe {
-        let vtbl = *d3d9_ex.as_ptr().cast();
-        let Some(vtbl) = NonNull::new(vtbl) else {
-            warn!(kind = "d3d9_vtbl_null", p_ex = format_args!("{d3d9_ex:p}"));
-            return;
-        };
+    let vtbl = unsafe { *d3d9_ex.as_ptr().cast() };
+    let Some(vtbl) = NonNull::new(vtbl) else {
+        warn!(kind = "d3d9_vtbl_null", p_ex = format_args!("{d3d9_ex:p}"));
+        return;
+    };
 
+    unsafe {
         capture_slot(
             vtbl,
             vtable_field!(IDirect3D9Ex_Vtbl, CreateDeviceEx),
@@ -383,8 +379,10 @@ unsafe fn install_d3d9_hooks(d3d9_ex: NonNull<c_void>) {
             vtable_field!(IDirect3D9Ex_Vtbl, base__.GetAdapterMonitor),
             &REAL_GET_ADAPTER_MONITOR,
         );
+    }
 
-        let result = install_vtable(vtbl, |scope| {
+    let result = unsafe {
+        install_vtable(vtbl, |scope| {
             // `hook_create_device` routes to `CreateDeviceEx` via `REAL_CREATE_DEVICE_EX`
             // rather than chaining through to the displaced `CreateDevice`.
             scope.redirect(
@@ -399,9 +397,9 @@ unsafe fn install_d3d9_hooks(d3d9_ex: NonNull<c_void>) {
                 "IDirect3D9::CheckDeviceFormat",
                 hook_check_device_format,
             );
-        });
-        info!(kind = "d3d9_hooks_installed", protect_ok = result.is_some());
-    }
+        })
+    };
+    info!(kind = "d3d9_hooks_installed", protect_ok = result.is_some());
 }
 
 struct PresentParams {
@@ -470,25 +468,23 @@ unsafe fn prep_present_params(
     desktop_mode: Option<D3DDISPLAYMODEEX>,
     upgrade_16bit_back_buffer: bool,
 ) -> PresentParams {
-    unsafe {
-        let Some(p) = pp.as_mut() else {
-            return PresentParams::empty();
-        };
-        let before = *p;
-        rewrite_present_params(p, upgrade_16bit_back_buffer);
-        let display_mode = if p.Windowed.0 == 0 {
-            let cfg = CONFIG.get().unwrap();
-            apply_refresh_override(p, adapter, cfg.display.refresh_rate, desktop_mode);
-            p.FullScreen_RefreshRateInHz = mode_refresh_rate(p, adapter, desktop_mode);
-            Some(build_display_mode_ex(p))
-        } else {
-            None
-        };
-        PresentParams {
-            before: Some(before),
-            after: Some(*p),
-            display_mode,
-        }
+    let Some(p) = (unsafe { pp.as_mut() }) else {
+        return PresentParams::empty();
+    };
+    let before = *p;
+    rewrite_present_params(p, upgrade_16bit_back_buffer);
+    let display_mode = if p.Windowed.0 == 0 {
+        let cfg = CONFIG.get().unwrap();
+        unsafe { apply_refresh_override(p, adapter, cfg.display.refresh_rate, desktop_mode) };
+        p.FullScreen_RefreshRateInHz = unsafe { mode_refresh_rate(p, adapter, desktop_mode) };
+        Some(build_display_mode_ex(p))
+    } else {
+        None
+    };
+    PresentParams {
+        before: Some(before),
+        after: Some(*p),
+        display_mode,
     }
 }
 
@@ -921,20 +917,21 @@ unsafe fn create_device_once(
     returned_device: *mut *mut c_void,
     attempt: u32,
 ) -> (HRESULT, *mut c_void) {
-    unsafe {
-        info!(
-            kind = "create_device_call",
-            attempt,
-            this = format_args!("{:p}", adapter.raw()),
-            adapter = adapter.ordinal,
-            device_type = ?device_type,
-            behavior_flags_in = format_args!("{behavior_flags_in:#x}"),
-            behavior_flags = format_args!("{behavior_flags:#x}"),
-            focus_window = format_args!("{:p}", focus_window.0),
-            pp = ?pp.as_ref(),
-            display_mode = if display_mode_ptr.is_null() { "null" } else { "set" },
-        );
-        let hr = call_real_create_device_ex(
+    let pp_dbg = unsafe { pp.as_ref() };
+    info!(
+        kind = "create_device_call",
+        attempt,
+        this = format_args!("{:p}", adapter.raw()),
+        adapter = adapter.ordinal,
+        device_type = ?device_type,
+        behavior_flags_in = format_args!("{behavior_flags_in:#x}"),
+        behavior_flags = format_args!("{behavior_flags:#x}"),
+        focus_window = format_args!("{:p}", focus_window.0),
+        pp = ?pp_dbg,
+        display_mode = if display_mode_ptr.is_null() { "null" } else { "set" },
+    );
+    let hr = unsafe {
+        call_real_create_device_ex(
             adapter.raw(),
             adapter.ordinal,
             device_type,
@@ -943,20 +940,20 @@ unsafe fn create_device_once(
             pp,
             display_mode_ptr,
             returned_device,
-        );
-        let dev: *mut c_void = if returned_device.is_null() {
-            null_mut()
-        } else {
-            *returned_device
-        };
-        info!(
-            kind = "create_device_result",
-            attempt,
-            hr = fmt_hr!(hr),
-            device = format_args!("{dev:p}"),
-        );
-        (hr, dev)
-    }
+        )
+    };
+    let dev: *mut c_void = if returned_device.is_null() {
+        null_mut()
+    } else {
+        unsafe { *returned_device }
+    };
+    info!(
+        kind = "create_device_result",
+        attempt,
+        hr = fmt_hr!(hr),
+        device = format_args!("{dev:p}"),
+    );
+    (hr, dev)
 }
 
 unsafe extern "system" fn hook_create_device(
@@ -969,21 +966,21 @@ unsafe extern "system" fn hook_create_device(
     returned_device: *mut *mut c_void,
 ) -> HRESULT {
     let tok = MainToken::new();
-    unsafe {
-        on_device_creating(&tok);
+    on_device_creating(&tok);
 
-        let behavior_flags_in = behavior_flags;
-        let behavior_flags = rewrite_behavior_flags(behavior_flags);
+    let behavior_flags_in = behavior_flags;
+    let behavior_flags = rewrite_behavior_flags(behavior_flags);
 
-        let Some(adapter) = Adapter::from_hook(&this, adapter) else {
-            warn!(kind = "d3d9_null_this", call = "IDirect3D9::CreateDevice");
-            return D3DERR_INVALIDCALL;
-        };
+    let Some(adapter) = (unsafe { Adapter::from_hook(&this, adapter) }) else {
+        warn!(kind = "d3d9_null_this", call = "IDirect3D9::CreateDevice");
+        return D3DERR_INVALIDCALL;
+    };
 
-        let desktop_before = sample_for_degradation_check(adapter, pp);
+    let desktop_before = unsafe { sample_for_degradation_check(adapter, pp) };
 
-        let mut dev: *mut c_void = null_mut();
-        let (hr, prep) = run_with_present_failsafe(
+    let mut dev: *mut c_void = null_mut();
+    let (hr, prep) = unsafe {
+        run_with_present_failsafe(
             pp,
             adapter,
             desktop_before,
@@ -1005,24 +1002,26 @@ unsafe extern "system" fn hook_create_device(
                 dev = d;
                 hr
             },
-        );
+        )
+    };
 
-        if hr.is_ok() {
-            let Some(dev) = NonNull::new(dev) else {
-                warn!(
-                    kind = "d3d9_null_on_success",
-                    call = "IDirect3D9Ex::CreateDeviceEx",
-                    out_param = if returned_device.is_null() {
-                        "caller_null"
-                    } else {
-                        "written_null"
-                    },
-                );
-                return D3DERR_INVALIDCALL;
-            };
+    if hr.is_ok() {
+        let Some(dev) = NonNull::new(dev) else {
+            warn!(
+                kind = "d3d9_null_on_success",
+                call = "IDirect3D9Ex::CreateDeviceEx",
+                out_param = if returned_device.is_null() {
+                    "caller_null"
+                } else {
+                    "written_null"
+                },
+            );
+            return D3DERR_INVALIDCALL;
+        };
 
-            // Apparently D3D9Ex breaks the window style on `CreateDeviceEx`.
-            // OILP's `CreateDevice_hook` applies the same `SWP_SHOWWINDOW` fix.
+        // Apparently D3D9Ex breaks the window style on `CreateDeviceEx`.
+        // OILP's `CreateDevice_hook` applies the same `SWP_SHOWWINDOW` fix.
+        unsafe {
             SetWindowPos(
                 focus_window.0,
                 null_mut(),
@@ -1035,13 +1034,13 @@ unsafe extern "system" fn hook_create_device(
 
             install_device_hooks(dev);
             post_device_alive(&tok, dev, &prep);
-
-            if let Some(before) = desktop_before {
-                warn_if_exclusive_degraded(adapter, before, &prep);
-            }
         }
-        hr
+
+        if let Some(before) = desktop_before {
+            unsafe { warn_if_exclusive_degraded(adapter, before, &prep) };
+        }
     }
+    hr
 }
 
 /// Adds `D3DCREATE_MULTITHREADED`.
@@ -1051,19 +1050,19 @@ fn rewrite_behavior_flags(flags: u32) -> u32 {
 
 /// Reads the display mode of `adapter`. Returns `None` on failure.
 unsafe fn sample_adapter_display_mode(adapter: Adapter<'_>) -> Option<D3DDISPLAYMODEEX> {
-    unsafe {
-        let mut current = D3DDISPLAYMODEEX {
-            Size: D3DDISPLAYMODEEX_SIZE,
-            ..D3DDISPLAYMODEEX::default()
-        };
-        let hr = call_real_get_adapter_display_mode_ex(
+    let mut current = D3DDISPLAYMODEEX {
+        Size: D3DDISPLAYMODEEX_SIZE,
+        ..D3DDISPLAYMODEEX::default()
+    };
+    let hr = unsafe {
+        call_real_get_adapter_display_mode_ex(
             adapter.raw(),
             adapter.ordinal,
             &raw mut current,
             null_mut(),
-        );
-        if hr.is_ok() { Some(current) } else { None }
-    }
+        )
+    };
+    if hr.is_ok() { Some(current) } else { None }
 }
 
 /// Captures the adapter mode before a `CreateDevice` or `Reset` call, but only when exclusive fullscreen is requested
@@ -1136,16 +1135,16 @@ unsafe extern "system" fn hook_check_device_format(
     rtype: D3DRESOURCETYPE,
     check_format: D3DFORMAT,
 ) -> HRESULT {
-    unsafe {
-        let forwarded_adapter_fmt = if adapter_format == D3DFMT_A8R8G8B8 {
-            D3DFMT_X8R8G8B8
-        } else {
-            adapter_format
-        };
+    let forwarded_adapter_fmt = if adapter_format == D3DFMT_A8R8G8B8 {
+        D3DFMT_X8R8G8B8
+    } else {
+        adapter_format
+    };
 
-        let substituted = forwarded_adapter_fmt != adapter_format;
+    let substituted = forwarded_adapter_fmt != adapter_format;
 
-        let hr = call_real_check_device_format(
+    let hr = unsafe {
+        call_real_check_device_format(
             this,
             adapter,
             device_type,
@@ -1153,42 +1152,42 @@ unsafe extern "system" fn hook_check_device_format(
             usage,
             rtype,
             check_format,
-        );
+        )
+    };
 
-        let forwarded_format = if substituted {
-            format_name(forwarded_adapter_fmt)
-        } else {
-            ""
-        };
+    let forwarded_format = if substituted {
+        format_name(forwarded_adapter_fmt)
+    } else {
+        ""
+    };
 
-        log_at!(substituted => info / debug,
-            kind = "check_device_format",
-            adapter,
-            device_type = device_type.0,
-            adapter_format = format_name(adapter_format),
-            adapter_format_n = adapter_format.0,
-            substituted,
-            forwarded_format,
-            forwarded_format_n = forwarded_adapter_fmt.0,
-            usage = format_args!("{usage:#x}"),
-            rtype = rtype.0,
-            check_format = format_name(check_format),
-            check_format_n = check_format.0,
-            hr = fmt_hr!(hr),
-        );
+    log_at!(substituted => info / debug,
+        kind = "check_device_format",
+        adapter,
+        device_type = device_type.0,
+        adapter_format = format_name(adapter_format),
+        adapter_format_n = adapter_format.0,
+        substituted,
+        forwarded_format,
+        forwarded_format_n = forwarded_adapter_fmt.0,
+        usage = format_args!("{usage:#x}"),
+        rtype = rtype.0,
+        check_format = format_name(check_format),
+        check_format_n = check_format.0,
+        hr = fmt_hr!(hr),
+    );
 
-        hr
-    }
+    hr
 }
 
 unsafe fn install_device_hooks(dev: NonNull<c_void>) {
-    unsafe {
-        let vtbl = *dev.as_ptr().cast();
-        let Some(vtbl) = NonNull::new(vtbl) else {
-            warn!(kind = "device_vtbl_null", dev = format_args!("{dev:p}"));
-            return;
-        };
+    let vtbl = unsafe { *dev.as_ptr().cast() };
+    let Some(vtbl) = NonNull::new(vtbl) else {
+        warn!(kind = "device_vtbl_null", dev = format_args!("{dev:p}"));
+        return;
+    };
 
+    unsafe {
         capture_slot(
             vtbl,
             vtable_field!(IDirect3DDevice9Ex_Vtbl, ResetEx),
@@ -1204,8 +1203,10 @@ unsafe fn install_device_hooks(dev: NonNull<c_void>) {
             vtable_field!(IDirect3DDevice9Ex_Vtbl, SetGPUThreadPriority),
             &REAL_SET_GPU_THREAD_PRIORITY,
         );
+    }
 
-        let result = install_vtable(vtbl, |scope| {
+    let result = unsafe {
+        install_vtable(vtbl, |scope| {
             scope.intercept(
                 &REAL_RESET,
                 vtable_field!(IDirect3DDevice9Ex_Vtbl, base__.Reset),
@@ -1230,32 +1231,30 @@ unsafe fn install_device_hooks(dev: NonNull<c_void>) {
                 "CreateVertexBuffer",
                 hook_create_vertex_buffer,
             );
-        });
-        info!(
-            kind = "d3d9_device_hooks_installed",
-            protect_ok = result.is_some()
-        );
-    }
+        })
+    };
+    info!(
+        kind = "d3d9_device_hooks_installed",
+        protect_ok = result.is_some()
+    );
 }
 
 /// `SetMaximumFrameLatency(1)` caps the GPU input queue at 1 (default 3) so frames spend less time enqueued before display,
 /// shaving up to two frames of end-to-end latency. `SetGPUThreadPriority(7)` raises the device's WDDM GPU-scheduling priority
 /// so its command submissions are preferred over other processes' GPU work.
 unsafe fn apply_device_ex_tunables(dev: NonNull<c_void>) {
-    unsafe {
-        let latency_hr = call_real_set_max_frame_latency(dev.as_ptr(), 1);
-        info!(
-            kind = "set_max_frame_latency",
-            value = 1,
-            hr = %fmt_hr!(latency_hr),
-        );
-        let gpu_pri_hr = call_real_set_gpu_thread_priority(dev.as_ptr(), 7);
-        info!(
-            kind = "set_gpu_thread_priority",
-            value = 7,
-            hr = %fmt_hr!(gpu_pri_hr),
-        );
-    }
+    let latency_hr = unsafe { call_real_set_max_frame_latency(dev.as_ptr(), 1) };
+    info!(
+        kind = "set_max_frame_latency",
+        value = 1,
+        hr = %fmt_hr!(latency_hr),
+    );
+    let gpu_pri_hr = unsafe { call_real_set_gpu_thread_priority(dev.as_ptr(), 7) };
+    info!(
+        kind = "set_gpu_thread_priority",
+        value = 7,
+        hr = %fmt_hr!(gpu_pri_hr),
+    );
 }
 
 /// Re-applies the device tunables, since D3D9Ex preserves them across `Reset` but a translation layer might not.
@@ -1358,24 +1357,25 @@ unsafe fn reset_once(
     use_reset_ex: bool,
     attempt: u32,
 ) -> HRESULT {
-    unsafe {
-        info!(
-            kind = "reset_call",
-            attempt,
-            this = format_args!("{this:p}"),
-            pp = ?pp.as_ref(),
-            display_mode = if display_mode_ptr.is_null() { "null" } else { "set" },
-            path = if use_reset_ex { "ResetEx" } else { "Reset" },
-        );
-        // Plain `Reset` on Alt+Enter crashed for a tester, but `ResetEx` didn't.
-        let hr = if use_reset_ex {
+    let pp_dbg = unsafe { pp.as_ref() };
+    info!(
+        kind = "reset_call",
+        attempt,
+        this = format_args!("{this:p}"),
+        pp = ?pp_dbg,
+        display_mode = if display_mode_ptr.is_null() { "null" } else { "set" },
+        path = if use_reset_ex { "ResetEx" } else { "Reset" },
+    );
+    // Plain `Reset` on Alt+Enter crashed for a tester, but `ResetEx` didn't.
+    let hr = unsafe {
+        if use_reset_ex {
             call_real_reset_ex(this, pp, display_mode_ptr)
         } else {
             call_real_reset(this, pp)
-        };
-        info!(kind = "reset_result", attempt, hr = fmt_hr!(hr));
-        hr
-    }
+        }
+    };
+    info!(kind = "reset_result", attempt, hr = fmt_hr!(hr));
+    hr
 }
 
 /// The parent `IDirect3D9Ex` and adapter ordinal of a live device.
@@ -1389,21 +1389,17 @@ impl DeviceParent {
     /// # Safety
     /// `dev` must be a live `IDirect3DDevice9Ex`.
     unsafe fn new(dev: *mut c_void) -> Self {
-        unsafe {
-            let dev = IDirect3DDevice9Ex::from_raw_borrowed(&dev)
-                .expect("hook_reset called on a null device");
-            let d3d9 = dev
-                .GetDirect3D()
-                .expect("GetDirect3D failed on a live device");
+        let dev = unsafe { IDirect3DDevice9Ex::from_raw_borrowed(&dev) }
+            .expect("hook_reset called on a null device");
+        let d3d9 = unsafe { dev.GetDirect3D() }.expect("GetDirect3D failed on a live device");
 
-            let mut cp = D3DDEVICE_CREATION_PARAMETERS::default();
-            dev.GetCreationParameters(&raw mut cp)
-                .expect("GetCreationParameters failed on a live device");
+        let mut cp = D3DDEVICE_CREATION_PARAMETERS::default();
+        unsafe { dev.GetCreationParameters(&raw mut cp) }
+            .expect("GetCreationParameters failed on a live device");
 
-            Self {
-                d3d9,
-                adapter: cp.AdapterOrdinal,
-            }
+        Self {
+            d3d9,
+            adapter: cp.AdapterOrdinal,
         }
     }
 
@@ -1420,14 +1416,15 @@ impl DeviceParent {
 unsafe extern "system" fn hook_reset(this: *mut c_void, pp: *mut D3DPRESENT_PARAMETERS) -> HRESULT {
     let tok = MainToken::new();
     on_pre_reset(&tok);
-    unsafe {
-        let parent = DeviceParent::new(this);
-        let adapter = parent.adapter();
-        let desktop_before = sample_for_degradation_check(adapter, pp);
-        // We reapply refresh rate selection so runtime rate toggles take effect at the next `Reset`.
-        let use_reset_ex = REAL_RESET_EX.try_get().is_some();
 
-        let (hr, prep) = run_with_present_failsafe(
+    let parent = unsafe { DeviceParent::new(this) };
+    let adapter = parent.adapter();
+    let desktop_before = unsafe { sample_for_degradation_check(adapter, pp) };
+    // We reapply refresh rate selection so runtime rate toggles take effect at the next `Reset`.
+    let use_reset_ex = REAL_RESET_EX.try_get().is_some();
+
+    let (hr, prep) = unsafe {
+        run_with_present_failsafe(
             pp,
             adapter,
             desktop_before,
@@ -1437,18 +1434,18 @@ unsafe extern "system" fn hook_reset(this: *mut c_void, pp: *mut D3DPRESENT_PARA
             |display_mode_ptr, attempt| {
                 reset_once(this, pp, display_mode_ptr, use_reset_ex, attempt)
             },
-        );
+        )
+    };
 
-        if hr.is_ok() {
-            // SAFETY: `this` was already dereferenced by `call_real_reset` / `call_real_reset_ex` above.
-            let dev = NonNull::new_unchecked(this);
-            post_device_alive(&tok, dev, &prep);
-            if let Some(before) = desktop_before {
-                warn_if_exclusive_degraded(adapter, before, &prep);
-            }
+    if hr.is_ok() {
+        // SAFETY: `this` was already dereferenced by `call_real_reset` / `call_real_reset_ex` above.
+        let dev = unsafe { NonNull::new_unchecked(this) };
+        unsafe { post_device_alive(&tok, dev, &prep) };
+        if let Some(before) = desktop_before {
+            unsafe { warn_if_exclusive_degraded(adapter, before, &prep) };
         }
-        hr
     }
+    hr
 }
 
 /// Runs a `CreateDeviceEx` or `ResetEx` call with the refresh-override failsafe.
@@ -1570,22 +1567,20 @@ unsafe fn rollback_refresh_override(
     kind: &'static str,
     first_hr: HRESULT,
 ) -> *mut D3DDISPLAYMODEEX {
-    unsafe {
-        if let Some(clean) = prep.after {
-            // We discard any driver write-back from the failed attempt.
-            *pp = clean;
-        }
-        (*pp).FullScreen_RefreshRateInHz = pp_refresh;
-        prep.display_mode = Some(build_display_mode_ex(&*pp));
-        prep.after = Some(*pp);
-        warn!(
-            kind = kind,
-            from_hz = chosen_refresh,
-            to_hz = pp_refresh,
-            first_hr = fmt_hr!(first_hr),
-        );
-        prep.display_mode_ptr()
+    if let Some(clean) = prep.after {
+        // We discard any driver write-back from the failed attempt.
+        unsafe { *pp = clean };
     }
+    unsafe { (*pp).FullScreen_RefreshRateInHz = pp_refresh };
+    prep.display_mode = Some(unsafe { build_display_mode_ex(&*pp) });
+    prep.after = Some(unsafe { *pp });
+    warn!(
+        kind = kind,
+        from_hz = chosen_refresh,
+        to_hz = pp_refresh,
+        first_hr = fmt_hr!(first_hr),
+    );
+    prep.display_mode_ptr()
 }
 
 unsafe extern "system" fn hook_create_texture(
@@ -1599,11 +1594,11 @@ unsafe extern "system" fn hook_create_texture(
     pp_texture: *mut *mut c_void,
     p_shared_handle: *mut HANDLE,
 ) -> HRESULT {
-    unsafe {
-        let usage_orig = usage;
-        let pool_orig = pool;
-        translate_managed_pool(&mut pool, &mut usage);
-        let hr = call_real_create_texture(
+    let usage_orig = usage;
+    let pool_orig = pool;
+    translate_managed_pool(&mut pool, &mut usage);
+    let hr = unsafe {
+        call_real_create_texture(
             this,
             width,
             height,
@@ -1613,25 +1608,25 @@ unsafe extern "system" fn hook_create_texture(
             pool,
             pp_texture,
             p_shared_handle,
-        );
-        let returned = out_ptr(pp_texture);
+        )
+    };
+    let returned = unsafe { out_ptr(pp_texture) };
 
-        log_at!(hr.is_ok() => debug / warn,
-            kind = "create_texture",
-            width,
-            height,
-            levels,
-            format = ?format,
-            pool_in = ?pool_orig,
-            pool_out = ?pool,
-            usage_in = format_args!("{usage_orig:#x}"),
-            usage_out = format_args!("{usage:#x}"),
-            hr = fmt_hr!(hr),
-            ptr = format_args!("{returned:p}"),
-        );
+    log_at!(hr.is_ok() => debug / warn,
+        kind = "create_texture",
+        width,
+        height,
+        levels,
+        format = ?format,
+        pool_in = ?pool_orig,
+        pool_out = ?pool,
+        usage_in = format_args!("{usage_orig:#x}"),
+        usage_out = format_args!("{usage:#x}"),
+        hr = fmt_hr!(hr),
+        ptr = format_args!("{returned:p}"),
+    );
 
-        hr
-    }
+    hr
 }
 
 unsafe extern "system" fn hook_create_vertex_buffer(
@@ -1643,11 +1638,11 @@ unsafe extern "system" fn hook_create_vertex_buffer(
     pp_vertex_buffer: *mut *mut c_void,
     p_shared_handle: *mut HANDLE,
 ) -> HRESULT {
-    unsafe {
-        let usage_orig = usage;
-        let pool_orig = pool;
-        translate_managed_pool(&mut pool, &mut usage);
-        let hr = call_real_create_vertex_buffer(
+    let usage_orig = usage;
+    let pool_orig = pool;
+    translate_managed_pool(&mut pool, &mut usage);
+    let hr = unsafe {
+        call_real_create_vertex_buffer(
             this,
             length,
             usage,
@@ -1655,23 +1650,23 @@ unsafe extern "system" fn hook_create_vertex_buffer(
             pool,
             pp_vertex_buffer,
             p_shared_handle,
-        );
-        let returned = out_ptr(pp_vertex_buffer);
+        )
+    };
+    let returned = unsafe { out_ptr(pp_vertex_buffer) };
 
-        log_at!(hr.is_ok() => debug / warn,
-            kind = "create_vbuffer",
-            length,
-            fvf = format_args!("{fvf:#x}"),
-            pool_in = ?pool_orig,
-            pool_out = ?pool,
-            usage_in = format_args!("{usage_orig:#x}"),
-            usage_out = format_args!("{usage:#x}"),
-            hr = fmt_hr!(hr),
-            ptr = format_args!("{returned:p}"),
-        );
+    log_at!(hr.is_ok() => debug / warn,
+        kind = "create_vbuffer",
+        length,
+        fvf = format_args!("{fvf:#x}"),
+        pool_in = ?pool_orig,
+        pool_out = ?pool,
+        usage_in = format_args!("{usage_orig:#x}"),
+        usage_out = format_args!("{usage:#x}"),
+        hr = fmt_hr!(hr),
+        ptr = format_args!("{returned:p}"),
+    );
 
-        hr
-    }
+    hr
 }
 
 #[cfg(test)]

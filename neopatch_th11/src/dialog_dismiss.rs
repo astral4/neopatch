@@ -80,7 +80,5 @@ unsafe extern "system" fn hook_dialog_box_param_a(
 }
 
 pub(crate) unsafe fn install(host: HMODULE) {
-    unsafe {
-        REAL_DIALOG_BOX_PARAM_A.install(host, hook_dialog_box_param_a);
-    }
+    unsafe { REAL_DIALOG_BOX_PARAM_A.install(host, hook_dialog_box_param_a) };
 }

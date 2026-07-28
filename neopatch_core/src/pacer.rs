@@ -160,9 +160,7 @@ impl Pacer {
 
 fn read_qpc_freq() -> i64 {
     let mut f = 0;
-    unsafe {
-        QueryPerformanceFrequency(&raw mut f);
-    }
+    unsafe { QueryPerformanceFrequency(&raw mut f) };
     f
 }
 
@@ -201,9 +199,7 @@ fn period_qpc_from(target_fps: u32, qpc_freq: i64) -> i64 {
 
 fn qpc() -> i64 {
     let mut t = 0;
-    unsafe {
-        QueryPerformanceCounter(&raw mut t);
-    }
+    unsafe { QueryPerformanceCounter(&raw mut t) };
     t
 }
 

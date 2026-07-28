@@ -24,17 +24,15 @@ pub(crate) unsafe fn with_writable<R>(
     len: usize,
     f: impl FnOnce(*mut u8) -> R,
 ) -> Option<R> {
-    unsafe {
-        let target: *mut c_void = addr.cast();
-        let mut saved: PAGE_PROTECTION_FLAGS = 0;
-        // We don't use a RAII guard around the restore because we have `panic = "abort"`.
-        // `f` either returns or aborts the process; it never unwinds.
-        if VirtualProtect(target, len, PAGE_READWRITE, &raw mut saved) == 0 {
-            return None;
-        }
-        let result = f(addr);
-        let mut tmp: PAGE_PROTECTION_FLAGS = 0;
-        VirtualProtect(target, len, saved, &raw mut tmp);
-        Some(result)
+    let target: *mut c_void = addr.cast();
+    let mut saved: PAGE_PROTECTION_FLAGS = 0;
+    // We don't use a RAII guard around the restore because we have `panic = "abort"`.
+    // `f` either returns or aborts the process; it never unwinds.
+    if unsafe { VirtualProtect(target, len, PAGE_READWRITE, &raw mut saved) } == 0 {
+        return None;
     }
+    let result = f(addr);
+    let mut tmp: PAGE_PROTECTION_FLAGS = 0;
+    unsafe { VirtualProtect(target, len, saved, &raw mut tmp) };
+    Some(result)
 }

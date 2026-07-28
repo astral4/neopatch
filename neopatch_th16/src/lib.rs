@@ -34,46 +34,45 @@ unsafe extern "system" fn DllMain(hinst: HINSTANCE, reason: u32, _reserved: *mut
     if reason != DLL_PROCESS_ATTACH {
         return 1;
     }
-    unsafe {
-        DisableThreadLibraryCalls(hinst as HMODULE);
-        vtable::set_our_dll_handle(hinst as HMODULE);
-        dinput8::init();
-        install_hooks();
-    }
+    unsafe { DisableThreadLibraryCalls(hinst as HMODULE) };
+    vtable::set_our_dll_handle(hinst as HMODULE);
+    dinput8::init();
+    unsafe { install_hooks() };
     1
 }
 
 unsafe fn install_hooks() {
+    let host_exe_path = current_exe().ok();
+    let exe_dir = host_exe_path.as_deref().and_then(Path::parent);
+
+    let (th16_cfg, core_cfg) = exe_dir
+        .and_then(|d| read(d.join("neopatch.ini")).ok())
+        .map_or_else(
+            || (Th16Config::default(), CoreConfig::default()),
+            |b| parse_config(&decode_text(&b)),
+        );
+    drop(CORE_CONFIG.set(core_cfg));
+    drop(CONFIG.set(th16_cfg));
+    let core_cfg = CORE_CONFIG.get().unwrap();
+    let th16_cfg = CONFIG.get().unwrap();
+
+    let install_dir = exe_dir.map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+    log::init(&install_dir, core_cfg, host_exe_path.as_deref(), |w| {
+        write_manifest_extras(w, th16_cfg)
+    });
+
+    let installed = unsafe { install_all(&[PATCHES, DIALOG_PATCHES]) };
+    if !installed {
+        return;
+    }
+
+    crash::install_handlers();
+
+    let host_exe = unsafe { GetModuleHandleW(null()) };
+
+    process::apply(&core_cfg.process);
+
     unsafe {
-        let host_exe_path = current_exe().ok();
-        let exe_dir = host_exe_path.as_deref().and_then(Path::parent);
-
-        let (th16_cfg, core_cfg) = exe_dir
-            .and_then(|d| read(d.join("neopatch.ini")).ok())
-            .map_or_else(
-                || (Th16Config::default(), CoreConfig::default()),
-                |b| parse_config(&decode_text(&b)),
-            );
-        drop(CORE_CONFIG.set(core_cfg));
-        drop(CONFIG.set(th16_cfg));
-        let core_cfg = CORE_CONFIG.get().unwrap();
-        let th16_cfg = CONFIG.get().unwrap();
-
-        let install_dir = exe_dir.map_or_else(|| PathBuf::from("."), Path::to_path_buf);
-        log::init(&install_dir, core_cfg, host_exe_path.as_deref(), |w| {
-            write_manifest_extras(w, th16_cfg)
-        });
-
-        if !install_all(&[PATCHES, DIALOG_PATCHES]) {
-            return;
-        }
-
-        crash::install_handlers();
-
-        let host_exe = GetModuleHandleW(null());
-
-        process::apply(&core_cfg.process);
-
         timer_period::install(host_exe);
         gdi_caps::install(host_exe);
         window::install(
@@ -87,17 +86,17 @@ unsafe fn install_hooks() {
         );
         exit_hooks::install(host_exe);
         d3dx9::install(host_exe);
-
-        d3d9::set_replay_mode_fn(state::replay_mode);
-        _ = PACER.set(Pacer::new(PacingPolicy::LiveInput {
-            target_fps: core_cfg.framerate.game_fps,
-        }));
-        d3d9::install(host_exe);
-
-        if core_cfg.input.dpad {
-            input::install();
-        }
-
-        dialog_dismiss::install(host_exe);
     }
+
+    d3d9::set_replay_mode_fn(state::replay_mode);
+    _ = PACER.set(Pacer::new(PacingPolicy::LiveInput {
+        target_fps: core_cfg.framerate.game_fps,
+    }));
+    unsafe { d3d9::install(host_exe) };
+
+    if core_cfg.input.dpad {
+        input::install();
+    }
+
+    unsafe { dialog_dismiss::install(host_exe) };
 }

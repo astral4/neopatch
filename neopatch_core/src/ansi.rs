@@ -152,9 +152,9 @@ unsafe extern "system" fn hook_create_file_a(
     flags_and_attributes: u32,
     template_file: HANDLE,
 ) -> HANDLE {
-    unsafe {
-        if let Some(wide) = convert_z(file_name, false) {
-            let handle = CreateFileW(
+    if let Some(wide) = convert_z(file_name, false) {
+        let handle = unsafe {
+            CreateFileW(
                 wide.as_ptr(),
                 desired_access,
                 share_mode,
@@ -162,22 +162,24 @@ unsafe extern "system" fn hook_create_file_a(
                 creation_disposition,
                 flags_and_attributes,
                 template_file,
-            );
-            if handle != INVALID_HANDLE_VALUE {
-                return handle;
-            }
-
-            let error = GetLastError();
-            if !should_fall_back(creation_disposition, error) {
-                debug!(
-                    kind = "ansi_create_file_failed",
-                    creation_disposition, error
-                );
-                SetLastError(error);
-                return INVALID_HANDLE_VALUE;
-            }
-            debug!(kind = "ansi_create_file_fallback", error);
+            )
+        };
+        if handle != INVALID_HANDLE_VALUE {
+            return handle;
         }
+
+        let error = unsafe { GetLastError() };
+        if !should_fall_back(creation_disposition, error) {
+            debug!(
+                kind = "ansi_create_file_failed",
+                creation_disposition, error
+            );
+            unsafe { SetLastError(error) };
+            return INVALID_HANDLE_VALUE;
+        }
+        debug!(kind = "ansi_create_file_fallback", error);
+    }
+    unsafe {
         real_create_file_a(
             file_name,
             desired_access,
@@ -199,23 +201,21 @@ fn should_fall_back(creation_disposition: u32, error: u32) -> bool {
 }
 
 unsafe extern "system" fn hook_delete_file_a(file_name: PCSTR) -> BOOL {
-    unsafe {
-        if let Some(wide) = convert_z(file_name, false) {
-            let ok = DeleteFileW(wide.as_ptr());
-            if ok != 0 {
-                return ok;
-            }
-
-            let error = GetLastError();
-            if !is_not_found(error) {
-                debug!(kind = "ansi_delete_file_failed", error);
-                SetLastError(error);
-                return 0;
-            }
-            debug!(kind = "ansi_delete_file_fallback", error);
+    if let Some(wide) = convert_z(file_name, false) {
+        let ok = unsafe { DeleteFileW(wide.as_ptr()) };
+        if ok != 0 {
+            return ok;
         }
-        real_delete_file_a(file_name)
+
+        let error = unsafe { GetLastError() };
+        if !is_not_found(error) {
+            debug!(kind = "ansi_delete_file_failed", error);
+            unsafe { SetLastError(error) };
+            return 0;
+        }
+        debug!(kind = "ansi_delete_file_fallback", error);
     }
+    unsafe { real_delete_file_a(file_name) }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -235,9 +235,9 @@ unsafe extern "system" fn hook_create_font_a(
     pitch_and_family: u32,
     face_name: PCSTR,
 ) -> HFONT {
-    unsafe {
-        if let Some(wide) = convert_z(face_name, true) {
-            let font = CreateFontW(
+    if let Some(wide) = convert_z(face_name, true) {
+        let font = unsafe {
+            CreateFontW(
                 height,
                 width,
                 escapement,
@@ -252,11 +252,13 @@ unsafe extern "system" fn hook_create_font_a(
                 quality,
                 pitch_and_family,
                 wide.as_ptr(),
-            );
-            if !font.is_null() {
-                return font;
-            }
+            )
+        };
+        if !font.is_null() {
+            return font;
         }
+    }
+    unsafe {
         real_create_font_a(
             height,
             width,
@@ -313,17 +315,15 @@ fn convert_logfont(codepage: NonZero<u32>, a: &LOGFONTA) -> Option<LOGFONTW> {
 }
 
 unsafe extern "system" fn hook_create_font_indirect_a(logfont: *const LOGFONTA) -> HFONT {
-    unsafe {
-        if let (Some(cp), Some(a)) = (codepage(), logfont.as_ref())
-            && let Some(w) = convert_logfont(cp, a)
-        {
-            let font = CreateFontIndirectW(&raw const w);
-            if !font.is_null() {
-                return font;
-            }
+    if let (Some(cp), Some(a)) = (codepage(), unsafe { logfont.as_ref() })
+        && let Some(w) = convert_logfont(cp, a)
+    {
+        let font = unsafe { CreateFontIndirectW(&raw const w) };
+        if !font.is_null() {
+            return font;
         }
-        real_create_font_indirect_a(logfont)
     }
+    unsafe { real_create_font_indirect_a(logfont) }
 }
 
 #[cfg(test)]

@@ -21,18 +21,14 @@ iat_hook! {
 /// # Safety
 /// `host` must be a loaded module handle.
 pub unsafe fn install(host: HMODULE) {
-    unsafe {
-        REAL_GET_DEVICE_CAPS.install(host, hook_get_device_caps);
-    }
+    unsafe { REAL_GET_DEVICE_CAPS.install(host, hook_get_device_caps) };
 }
 
 unsafe extern "system" fn hook_get_device_caps(hdc: HDC, index: i32) -> i32 {
-    unsafe {
-        if index == VREFRESH {
-            // This log event proves the spoof fired through our hook.
-            debug!(kind = "vrefresh_spoof", spoofed_value = 60);
-            return 60;
-        }
-        real_get_device_caps(hdc, index)
+    if index == VREFRESH {
+        // This log event proves the spoof fired through our hook.
+        debug!(kind = "vrefresh_spoof", spoofed_value = 60);
+        return 60;
     }
+    unsafe { real_get_device_caps(hdc, index) }
 }

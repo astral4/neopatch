@@ -71,34 +71,34 @@ unsafe extern "system" fn hook_d3dx_create_texture(
     mut pool: D3DPOOL,
     pp_texture: *mut *mut c_void,
 ) -> HRESULT {
-    unsafe {
-        let pool_orig = pool;
-        let usage_orig = usage;
-        let translated = translate_managed_pool(&mut pool, &mut usage);
+    let pool_orig = pool;
+    let usage_orig = usage;
+    let translated = translate_managed_pool(&mut pool, &mut usage);
 
-        let hr = real_d3dx_create_texture(
+    let hr = unsafe {
+        real_d3dx_create_texture(
             device, width, height, mip_levels, usage, format, pool, pp_texture,
-        );
-        let returned = out_ptr(pp_texture);
+        )
+    };
+    let returned = unsafe { out_ptr(pp_texture) };
 
-        log_at!(hr.is_ok() => debug / warn,
-            kind = "d3dx_create_texture",
-            width,
-            height,
-            mip_levels,
-            format = format_name(format),
-            format_n = format.0,
-            pool_in = pool_orig.0,
-            pool_out = pool.0,
-            usage_in = format_args!("{usage_orig:#x}"),
-            usage_out = format_args!("{usage:#x}"),
-            translated,
-            hr = fmt_hr!(hr),
-            ptr = format_args!("{returned:p}"),
-        );
+    log_at!(hr.is_ok() => debug / warn,
+        kind = "d3dx_create_texture",
+        width,
+        height,
+        mip_levels,
+        format = format_name(format),
+        format_n = format.0,
+        pool_in = pool_orig.0,
+        pool_out = pool.0,
+        usage_in = format_args!("{usage_orig:#x}"),
+        usage_out = format_args!("{usage:#x}"),
+        translated,
+        hr = fmt_hr!(hr),
+        ptr = format_args!("{returned:p}"),
+    );
 
-        hr
-    }
+    hr
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -119,12 +119,12 @@ unsafe extern "system" fn hook_d3dx_create_texture_from_file_in_memory_ex(
     palette: *mut c_void,
     pp_texture: *mut *mut c_void,
 ) -> HRESULT {
-    unsafe {
-        let pool_orig = pool;
-        let usage_orig = usage;
-        let translated = translate_managed_pool(&mut pool, &mut usage);
+    let pool_orig = pool;
+    let usage_orig = usage;
+    let translated = translate_managed_pool(&mut pool, &mut usage);
 
-        let hr = real_d3dx_create_texture_from_file_in_memory_ex(
+    let hr = unsafe {
+        real_d3dx_create_texture_from_file_in_memory_ex(
             device,
             src_data,
             src_data_size,
@@ -140,27 +140,27 @@ unsafe extern "system" fn hook_d3dx_create_texture_from_file_in_memory_ex(
             src_info,
             palette,
             pp_texture,
-        );
-        let returned = out_ptr(pp_texture);
+        )
+    };
+    let returned = unsafe { out_ptr(pp_texture) };
 
-        log_at!(hr.is_ok() => debug / warn,
-            kind = "d3dx_create_texture_from_mem",
-            src = format_args!("{src_data:p}"),
-            src_size = src_data_size,
-            width,
-            height,
-            mip_levels,
-            format = format_name(format),
-            format_n = format.0,
-            pool_in = pool_orig.0,
-            pool_out = pool.0,
-            usage_in = format_args!("{usage_orig:#x}"),
-            usage_out = format_args!("{usage:#x}"),
-            translated,
-            hr = fmt_hr!(hr),
-            ptr = format_args!("{returned:p}"),
-        );
+    log_at!(hr.is_ok() => debug / warn,
+        kind = "d3dx_create_texture_from_mem",
+        src = format_args!("{src_data:p}"),
+        src_size = src_data_size,
+        width,
+        height,
+        mip_levels,
+        format = format_name(format),
+        format_n = format.0,
+        pool_in = pool_orig.0,
+        pool_out = pool.0,
+        usage_in = format_args!("{usage_orig:#x}"),
+        usage_out = format_args!("{usage:#x}"),
+        translated,
+        hr = fmt_hr!(hr),
+        ptr = format_args!("{returned:p}"),
+    );
 
-        hr
-    }
+    hr
 }

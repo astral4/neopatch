@@ -34,58 +34,59 @@ unsafe extern "system" fn DllMain(hinst: HINSTANCE, reason: u32, _reserved: *mut
     if reason != DLL_PROCESS_ATTACH {
         return 1;
     }
-    unsafe {
-        DisableThreadLibraryCalls(hinst as HMODULE);
-        vtable::set_our_dll_handle(hinst as HMODULE);
-        dinput8::init();
-        install_hooks();
-    }
+    unsafe { DisableThreadLibraryCalls(hinst as HMODULE) };
+    vtable::set_our_dll_handle(hinst as HMODULE);
+    dinput8::init();
+    unsafe { install_hooks() };
     1
 }
 
 unsafe fn install_hooks() {
+    let host_exe = unsafe { GetModuleHandleW(null()) };
+
+    // th06's `custom.exe` loads our dinput8 proxy but no D3D8. We still install the ANSI Shift-JIS filename hooks
+    // because `custom.exe` reads and rewrites the same Shift-JIS-named `東方紅魔郷.cfg` file that the game does.
+    if unsafe { GetModuleHandleW(w!("d3d8.dll")) }.is_null() {
+        unsafe { ansi::install(host_exe, ansi::CP_SHIFT_JIS) };
+        return;
+    }
+
+    let host_exe_path = current_exe().ok();
+    let exe_dir = host_exe_path.as_deref().and_then(Path::parent);
+
+    let core_cfg = exe_dir
+        .and_then(|d| read(d.join("neopatch.ini")).ok())
+        .map_or_else(CoreConfig::default, |b| parse_core_only(&decode_text(&b)));
+    drop(CONFIG.set(core_cfg));
+    let core_cfg = CONFIG.get().unwrap();
+
+    let install_dir = exe_dir.map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+    log::init(&install_dir, core_cfg, host_exe_path.as_deref(), |_| Ok(()));
+
+    unsafe { ansi::install(host_exe, ansi::CP_SHIFT_JIS) };
+
+    let installed = unsafe { install_all(PATCH_GROUPS) };
+    if !installed {
+        return;
+    }
+
+    crash::install_handlers();
+
+    process::apply(&core_cfg.process);
+
     unsafe {
-        let host_exe = GetModuleHandleW(null());
-
-        // th06's `custom.exe` loads our dinput8 proxy but no D3D8. We still install the ANSI Shift-JIS filename hooks
-        // because `custom.exe` reads and rewrites the same Shift-JIS-named `東方紅魔郷.cfg` file that the game does.
-        if GetModuleHandleW(w!("d3d8.dll")).is_null() {
-            ansi::install(host_exe, ansi::CP_SHIFT_JIS);
-            return;
-        }
-
-        let host_exe_path = current_exe().ok();
-        let exe_dir = host_exe_path.as_deref().and_then(Path::parent);
-
-        let core_cfg = exe_dir
-            .and_then(|d| read(d.join("neopatch.ini")).ok())
-            .map_or_else(CoreConfig::default, |b| parse_core_only(&decode_text(&b)));
-        drop(CONFIG.set(core_cfg));
-        let core_cfg = CONFIG.get().unwrap();
-
-        let install_dir = exe_dir.map_or_else(|| PathBuf::from("."), Path::to_path_buf);
-        log::init(&install_dir, core_cfg, host_exe_path.as_deref(), |_| Ok(()));
-
-        ansi::install(host_exe, ansi::CP_SHIFT_JIS);
-
-        if !install_all(PATCH_GROUPS) {
-            return;
-        }
-
-        crash::install_handlers();
-
-        process::apply(&core_cfg.process);
-
         timer_period::install(host_exe);
         gdi_caps::install(host_exe);
         exit_hooks::install(host_exe);
+    }
 
-        patches::install();
+    patches::install();
 
-        _ = PACER.set(Pacer::new(PacingPolicy::LiveInput {
-            target_fps: core_cfg.framerate.game_fps,
-        }));
+    _ = PACER.set(Pacer::new(PacingPolicy::LiveInput {
+        target_fps: core_cfg.framerate.game_fps,
+    }));
 
+    unsafe {
         window::install(
             host_exe,
             &core_cfg.window,
@@ -97,9 +98,9 @@ unsafe fn install_hooks() {
         );
 
         d3d8::install(host_exe);
+    }
 
-        if core_cfg.input.dpad {
-            input::install();
-        }
+    if core_cfg.input.dpad {
+        input::install();
     }
 }

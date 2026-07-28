@@ -137,9 +137,7 @@ pub(crate) fn flush() {
     // `FlushFileBuffers` requests the OS to commit that cache to physical disk, which matters for power-off/hard-crash scenarios.
     let raw = FILE_HANDLE.load(Ordering::Acquire);
     if !raw.is_null() {
-        unsafe {
-            FlushFileBuffers(raw);
-        }
+        unsafe { FlushFileBuffers(raw) };
     }
 }
 
@@ -261,9 +259,7 @@ fn try_use_dir(dir: &Path) -> LogRootOutcome {
 
 fn make_session_id() -> String {
     let mut st: SYSTEMTIME = unsafe { zeroed() };
-    unsafe {
-        GetLocalTime(&raw mut st);
-    }
+    unsafe { GetLocalTime(&raw mut st) };
     // PID disambiguates concurrent same-second launches that would otherwise share a directory and clobber each other's logs.
     let pid = unsafe { GetCurrentProcessId() };
     format!(

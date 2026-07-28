@@ -67,22 +67,21 @@ pub(crate) fn module_info(h: HMODULE) -> Option<ModuleRange> {
         return None;
     }
 
-    unsafe {
-        let mut info = MODULEINFO {
-            lpBaseOfDll: null_mut(),
-            SizeOfImage: 0,
-            EntryPoint: null_mut(),
-        };
-        if GetModuleInformation(GetCurrentProcess(), h, &raw mut info, MODULEINFO_SIZE) == 0 {
-            return None;
-        }
-        #[allow(clippy::cast_possible_truncation)]
-        let base = info.lpBaseOfDll.addr() as u32;
-        Some(ModuleRange {
-            base,
-            end: base.wrapping_add(info.SizeOfImage),
-        })
+    let mut info = MODULEINFO {
+        lpBaseOfDll: null_mut(),
+        SizeOfImage: 0,
+        EntryPoint: null_mut(),
+    };
+    if unsafe { GetModuleInformation(GetCurrentProcess(), h, &raw mut info, MODULEINFO_SIZE) } == 0
+    {
+        return None;
     }
+    #[allow(clippy::cast_possible_truncation)]
+    let base = info.lpBaseOfDll.addr() as u32;
+    Some(ModuleRange {
+        base,
+        end: base.wrapping_add(info.SizeOfImage),
+    })
 }
 
 /// Enumerates every module loaded into the current process.
@@ -94,31 +93,31 @@ pub(crate) fn walk_modules() -> Vec<Module> {
     const BUF_BYTES: u32 = HANDLES_CAP * size_of::<HMODULE>() as u32;
 
     let mut result = Vec::new();
-    unsafe {
-        let process = GetCurrentProcess();
-        let mut handles = [null_mut(); HANDLES_LEN];
-        let mut needed = 0;
-        if EnumProcessModules(process, handles.as_mut_ptr(), BUF_BYTES, &raw mut needed) == 0 {
-            return result;
+    let process = unsafe { GetCurrentProcess() };
+    let mut handles = [null_mut(); HANDLES_LEN];
+    let mut needed = 0;
+    if unsafe { EnumProcessModules(process, handles.as_mut_ptr(), BUF_BYTES, &raw mut needed) } == 0
+    {
+        return result;
+    }
+    let count = (needed as usize / size_of::<HMODULE>()).min(handles.len());
+    result.reserve_exact(count);
+    for &module in &handles[..count] {
+        let Some(range) = module_info(module) else {
+            continue;
+        };
+        let mut name_buf = [0u16; MAX_PATH as usize];
+        let name_len =
+            unsafe { GetModuleFileNameExW(process, module, name_buf.as_mut_ptr(), MAX_PATH) };
+        let mut name = if name_len == 0 {
+            String::from("<unknown>")
+        } else {
+            String::from_utf16_lossy(&name_buf[..name_len as usize])
+        };
+        if let Some(slash) = name.rfind('\\') {
+            name.drain(..=slash);
         }
-        let count = (needed as usize / size_of::<HMODULE>()).min(handles.len());
-        result.reserve_exact(count);
-        for &module in &handles[..count] {
-            let Some(range) = module_info(module) else {
-                continue;
-            };
-            let mut name_buf = [0u16; MAX_PATH as usize];
-            let name_len = GetModuleFileNameExW(process, module, name_buf.as_mut_ptr(), MAX_PATH);
-            let mut name = if name_len == 0 {
-                String::from("<unknown>")
-            } else {
-                String::from_utf16_lossy(&name_buf[..name_len as usize])
-            };
-            if let Some(slash) = name.rfind('\\') {
-                name.drain(..=slash);
-            }
-            result.push(Module { range, name });
-        }
+        result.push(Module { range, name });
     }
     result
 }

@@ -43,7 +43,8 @@ macro_rules! iat_hook {
         #[inline]
         #[allow(dead_code, clippy::too_many_arguments)]
         unsafe fn $trampoline($($arg : $argty),*) -> $ret {
-            unsafe { $real.original()($($arg),*) }
+            let f = $real.original();
+            unsafe { f($($arg),*) }
         }
     };
 }
@@ -143,42 +144,49 @@ impl<F: Copy + Send + Sync + Unpin + 'static> IatHook<F> {
 }
 
 unsafe fn data_directory(module: HMODULE, idx: usize) -> Option<(*const u8, u32)> {
-    unsafe {
-        let base = module.cast::<u8>().cast_const();
-        let e_magic: u16 = read_unaligned(base.add(offset_of!(IMAGE_DOS_HEADER, e_magic)).cast());
-        if e_magic != IMAGE_DOS_SIGNATURE {
-            return None;
-        }
-        // We treat negative `e_lfanew` as malformed rather than wrapping.
-        let e_lfanew: i32 = read_unaligned(base.add(offset_of!(IMAGE_DOS_HEADER, e_lfanew)).cast());
-        let nt_base = base.add(usize::try_from(e_lfanew).ok()?);
-        let signature: u32 = read_unaligned(
+    let base = module.cast::<u8>().cast_const();
+    let e_magic: u16 =
+        unsafe { read_unaligned(base.add(offset_of!(IMAGE_DOS_HEADER, e_magic)).cast()) };
+    if e_magic != IMAGE_DOS_SIGNATURE {
+        return None;
+    }
+    // We treat negative `e_lfanew` as malformed rather than wrapping.
+    let e_lfanew: i32 =
+        unsafe { read_unaligned(base.add(offset_of!(IMAGE_DOS_HEADER, e_lfanew)).cast()) };
+    let e_lfanew = usize::try_from(e_lfanew).ok()?;
+    let nt_base = unsafe { base.add(e_lfanew) };
+    let signature: u32 = unsafe {
+        read_unaligned(
             nt_base
                 .add(offset_of!(IMAGE_NT_HEADERS32, Signature))
                 .cast(),
-        );
-        if signature != IMAGE_NT_SIGNATURE {
-            return None;
-        }
-        // `offset_of!` only takes literal paths, so the array index is manual.
-        let dd_offset = offset_of!(IMAGE_NT_HEADERS32, OptionalHeader)
-            + offset_of!(IMAGE_OPTIONAL_HEADER32, DataDirectory)
-            + idx * size_of::<IMAGE_DATA_DIRECTORY>();
-        let dir_rva: u32 = read_unaligned(
+        )
+    };
+    if signature != IMAGE_NT_SIGNATURE {
+        return None;
+    }
+    // `offset_of!` only takes literal paths, so the array index is manual.
+    let dd_offset = offset_of!(IMAGE_NT_HEADERS32, OptionalHeader)
+        + offset_of!(IMAGE_OPTIONAL_HEADER32, DataDirectory)
+        + idx * size_of::<IMAGE_DATA_DIRECTORY>();
+    let dir_rva: u32 = unsafe {
+        read_unaligned(
             nt_base
                 .add(dd_offset + offset_of!(IMAGE_DATA_DIRECTORY, VirtualAddress))
                 .cast(),
-        );
-        let size: u32 = read_unaligned(
+        )
+    };
+    let size: u32 = unsafe {
+        read_unaligned(
             nt_base
                 .add(dd_offset + offset_of!(IMAGE_DATA_DIRECTORY, Size))
                 .cast(),
-        );
-        if dir_rva == 0 || size == 0 {
-            return None;
-        }
-        Some((base.add(dir_rva as usize), size))
+        )
+    };
+    if dir_rva == 0 || size == 0 {
+        return None;
     }
+    Some((unsafe { base.add(dir_rva as usize) }, size))
 }
 
 enum SlotOutcome {
@@ -192,74 +200,81 @@ enum SlotOutcome {
 /// Returns a pointer to the `FirstThunk` slot on hit, or the count of descriptors that couldn't be searched on miss.
 /// `module` must always be the game (e.g. th15.exe via `GetModuleHandleW(NULL)`), never our own DLL.
 unsafe fn find_iat_slot(module: HMODULE, import_name: &str) -> SlotOutcome {
-    unsafe {
-        let mut descriptors = 0u32;
-        let Some((imp_dir, _)) = data_directory(module, IMAGE_DIRECTORY_ENTRY_IMPORT as usize)
-        else {
-            return SlotOutcome::Miss { descriptors };
-        };
-        let base_mut: *mut u8 = module.cast();
-        let base = base_mut.cast_const();
+    let mut descriptors = 0u32;
+    let Some((imp_dir, _)) =
+        (unsafe { data_directory(module, IMAGE_DIRECTORY_ENTRY_IMPORT as usize) })
+    else {
+        return SlotOutcome::Miss { descriptors };
+    };
+    let base_mut: *mut u8 = module.cast();
+    let base = base_mut.cast_const();
 
-        let mut desc_offset = 0;
-        loop {
-            let dll_name_rva: u32 = read_unaligned(
+    let mut desc_offset = 0;
+    loop {
+        let dll_name_rva: u32 = unsafe {
+            read_unaligned(
                 imp_dir
                     .add(desc_offset + offset_of!(IMAGE_IMPORT_DESCRIPTOR, Name))
                     .cast(),
-            );
-            if dll_name_rva == 0 {
-                return SlotOutcome::Miss { descriptors };
-            }
+            )
+        };
+        if dll_name_rva == 0 {
+            return SlotOutcome::Miss { descriptors };
+        }
 
-            // OFT holds name RVAs (`Anonymous` union aliases it). FT holds bound function VAs after the loader runs.
-            // We can't fall back from OFT to FT after binding.
-            let oft: u32 = read_unaligned(
+        // OFT holds name RVAs (`Anonymous` union aliases it). FT holds bound function VAs after the loader runs.
+        // We can't fall back from OFT to FT after binding.
+        let oft: u32 = unsafe {
+            read_unaligned(
                 imp_dir
                     .add(desc_offset + offset_of!(IMAGE_IMPORT_DESCRIPTOR, Anonymous))
                     .cast(),
-            );
-            let ft: u32 = read_unaligned(
+            )
+        };
+        let ft: u32 = unsafe {
+            read_unaligned(
                 imp_dir
                     .add(desc_offset + offset_of!(IMAGE_IMPORT_DESCRIPTOR, FirstThunk))
                     .cast(),
-            );
-            if oft == 0 {
-                descriptors += 1;
-                desc_offset += size_of::<IMAGE_IMPORT_DESCRIPTOR>();
-                continue;
-            }
-            let lookup_rva = oft;
+            )
+        };
+        if oft == 0 {
+            descriptors += 1;
+            desc_offset += size_of::<IMAGE_IMPORT_DESCRIPTOR>();
+            continue;
+        }
+        let lookup_rva = oft;
 
-            let mut i = 0;
-            loop {
-                let entry: u32 = read_unaligned(
+        let mut i = 0;
+        loop {
+            let entry: u32 = unsafe {
+                read_unaligned(
                     base.add(lookup_rva as usize + i * size_of::<IMAGE_THUNK_DATA32>())
                         .cast(),
-                );
-                if entry == 0 {
-                    break;
-                }
-                if entry & IMAGE_ORDINAL_FLAG32 == 0 {
-                    // By-name import; `entry` is the RVA of `IMAGE_IMPORT_BY_NAME`.
-                    let name_rva = entry as usize + offset_of!(IMAGE_IMPORT_BY_NAME, Name);
-                    let name_ptr = base.add(name_rva).cast();
-                    let imp_name = CStr::from_ptr(name_ptr).to_bytes();
-                    if imp_name.eq_ignore_ascii_case(import_name.as_bytes()) {
-                        let slot_rva = ft as usize + i * size_of::<IMAGE_THUNK_DATA32>();
-                        // All accesses through the returned pointer occur via `read_unaligned` and `write_unaligned`,
-                        // so the alignment bump from `*mut u8` is fine.
-                        #[allow(clippy::cast_ptr_alignment)]
-                        let slot = base_mut.add(slot_rva).cast();
-                        return match NonNull::new(slot) {
-                            Some(ptr) => SlotOutcome::Hit { ptr },
-                            None => SlotOutcome::Miss { descriptors },
-                        };
-                    }
-                }
-                i += 1;
+                )
+            };
+            if entry == 0 {
+                break;
             }
-            desc_offset += size_of::<IMAGE_IMPORT_DESCRIPTOR>();
+            if entry & IMAGE_ORDINAL_FLAG32 == 0 {
+                // By-name import; `entry` is the RVA of `IMAGE_IMPORT_BY_NAME`.
+                let name_rva = entry as usize + offset_of!(IMAGE_IMPORT_BY_NAME, Name);
+                let name_ptr = unsafe { base.add(name_rva).cast() };
+                let imp_name = unsafe { CStr::from_ptr(name_ptr) }.to_bytes();
+                if imp_name.eq_ignore_ascii_case(import_name.as_bytes()) {
+                    let slot_rva = ft as usize + i * size_of::<IMAGE_THUNK_DATA32>();
+                    // All accesses through the returned pointer occur via `read_unaligned` and `write_unaligned`,
+                    // so the alignment bump from `*mut u8` is fine.
+                    #[allow(clippy::cast_ptr_alignment)]
+                    let slot = unsafe { base_mut.add(slot_rva).cast() };
+                    return match NonNull::new(slot) {
+                        Some(ptr) => SlotOutcome::Hit { ptr },
+                        None => SlotOutcome::Miss { descriptors },
+                    };
+                }
+            }
+            i += 1;
         }
+        desc_offset += size_of::<IMAGE_IMPORT_DESCRIPTOR>();
     }
 }

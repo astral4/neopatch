@@ -61,54 +61,51 @@ unsafe extern "system" fn hook_create_dialog_param_a(
     proc: DLGPROC,
     init_param: LPARAM,
 ) -> HWND {
-    unsafe {
-        let hwnd = real_create_dialog_param_a(hinst, template, parent, proc, init_param);
+    let hwnd = unsafe { real_create_dialog_param_a(hinst, template, parent, proc, init_param) };
 
-        let template_id = template.addr();
-        let proc_va = proc.map_or(0usize, |f| (f as *const ()).addr());
-        info!(
-            kind = "create_dialog_param_a",
-            template = format_args!("{template_id:#x}"),
-            proc = format_args!("{proc_va:#x}"),
-            hwnd = format_args!("{hwnd:?}"),
-        );
+    let template_id = template.addr();
+    let proc_va = proc.map_or(0usize, |f| (f as *const ()).addr());
+    info!(
+        kind = "create_dialog_param_a",
+        template = format_args!("{template_id:#x}"),
+        proc = format_args!("{proc_va:#x}"),
+        hwnd = format_args!("{hwnd:?}"),
+    );
 
-        if hwnd.is_null() {
-            return hwnd;
-        }
-        if template_id != DIALOG_TEMPLATE_ID || proc_va != DIALOG_PROC_VA {
-            return hwnd;
-        }
-
-        let mode = CORE_CONFIG.get().unwrap().display.mode;
-        let resolution = CONFIG.get().unwrap().resolution;
-
-        let res_radio_id = RES_RADIO_FIRST_ID + i32::from(resolution.index());
-        let fullscreen_state = match mode {
-            DisplayMode::Windowed => BST_UNCHECKED,
-            DisplayMode::Fullscreen => BST_CHECKED,
-        };
-        let wparam = ((BN_CLICKED << 16) | OK_BUTTON_ID) as WPARAM;
-
-        let radio_ret = CheckRadioButton(hwnd, RES_RADIO_FIRST_ID, RES_RADIO_LAST_ID, res_radio_id);
-        let dlg_btn_ret = CheckDlgButton(hwnd, FULLSCREEN_CHECKBOX_ID, fullscreen_state);
-        let pm_ok = PostMessageA(hwnd, WM_COMMAND, wparam, 0);
-
-        info!(
-            kind = "dialog_auto_dismissed",
-            mode = %mode,
-            resolution = %resolution,
-            res_radio = format_args!("{res_radio_id:#x}"),
-            check_radio_button = radio_ret,
-            check_dlg_button = dlg_btn_ret,
-            post_message_ok = pm_ok,
-        );
-        hwnd
+    if hwnd.is_null() {
+        return hwnd;
     }
+    if template_id != DIALOG_TEMPLATE_ID || proc_va != DIALOG_PROC_VA {
+        return hwnd;
+    }
+
+    let mode = CORE_CONFIG.get().unwrap().display.mode;
+    let resolution = CONFIG.get().unwrap().resolution;
+
+    let res_radio_id = RES_RADIO_FIRST_ID + i32::from(resolution.index());
+    let fullscreen_state = match mode {
+        DisplayMode::Windowed => BST_UNCHECKED,
+        DisplayMode::Fullscreen => BST_CHECKED,
+    };
+    let wparam = ((BN_CLICKED << 16) | OK_BUTTON_ID) as WPARAM;
+
+    let radio_ret =
+        unsafe { CheckRadioButton(hwnd, RES_RADIO_FIRST_ID, RES_RADIO_LAST_ID, res_radio_id) };
+    let dlg_btn_ret = unsafe { CheckDlgButton(hwnd, FULLSCREEN_CHECKBOX_ID, fullscreen_state) };
+    let pm_ok = unsafe { PostMessageA(hwnd, WM_COMMAND, wparam, 0) };
+
+    info!(
+        kind = "dialog_auto_dismissed",
+        mode = %mode,
+        resolution = %resolution,
+        res_radio = format_args!("{res_radio_id:#x}"),
+        check_radio_button = radio_ret,
+        check_dlg_button = dlg_btn_ret,
+        post_message_ok = pm_ok,
+    );
+    hwnd
 }
 
 pub(crate) unsafe fn install(host: HMODULE) {
-    unsafe {
-        REAL_CREATE_DIALOG_PARAM_A.install(host, hook_create_dialog_param_a);
-    }
+    unsafe { REAL_CREATE_DIALOG_PARAM_A.install(host, hook_create_dialog_param_a) };
 }

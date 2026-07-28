@@ -124,48 +124,48 @@ type InitD3dRenderingFn = unsafe extern "C" fn() -> i32;
 
 /// Replaces the `RunCalcChain` call inside `Render`.
 unsafe extern "C" fn calc_then_draw_hook() -> i32 {
-    unsafe {
-        // We write these values every frame since game code rewrites them. This keeps game speed 1:1 with presented frames.
-        FRAMERATE_MULTIPLIER_VA.write(1.);
-        EFFECTIVE_FRAMERATE_MULTIPLIER_VA.write(1.);
+    // We write these values every frame since game code rewrites them. This keeps game speed 1:1 with presented frames.
+    FRAMERATE_MULTIPLIER_VA.write(1.);
+    EFFECTIVE_FRAMERATE_MULTIPLIER_VA.write(1.);
 
-        let run_calc: RunChainFn = game_fn(RUN_CALC_CHAIN_FN);
-        let res = run_calc(with_exposed_provenance_mut(G_CHAIN));
-        // 0 and -1 mean exit; the game tears down before another frame would be drawn.
-        if res != 0 && res != -1 {
-            draw_frame();
-        }
-        res
+    let run_calc: RunChainFn = unsafe { game_fn(RUN_CALC_CHAIN_FN) };
+    let res = unsafe { run_calc(with_exposed_provenance_mut(G_CHAIN)) };
+    // 0 and -1 mean exit; the game tears down before another frame would be drawn.
+    if res != 0 && res != -1 {
+        unsafe { draw_frame() };
     }
+    res
 }
 
 /// The original pre-calc draw block, relocated to run after calc.
 unsafe fn draw_frame() {
     const CLEAR_FLAGS: u32 = (D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER).cast_unsigned();
 
-    unsafe {
-        let dev = D3D_DEVICE_VA.read();
-        if dev.is_null() {
-            return;
-        }
+    let dev = D3D_DEVICE_VA.read();
+    if dev.is_null() {
+        return;
+    }
 
-        if CFG_OPTS_VA.read() & CLEAR_BACKBUFFER_OPTS_MASK != 0 {
-            let full = D3DViewport8 {
-                X: 0,
-                Y: 0,
-                Width: crate::FRAMEBUFFER_SIZE.0,
-                Height: crate::FRAMEBUFFER_SIZE.1,
-                MinZ: 0.,
-                MaxZ: 1.,
-            };
+    if CFG_OPTS_VA.read() & CLEAR_BACKBUFFER_OPTS_MASK != 0 {
+        let full = D3DViewport8 {
+            X: 0,
+            Y: 0,
+            Width: crate::FRAMEBUFFER_SIZE.0,
+            Height: crate::FRAMEBUFFER_SIZE.1,
+            MinZ: 0.,
+            MaxZ: 1.,
+        };
+        unsafe {
             call_set_viewport(dev, &raw const full);
             // The flags match the original block.
             call_clear(dev, 0, null(), CLEAR_FLAGS, SKY_FOG_COLOR_VA.read(), 1., 0);
-            let saved = VIEWPORT_VA.read();
-            call_set_viewport(dev, &raw const saved);
         }
+        let saved = VIEWPORT_VA.read();
+        unsafe { call_set_viewport(dev, &raw const saved) };
+    }
 
-        let run_draw: RunChainFn = game_fn(RUN_DRAW_CHAIN_FN);
+    let run_draw: RunChainFn = unsafe { game_fn(RUN_DRAW_CHAIN_FN) };
+    unsafe {
         call_begin_scene(dev);
         run_draw(with_exposed_provenance_mut(G_CHAIN));
         call_end_scene(dev);
@@ -176,24 +176,20 @@ unsafe fn draw_frame() {
 /// Replaces the `GetInput` call inside `Supervisor::OnUpdate`, forwarding to the real `Controller::GetInput`
 /// and mirroring the returned bitmask into [`crate::state`] for the replay-speed probe.
 unsafe extern "system" fn get_input_observer() -> u16 {
-    unsafe {
-        let get_input: GetInputFn = game_fn(GET_INPUT_FN);
-        let input = get_input();
-        record_input(input);
-        input
-    }
+    let get_input: GetInputFn = unsafe { game_fn(GET_INPUT_FN) };
+    let input = unsafe { get_input() };
+    record_input(input);
+    input
 }
 
 /// Replaces the `Render` call in `WinMain`.
 unsafe extern "C" fn render_gate_hook() -> i32 {
-    unsafe {
-        if APP_ACTIVE_VA.read() == 0 {
-            // The original `Render` returns immediately while the app is inactive, so without `Sleep` the message loop busy-spins.
-            Sleep(16);
-        }
-        let render: RenderFn = game_fn(RENDER_FN);
-        render(with_exposed_provenance_mut(G_GAME_WINDOW))
+    if APP_ACTIVE_VA.read() == 0 {
+        // The original `Render` returns immediately while the app is inactive, so without `Sleep` the message loop busy-spins.
+        unsafe { Sleep(16) };
     }
+    let render: RenderFn = unsafe { game_fn(RENDER_FN) };
+    unsafe { render(with_exposed_provenance_mut(G_GAME_WINDOW)) }
 }
 
 /// The cfg bytes that neopatch overrides for the whole session.
@@ -318,22 +314,20 @@ fn resolve_color_mode_sentinel() {
 
 /// Replaces the config write-back call in `WinMain`'s exit path.
 unsafe extern "C" fn cfg_write_hook(path: *const u8, data: *mut c_void, size: u32) -> i32 {
-    unsafe {
-        if let Some(pinned) = PINNED_CFG.get() {
-            // We only restore where the game still holds what we forced, so anything it changed since then is preserved.
-            if CFG_WINDOWED_VA.read() == pinned.forced_windowed {
-                CFG_WINDOWED_VA.write(pinned.user_windowed);
-            }
-
-            let opts = CFG_OPTS_VA.read();
-            if pinned.user_force_16bit && opts & GCOS_FORCE_16BIT_COLOR_MODE_MASK == 0 {
-                CFG_OPTS_VA.write(opts | GCOS_FORCE_16BIT_COLOR_MODE_MASK);
-            }
+    if let Some(pinned) = PINNED_CFG.get() {
+        // We only restore where the game still holds what we forced, so anything it changed since then is preserved.
+        if CFG_WINDOWED_VA.read() == pinned.forced_windowed {
+            CFG_WINDOWED_VA.write(pinned.user_windowed);
         }
 
-        let write_data_to_file: WriteDataToFileFn = game_fn(WRITE_DATA_TO_FILE_FN);
-        write_data_to_file(path, data, size)
+        let opts = CFG_OPTS_VA.read();
+        if pinned.user_force_16bit && opts & GCOS_FORCE_16BIT_COLOR_MODE_MASK == 0 {
+            CFG_OPTS_VA.write(opts | GCOS_FORCE_16BIT_COLOR_MODE_MASK);
+        }
     }
+
+    let write_data_to_file: WriteDataToFileFn = unsafe { game_fn(WRITE_DATA_TO_FILE_FN) };
+    unsafe { write_data_to_file(path, data, size) }
 }
 
 const HOOK_PATCHES: &[PatchSite] = &[

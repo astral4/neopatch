@@ -118,28 +118,26 @@ pub enum WindowApi {
 /// # Safety
 /// `host` must be a loaded module handle.
 pub unsafe fn install(host: HMODULE, restyle: &WindowCfg, policy: WindowPolicy, api: WindowApi) {
-    unsafe {
-        let state = match policy {
-            WindowPolicy::Restyle {
-                framebuffer,
-                display_mode,
-            } => State::Restyle {
-                framebuffer,
-                restyle: ResolvedWindowCfg::new(restyle, framebuffer, display_mode),
-            },
-            WindowPolicy::DeferToGame => State::DeferToGame {
-                always_on_top: restyle.always_on_top,
-            },
-        };
-        _ = STATE.set(state);
-        match api {
-            WindowApi::Ansi => {
-                REAL_CREATEWINDOWEXA.install(host, hook_create_window_ex_a);
-            }
-            WindowApi::Wide => {
-                REAL_CREATEWINDOWEXW.install(host, hook_create_window_ex_w);
-            }
-        }
+    let state = match policy {
+        WindowPolicy::Restyle {
+            framebuffer,
+            display_mode,
+        } => State::Restyle {
+            framebuffer,
+            restyle: ResolvedWindowCfg::new(restyle, framebuffer, display_mode),
+        },
+        WindowPolicy::DeferToGame => State::DeferToGame {
+            always_on_top: restyle.always_on_top,
+        },
+    };
+    _ = STATE.set(state);
+    match api {
+        WindowApi::Ansi => unsafe {
+            REAL_CREATEWINDOWEXA.install(host, hook_create_window_ex_a);
+        },
+        WindowApi::Wide => unsafe {
+            REAL_CREATEWINDOWEXW.install(host, hook_create_window_ex_w);
+        },
     }
 }
 
@@ -157,14 +155,13 @@ unsafe extern "system" fn hook_create_window_ex_a(
     h_instance: HMODULE,
     lp_param: *mut c_void,
 ) -> HWND {
-    unsafe {
-        // IME and sound-thread helpers also use this import, but we only want the game's render window.
-        // We match by class name "BASE" to catch both fullscreen (`WS_POPUP`) and windowed (no `WS_POPUP`) branches.
-        let is_main = h_wnd_parent.is_null()
-            && Untrusted::from_raw(lp_class_name).matches_nul_terminated(b"BASE");
-        let (use_w, use_h) =
-            prep_main_window(is_main, dw_ex_style, dw_style, x, y, n_width, n_height);
-        let hwnd = real_create_window_ex_a(
+    // IME and sound-thread helpers also use this import, but we only want the game's render window.
+    // We match by class name "BASE" to catch both fullscreen (`WS_POPUP`) and windowed (no `WS_POPUP`) branches.
+    let is_main = h_wnd_parent.is_null()
+        && Untrusted::from_raw(lp_class_name).matches_nul_terminated(b"BASE");
+    let (use_w, use_h) = prep_main_window(is_main, dw_ex_style, dw_style, x, y, n_width, n_height);
+    let hwnd = unsafe {
+        real_create_window_ex_a(
             dw_ex_style,
             lp_class_name,
             lp_window_name,
@@ -177,12 +174,12 @@ unsafe extern "system" fn hook_create_window_ex_a(
             h_menu,
             h_instance,
             lp_param,
-        );
-        finish_main_window(hwnd, is_main, || {
-            build_extended_title_from_sjis(Untrusted::from_raw(lp_window_name))
-        });
-        hwnd
-    }
+        )
+    };
+    finish_main_window(hwnd, is_main, || {
+        build_extended_title_from_sjis(Untrusted::from_raw(lp_window_name))
+    });
+    hwnd
 }
 
 unsafe extern "system" fn hook_create_window_ex_w(
@@ -201,12 +198,11 @@ unsafe extern "system" fn hook_create_window_ex_w(
 ) -> HWND {
     const BASE_CLASS_W: [u16; 4] = [b'B' as u16, b'A' as u16, b'S' as u16, b'E' as u16];
 
-    unsafe {
-        let is_main = h_wnd_parent.is_null()
-            && Untrusted::from_raw(lp_class_name).matches_nul_terminated(&BASE_CLASS_W);
-        let (use_w, use_h) =
-            prep_main_window(is_main, dw_ex_style, dw_style, x, y, n_width, n_height);
-        let hwnd = real_create_window_ex_w(
+    let is_main = h_wnd_parent.is_null()
+        && Untrusted::from_raw(lp_class_name).matches_nul_terminated(&BASE_CLASS_W);
+    let (use_w, use_h) = prep_main_window(is_main, dw_ex_style, dw_style, x, y, n_width, n_height);
+    let hwnd = unsafe {
+        real_create_window_ex_w(
             dw_ex_style,
             lp_class_name,
             lp_window_name,
@@ -219,12 +215,12 @@ unsafe extern "system" fn hook_create_window_ex_w(
             h_menu,
             h_instance,
             lp_param,
-        );
-        finish_main_window(hwnd, is_main, || {
-            build_extended_title_from_wide(Untrusted::from_raw(lp_window_name))
-        });
-        hwnd
-    }
+        )
+    };
+    finish_main_window(hwnd, is_main, || {
+        build_extended_title_from_wide(Untrusted::from_raw(lp_window_name))
+    });
+    hwnd
 }
 
 /// Geometry for the main render window. Returns the `(width, height)` to pass to `CreateWindowEx*`.
@@ -284,13 +280,14 @@ fn finish_main_window(hwnd: HWND, is_main: bool, build_title: impl FnOnce() -> V
 
     let title = build_title();
     match STATE.get().unwrap() {
-        State::Restyle { restyle, .. } => unsafe {
-            if GetWindowLongA(hwnd, GWL_STYLE).cast_unsigned() & WS_POPUP == 0 {
+        State::Restyle { restyle, .. } => {
+            let style = unsafe { GetWindowLongA(hwnd, GWL_STYLE) };
+            if style.cast_unsigned() & WS_POPUP == 0 {
                 apply(hwnd, restyle, &title);
             } else {
-                apply_deferred(hwnd, restyle.always_on_top, &title);
+                unsafe { apply_deferred(hwnd, restyle.always_on_top, &title) };
             }
-        },
+        }
         State::DeferToGame { always_on_top } => unsafe {
             apply_deferred(hwnd, *always_on_top, &title);
         },
@@ -303,31 +300,31 @@ fn finish_main_window(hwnd: HWND, is_main: bool, build_title: impl FnOnce() -> V
 /// For an ANSI window, the text is converted from UTF-16 to ANSI for the game's procedure and back for storage.
 /// Both go through the system ANSI code page, which mangles Japanese text on non-Japanese locales.
 unsafe fn set_window_text_lossless(hwnd: HWND, title: &[u16]) {
+    // We assume the games' window procedures ignore `WM_SETTEXT`.
     unsafe {
-        // We assume the games' window procedures ignore `WM_SETTEXT`.
         DefWindowProcW(
             hwnd,
             WM_SETTEXT,
             0,
             title.as_ptr().expose_provenance().cast_signed(),
         );
-        // `InternalGetWindowText` reads the internal Unicode buffer directly — the same source the
-        // title bar and taskbar render from — bypassing the lossy `WM_GETTEXT` ANSI thunk.
-        let mut stored = [0u16; 128];
-        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-        let n = InternalGetWindowText(hwnd, stored.as_mut_ptr(), stored.len() as i32);
-        info!(
-            kind = "window_title_set",
-            title = %String::from_utf16_lossy(&stored[..n.max(0).cast_unsigned() as usize]),
-        );
     }
+    // `InternalGetWindowText` reads the internal Unicode buffer directly — the same source the
+    // title bar and taskbar render from — bypassing the lossy `WM_GETTEXT` ANSI thunk.
+    let mut stored = [0u16; 128];
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let n = unsafe { InternalGetWindowText(hwnd, stored.as_mut_ptr(), stored.len() as i32) };
+    info!(
+        kind = "window_title_set",
+        title = %String::from_utf16_lossy(&stored[..n.max(0).cast_unsigned() as usize]),
+    );
 }
 
 /// [`apply`] without geometry/style modifications.
 unsafe fn apply_deferred(hwnd: HWND, always_on_top: bool, title: &[u16]) {
-    unsafe {
-        set_window_text_lossless(hwnd, title);
-        if always_on_top {
+    unsafe { set_window_text_lossless(hwnd, title) };
+    if always_on_top {
+        unsafe {
             SetWindowPos(
                 hwnd,
                 HWND_TOPMOST,
@@ -375,43 +372,40 @@ fn append_suffix(wide: &mut Vec<u16>) {
 }
 
 fn apply(hwnd: HWND, cfg: &ResolvedWindowCfg, title: &[u16]) {
-    unsafe {
-        // We do this before `SetWindowPos` so the `SWP_FRAMECHANGED`-driven first paint of the title bar gets the new UTF-16 title.
-        set_window_text_lossless(hwnd, title);
+    // We do this before `SetWindowPos` so the `SWP_FRAMECHANGED`-driven first paint of the title bar gets the new UTF-16 title.
+    unsafe { set_window_text_lossless(hwnd, title) };
 
-        let style: WINDOW_STYLE = match cfg.frame {
-            WindowFrame::Framed => {
-                WS_OVERLAPPED
-                    | WS_SYSMENU
-                    | WS_VISIBLE
-                    | WS_CAPTION
-                    | WS_MINIMIZEBOX
-                    | WS_MAXIMIZEBOX
-            }
-            WindowFrame::Frameless => {
-                WS_OVERLAPPED | WS_SYSMENU | WS_VISIBLE | WS_MINIMIZEBOX | WS_MAXIMIZEBOX
-            }
-            WindowFrame::Borderless => WS_POPUP | WS_VISIBLE,
-        };
-        let ex_style: WINDOW_EX_STYLE = 0;
+    let style: WINDOW_STYLE = match cfg.frame {
+        WindowFrame::Framed => {
+            WS_OVERLAPPED | WS_SYSMENU | WS_VISIBLE | WS_CAPTION | WS_MINIMIZEBOX | WS_MAXIMIZEBOX
+        }
+        WindowFrame::Frameless => {
+            WS_OVERLAPPED | WS_SYSMENU | WS_VISIBLE | WS_MINIMIZEBOX | WS_MAXIMIZEBOX
+        }
+        WindowFrame::Borderless => WS_POPUP | WS_VISIBLE,
+    };
+    let ex_style: WINDOW_EX_STYLE = 0;
+    unsafe {
         SetWindowLongA(hwnd, GWL_STYLE, style.cast_signed());
         SetWindowLongA(hwnd, GWL_EXSTYLE, ex_style.cast_signed());
+    }
 
-        let mut rc = RECT {
-            left: 0,
-            top: 0,
-            right: cfg.width.cast_signed(),
-            bottom: cfg.height.cast_signed(),
-        };
-        AdjustWindowRectEx(&raw mut rc, style, 0, ex_style);
+    let mut rc = RECT {
+        left: 0,
+        top: 0,
+        right: cfg.width.cast_signed(),
+        bottom: cfg.height.cast_signed(),
+    };
+    unsafe { AdjustWindowRectEx(&raw mut rc, style, 0, ex_style) };
 
-        let w = rc.right - rc.left;
-        let h = rc.bottom - rc.top;
-        let after = if cfg.always_on_top {
-            HWND_TOPMOST
-        } else {
-            null_mut()
-        };
+    let w = rc.right - rc.left;
+    let h = rc.bottom - rc.top;
+    let after = if cfg.always_on_top {
+        HWND_TOPMOST
+    } else {
+        null_mut()
+    };
+    unsafe {
         SetWindowPos(
             hwnd,
             after,

@@ -153,46 +153,48 @@ mod tests {
 
     #[test]
     fn read_stops_at_guard_page() {
-        unsafe {
-            let base = VirtualAlloc(
+        let base = unsafe {
+            VirtualAlloc(
                 null(),
                 2 * PAGE_SIZE,
                 MEM_COMMIT | MEM_RESERVE,
                 PAGE_READWRITE,
-            );
-            assert!(!base.is_null());
-            let mut old = 0u32;
-            assert_ne!(
+            )
+        };
+        assert!(!base.is_null());
+        let mut old = 0u32;
+        assert_ne!(
+            unsafe {
                 VirtualProtect(
                     base.wrapping_byte_add(PAGE_SIZE),
                     PAGE_SIZE,
                     PAGE_NOACCESS,
                     &raw mut old,
-                ),
-                0,
-            );
+                )
+            },
+            0,
+        );
 
-            // "th6_01.rpy\0" is placed so the NUL is the last readable byte.
-            let s = b"th6_01.rpy\0";
-            let start = base.cast::<u8>().wrapping_add(PAGE_SIZE - s.len());
-            copy_nonoverlapping(s.as_ptr(), start, s.len());
+        // "th6_01.rpy\0" is placed so the NUL is the last readable byte.
+        let s = b"th6_01.rpy\0";
+        let start = base.cast::<u8>().wrapping_add(PAGE_SIZE - s.len());
+        unsafe { copy_nonoverlapping(s.as_ptr(), start, s.len()) };
 
-            let mut buf = [0u8; 521]; // `2 * MAX_PATH + 1`; see ansi.rs
-            let read = Untrusted::from_raw(start.cast_const())
-                .safe_read_terminated(&mut buf, 0)
-                .map(<[u8]>::to_vec);
-            assert_eq!(read.as_deref(), Some(&s[..s.len() - 1]));
+        let mut buf = [0u8; 521]; // `2 * MAX_PATH + 1`; see ansi.rs
+        let read = Untrusted::from_raw(start.cast_const())
+            .safe_read_terminated(&mut buf, 0)
+            .map(<[u8]>::to_vec);
+        assert_eq!(read.as_deref(), Some(&s[..s.len() - 1]));
 
-            // An unterminated run into the guard page still refuses.
-            let tail = base.cast::<u8>().wrapping_add(PAGE_SIZE - 4);
-            write_bytes(tail, b'X', 4);
-            let mut buf = [0u8; 64];
-            assert_eq!(
-                Untrusted::from_raw(tail.cast_const()).safe_read_terminated(&mut buf, 0),
-                None,
-            );
+        // An unterminated run into the guard page still refuses.
+        let tail = base.cast::<u8>().wrapping_add(PAGE_SIZE - 4);
+        unsafe { write_bytes(tail, b'X', 4) };
+        let mut buf = [0u8; 64];
+        assert_eq!(
+            Untrusted::from_raw(tail.cast_const()).safe_read_terminated(&mut buf, 0),
+            None,
+        );
 
-            VirtualFree(base, 0, MEM_RELEASE);
-        }
+        unsafe { VirtualFree(base, 0, MEM_RELEASE) };
     }
 }

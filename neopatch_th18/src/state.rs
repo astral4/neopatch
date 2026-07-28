@@ -35,9 +35,7 @@ pub(crate) fn replay_mode(tok: &MainToken) -> ReplayMode {
 /// # Safety
 /// `host` must be a loaded module handle.
 pub(crate) unsafe fn install(host: HMODULE) {
-    unsafe {
-        REAL_GET_KEYBOARD_STATE.install(host, hook_get_keyboard_state);
-    }
+    unsafe { REAL_GET_KEYBOARD_STATE.install(host, hook_get_keyboard_state) };
 }
 
 unsafe extern "system" fn hook_get_keyboard_state(lp_key_state: *mut u8) -> i32 {

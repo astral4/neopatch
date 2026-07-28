@@ -307,9 +307,7 @@ fn ensure_parent(path: &[u8]) {
         return;
     }
     let parent = nul_terminate(&path[..sep_idx]);
-    unsafe {
-        CreateDirectoryA(parent.as_ptr(), null());
-    }
+    unsafe { CreateDirectoryA(parent.as_ptr(), null()) };
 }
 
 /// Constructs a 24bpp BGR Windows BMP byte stream.
@@ -420,9 +418,7 @@ fn write_atomic(tmp: &[u8], dst: &[u8], data: &[u8]) -> Result<(), String> {
 
     // We clear any leftover tempfile from a previous crashed write
     // so `CREATE_ALWAYS` doesn't inherit attributes/ACLs from a half-written file.
-    unsafe {
-        DeleteFileA(tmp_c.as_ptr());
-    }
+    unsafe { DeleteFileA(tmp_c.as_ptr()) };
 
     let h = unsafe {
         CreateFileA(
@@ -449,23 +445,17 @@ fn write_atomic(tmp: &[u8], dst: &[u8], data: &[u8]) -> Result<(), String> {
     } else {
         None
     };
-    unsafe {
-        CloseHandle(h);
-    }
+    unsafe { CloseHandle(h) };
 
     if let Some(e) = write_err {
-        unsafe {
-            DeleteFileA(tmp_c.as_ptr());
-        }
+        unsafe { DeleteFileA(tmp_c.as_ptr()) };
         return Err(e);
     }
 
     let move_ok = unsafe { MoveFileExA(tmp_c.as_ptr(), dst_c.as_ptr(), MOVEFILE_REPLACE_EXISTING) };
     if move_ok == 0 {
         let err = unsafe { GetLastError() };
-        unsafe {
-            DeleteFileA(tmp_c.as_ptr());
-        }
+        unsafe { DeleteFileA(tmp_c.as_ptr()) };
         return Err(format!("MoveFileExA gle={err}"));
     }
     Ok(())
