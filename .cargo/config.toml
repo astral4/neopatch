@@ -1,6 +1,9 @@
 [build]
 target = "i686-pc-windows-gnu"
 
+[unstable]
+panic-abort-tests = true
+
 [target.i686-pc-windows-gnu]
 runner = "wine"
 

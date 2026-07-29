@@ -3,10 +3,10 @@ build game:
     cp target/i686-pc-windows-gnu/release/neopatch_{{game}}.dll sandbox/games/{{game}}/dinput8.dll
 
 _test game:
-    cargo +nightly test -p neopatch_{{game}} --release -Zpanic-abort-tests
+    cargo +nightly test -p neopatch_{{game}} --release
 
 test:
-    cargo +nightly test --workspace --release -Zpanic-abort-tests
+    cargo +nightly test --workspace --release
 
 _clippy game:
     cargo clippy -p neopatch_{{game}} --release --all-targets -- -D warnings
