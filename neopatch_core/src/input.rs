@@ -180,76 +180,42 @@ mod tests {
     use super::*;
 
     #[test]
-    fn convert_pov_cardinal_up_zeroes_lx() {
-        let (lx, ly) = convert_pov(0, 12345, -6789);
-        assert_eq!(lx, 0);
-        assert_eq!(ly, i32::MIN);
-    }
-
-    #[test]
-    fn convert_pov_cardinal_right_zeroes_ly() {
-        let (lx, ly) = convert_pov(9000, -12345, 6789);
-        assert_eq!(lx, i32::MAX);
-        assert_eq!(ly, 0);
-    }
-
-    #[test]
-    fn convert_pov_cardinal_down_zeroes_lx() {
-        let (lx, ly) = convert_pov(18000, 12345, -6789);
-        assert_eq!(lx, 0);
-        assert_eq!(ly, i32::MAX);
-    }
-
-    #[test]
-    fn convert_pov_cardinal_left_zeroes_ly() {
-        let (lx, ly) = convert_pov(27000, 12345, 6789);
-        assert_eq!(lx, i32::MIN);
-        assert_eq!(ly, 0);
-    }
-
-    #[test]
-    fn convert_pov_diagonal_ne_sets_both_axes() {
-        assert_eq!(convert_pov(4500, 0, 0), (i32::MAX, i32::MIN));
-    }
-
-    #[test]
-    fn convert_pov_diagonal_se_sets_both_axes() {
-        assert_eq!(convert_pov(13500, 0, 0), (i32::MAX, i32::MAX));
-    }
-
-    #[test]
-    fn convert_pov_diagonal_sw_sets_both_axes() {
-        assert_eq!(convert_pov(22500, 0, 0), (i32::MIN, i32::MAX));
-    }
-
-    #[test]
-    fn convert_pov_diagonal_nw_sets_both_axes() {
-        assert_eq!(convert_pov(31500, 0, 0), (i32::MIN, i32::MIN));
+    fn convert_pov_directions() {
+        // The four cardinals and the four diagonals sitting on the boundaries where two cardinal ranges meet.
+        // The input axes are nonzero throughout, so every row also proves the game's originals get overwritten.
+        for (pov, expected) in [
+            (0, (0, i32::MIN)),            // N
+            (4500, (i32::MAX, i32::MIN)),  // NE
+            (9000, (i32::MAX, 0)),         // E
+            (13500, (i32::MAX, i32::MAX)), // SE
+            (18000, (0, i32::MAX)),        // S
+            (22500, (i32::MIN, i32::MAX)), // SW
+            (27000, (i32::MIN, 0)),        // W
+            (31500, (i32::MIN, i32::MIN)), // NW
+        ] {
+            assert_eq!(convert_pov(pov, 12345, -6789), expected, "pov={pov}");
+        }
     }
 
     #[test]
     fn convert_pov_centered_passes_axes_through() {
         for centered in [0xffff_ffffu32, 0xffff, 36000, 99999] {
-            let (lx, ly) = convert_pov(centered, 123, -456);
-            assert_eq!(lx, 123, "pov={centered:#x}");
-            assert_eq!(ly, -456, "pov={centered:#x}");
+            assert_eq!(
+                convert_pov(centered, 123, -456),
+                (123, -456),
+                "pov={centered:#x}",
+            );
         }
+        // Extreme axis values survive the pass-through untouched.
+        assert_eq!(
+            convert_pov(u32::MAX, i32::MIN, i32::MIN),
+            (i32::MIN, i32::MIN),
+        );
     }
 
     #[test]
     fn convert_pov_just_before_diagonal_is_cardinal() {
-        let (lx, ly) = convert_pov(4499, 100, 200);
-        assert_eq!(lx, 0);
-        assert_eq!(ly, i32::MIN);
-        let (lx, ly) = convert_pov(4501, 100, 200);
-        assert_eq!(lx, i32::MAX);
-        assert_eq!(ly, 0);
-    }
-
-    #[test]
-    fn convert_pov_preserves_negative_inputs_when_centered() {
-        let (lx, ly) = convert_pov(u32::MAX, i32::MIN, i32::MIN);
-        assert_eq!(lx, i32::MIN);
-        assert_eq!(ly, i32::MIN);
+        assert_eq!(convert_pov(4499, 100, 200), (0, i32::MIN));
+        assert_eq!(convert_pov(4501, 100, 200), (i32::MAX, 0));
     }
 }

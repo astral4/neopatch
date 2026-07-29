@@ -19,7 +19,7 @@ const DEFAULT_SESSIONS_TO_KEEP: NonZero<u32> = NonZero::new(10).unwrap();
 /// Process-wide handle to the active core configuration. Set by the game crate at install time, before any hook that reads it.
 pub static CONFIG: OnceLock<CoreConfig> = OnceLock::new();
 
-#[derive(Default)]
+#[derive(Debug, Default, PartialEq, Eq)]
 pub struct CoreConfig {
     pub display: DisplayCfg,
     pub window: WindowCfg,
@@ -29,6 +29,7 @@ pub struct CoreConfig {
     pub log: LogCfg,
 }
 
+#[derive(Debug, PartialEq, Eq)]
 pub struct DisplayCfg {
     pub mode: DisplayMode,
     /// Ignored in windowed mode.
@@ -47,7 +48,7 @@ impl Default for DisplayCfg {
 // Window dimensions and frame default to game-derived values supplied at install time:
 // matching framebuffer dimensions; `Borderless` in fullscreen and `Frameless` in windowed.
 // This configuration only applies to windowed-mode (non-popup) window creations since exclusive-fullscreen is managed by D3D.
-#[derive(Default)]
+#[derive(Debug, Default, PartialEq, Eq)]
 pub struct WindowCfg {
     pub x: i32,
     pub y: i32,
@@ -59,7 +60,7 @@ pub struct WindowCfg {
 
 // Game logic is frame-locked at one tick per `Present`, so higher rates speed everything up.
 // A field set to `0` disengages the pacer for that mode, making `Present` run as fast as the CPU/GPU allows.
-#[allow(clippy::struct_field_names)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct FramerateCfg {
     pub game_fps: u32,
     pub replay_skip_fps: u32,
@@ -76,6 +77,7 @@ impl Default for FramerateCfg {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
 pub struct InputCfg {
     /// Fold joystick POV hat / D-pad inputs into directions read by the game.
     pub dpad: bool,
@@ -87,6 +89,7 @@ impl Default for InputCfg {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
 pub struct ProcessCfg {
     pub priority: PriorityClass,
     /// `None` means `SetProcessAffinityMask` is not called and the OS scheduler default is used.
@@ -103,6 +106,7 @@ impl Default for ProcessCfg {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
 pub struct LogCfg {
     pub level: LevelFilter,
     pub sessions_to_keep: NonZero<u32>,
@@ -606,16 +610,8 @@ mod tests {
         // No radix prefix support here.
         assert_eq!(parse_refresh_rate("0xFF"), None);
         assert_eq!(parse_refresh_rate("garbage"), None);
-    }
-
-    #[test]
-    fn parse_refresh_rate_rejects_zero() {
         assert_eq!(parse_refresh_rate("0"), None);
         assert_eq!(parse_refresh_rate("0x0"), None);
-        assert_eq!(
-            parse_refresh_rate("60"),
-            Some(RefreshRateMode::Fixed(nz(60)))
-        );
     }
 
     #[test]
@@ -633,23 +629,14 @@ mod tests {
     }
 
     #[test]
-    fn parse_level_off_disables_logging() {
+    fn apply_log_sets_known_keys() {
         let mut cfg = LogCfg::default();
         apply_log(&mut cfg, "level", "off");
-        assert_eq!(cfg.level, LevelFilter::OFF);
-    }
-
-    #[test]
-    fn apply_log_zero_sessions_to_keep_falls_back_to_default() {
-        let mut cfg = LogCfg::default();
+        // Zero sessions would delete the session being written, so it falls back to the default.
         apply_log(&mut cfg, "sessions_to_keep", "0");
-        assert_eq!(cfg.sessions_to_keep, DEFAULT_SESSIONS_TO_KEEP);
-    }
-
-    #[test]
-    fn apply_log_blank_log_dir_is_none() {
-        let mut cfg = LogCfg::default();
         apply_log(&mut cfg, "log_dir", "");
+        assert_eq!(cfg.level, LevelFilter::OFF);
+        assert_eq!(cfg.sessions_to_keep, DEFAULT_SESSIONS_TO_KEEP);
         assert_eq!(cfg.log_dir, None);
     }
 
@@ -682,25 +669,23 @@ mod tests {
         apply_window(&mut cfg, "always_on_top", "true");
         apply_window(&mut cfg, "frame", "borderless");
         assert_eq!(cfg.width, Some(nz(1920)));
+        // An unset dimension remains `None` so the game-derived value is used.
         assert_eq!(cfg.height, None);
         assert_eq!(cfg.frame, Some(WindowFrame::Borderless));
         assert!(cfg.always_on_top);
     }
 
     #[test]
-    fn apply_window_zero_dim_falls_back_to_none() {
-        let mut cfg = WindowCfg::default();
-        apply_window(&mut cfg, "width", "0");
-        apply_window(&mut cfg, "height", "0");
-        assert_eq!(cfg.width, None);
-        assert_eq!(cfg.height, None);
-    }
+    fn zero_means_unset() {
+        let mut window = WindowCfg::default();
+        apply_window(&mut window, "width", "0");
+        apply_window(&mut window, "height", "0");
+        assert_eq!(window.width, None);
+        assert_eq!(window.height, None);
 
-    #[test]
-    fn apply_process_zero_affinity_mask_is_none() {
-        let mut cfg = ProcessCfg::default();
-        apply_process(&mut cfg, "affinity_mask", "0");
-        assert_eq!(cfg.affinity_mask, None);
+        let mut process = ProcessCfg::default();
+        apply_process(&mut process, "affinity_mask", "0");
+        assert_eq!(process.affinity_mask, None);
     }
 
     #[test]
@@ -743,10 +728,7 @@ mod tests {
 
     #[test]
     fn parse_core_only_empty_matches_defaults() {
-        let cfg = parse_core_only("");
-        assert_eq!(cfg.display.mode, DisplayMode::Windowed);
-        assert_eq!(cfg.display.refresh_rate, RefreshRateMode::NativeMultiple);
-        assert_eq!(cfg.framerate.game_fps, DEFAULT_GAME_FPS);
+        assert_eq!(parse_core_only(""), CoreConfig::default());
     }
 
     #[test]

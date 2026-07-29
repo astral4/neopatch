@@ -231,60 +231,40 @@ fn pcwstr_to_string(p: Untrusted<u16>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        MAX_MSGBOX_LEN, has_non_ascii as has_non_ascii_scratch, opt_pcwstr, widen as widen_scratch,
-    };
+    use super::{MAX_MSGBOX_LEN, has_non_ascii, opt_pcwstr, widen};
     use crate::ansi::CP_SHIFT_JIS;
     use std::ptr::null;
     use windows_sys::core::PCSTR;
 
-    const TEXT_SHIFT_JIS: &[u8] = &[0x93, 0x8c, 0x95, 0xfb, 0x00];
-    const TEXT_WIDE: &[u16] = &[0x6771, 0x65b9, 0];
-
-    fn has_non_ascii(p: PCSTR) -> bool {
-        has_non_ascii_scratch(p, &mut [0u8; MAX_MSGBOX_LEN])
-    }
-
-    fn widen(p: PCSTR) -> Result<Option<Vec<u16>>, ()> {
-        widen_scratch(CP_SHIFT_JIS, p, &mut [0u8; MAX_MSGBOX_LEN])
-    }
-
     #[test]
-    fn null_side_passthrough() {
-        assert!(!has_non_ascii(null()));
-        let side = widen(null()).unwrap();
-        assert!(side.is_none());
-        assert!(opt_pcwstr(side.as_deref()).is_null());
-    }
+    fn text_widening() {
+        const EMPTY_WIDE: &[u16] = &[0];
+        const ASCII_WIDE: &[u16] = &[0x6f, 0x6f, 0x70, 0x73, 0];
+        const TEXT_SHIFT_JIS: &[u8] = &[0x93, 0x8c, 0x95, 0xfb, 0x00];
+        const TEXT_WIDE: &[u16] = &[0x6771, 0x65b9, 0];
 
-    #[test]
-    fn ascii_side_not_on_w_path() {
-        for s in [c"oops", c""] {
-            assert!(!has_non_ascii(s.as_ptr().cast()), "{s:?}");
-            let side = widen(s.as_ptr().cast()).unwrap();
-            assert!(!opt_pcwstr(side.as_deref()).is_null(), "{s:?}");
+        // (label, input, whether it needs the W path, widened form)
+        let cases: [(&str, PCSTR, bool, Option<&[u16]>); 4] = [
+            ("null", null(), false, None),
+            ("empty", c"".as_ptr().cast(), false, Some(EMPTY_WIDE)),
+            ("ASCII", c"oops".as_ptr().cast(), false, Some(ASCII_WIDE)),
+            ("Shift-JIS", TEXT_SHIFT_JIS.as_ptr(), true, Some(TEXT_WIDE)),
+        ];
+
+        for (label, p, non_ascii, expected) in cases {
+            assert_eq!(
+                has_non_ascii(p, &mut [0u8; MAX_MSGBOX_LEN]),
+                non_ascii,
+                "{label}"
+            );
+
+            let side = widen(CP_SHIFT_JIS, p, &mut [0u8; MAX_MSGBOX_LEN]).unwrap();
+            assert_eq!(side.as_deref(), expected, "{label}");
+            assert_eq!(
+                opt_pcwstr(side.as_deref()).is_null(),
+                expected.is_none(),
+                "{label}",
+            );
         }
-    }
-
-    #[test]
-    fn ascii_widening_one_to_one() {
-        let side = widen(c"oops".as_ptr().cast()).unwrap();
-        assert_eq!(
-            side.as_deref(),
-            Some([0x6f, 0x6f, 0x70, 0x73, 0].as_slice())
-        );
-    }
-
-    #[test]
-    fn empty_string_widening() {
-        let side = widen(c"".as_ptr().cast()).unwrap();
-        assert_eq!(side.as_deref(), Some([0u16].as_slice()));
-    }
-
-    #[test]
-    fn shift_jis_conversion() {
-        assert!(has_non_ascii(TEXT_SHIFT_JIS.as_ptr()));
-        let side = widen(TEXT_SHIFT_JIS.as_ptr()).unwrap();
-        assert_eq!(side.as_deref(), Some(TEXT_WIDE));
     }
 }

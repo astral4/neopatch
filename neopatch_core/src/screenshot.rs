@@ -521,18 +521,13 @@ fn log_failed(path: &[u8], error: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use png::Decoder;
+    use super::build_png_24bpp;
+    use png::{BitDepth, ColorType, Decoder};
 
-    #[test]
-    fn build_png_24bpp_round_trips_pixels() {
-        // 2x2 source, 32bpp BGRX, pitch = 8 bytes/row, top-down.
-        #[rustfmt::skip]
-        let src: [u8; 16] = [
-            0xff, 0x00, 0x00, 0x00,  0x00, 0xff, 0x00, 0x00, // blue, green
-            0x00, 0x00, 0xff, 0x00,  0xff, 0xff, 0xff, 0x00, // red, white
-        ];
-        let encoded = unsafe { build_png_24bpp(2, 2, 8, src.as_ptr()) }.expect("encode");
+    /// Encodes a top-down 32bpp BGRX source and decodes the PNG back into `(width, height, RGB bytes)`.
+    fn round_trip(width: u32, height: u32, pitch: i32, src: &[u8]) -> (u32, u32, Vec<u8>) {
+        let encoded =
+            unsafe { build_png_24bpp(width, height, pitch, src.as_ptr()) }.expect("encode");
 
         let mut reader = Decoder::new(encoded.as_slice())
             .read_info()
@@ -540,39 +535,44 @@ mod tests {
         let mut buf = vec![0u8; reader.output_buffer_size()];
         let info = reader.next_frame(&mut buf).expect("next_frame");
 
-        assert_eq!((info.width, info.height), (2, 2));
         assert_eq!(info.color_type, ColorType::Rgb);
         assert_eq!(info.bit_depth, BitDepth::Eight);
-        assert_eq!(&buf[0..3], &[0x00, 0x00, 0xff], "(0,0) blue");
-        assert_eq!(&buf[3..6], &[0x00, 0xff, 0x00], "(1,0) green");
-        assert_eq!(&buf[6..9], &[0xff, 0x00, 0x00], "(0,1) red");
-        assert_eq!(&buf[9..12], &[0xff, 0xff, 0xff], "(1,1) white");
+
+        buf.truncate(info.buffer_size());
+        (info.width, info.height, buf)
     }
 
     #[test]
-    fn build_png_24bpp_handles_padded_pitch() {
-        // 2x3 source, 32bpp BGRX, pitch = 12 bytes/row, top-down. The 0xAA row-tail padding must be skipped by the stride math.
-        // If it leaked into the output, then the decoded pixels below would be wrong.
+    fn build_png_24bpp_round_trip() {
+        const BLUE: [u8; 3] = [0x00, 0x00, 0xff];
+        const GREEN: [u8; 3] = [0x00, 0xff, 0x00];
+        const RED: [u8; 3] = [0xff, 0x00, 0x00];
+        const WHITE: [u8; 3] = [0xff, 0xff, 0xff];
+        const YELLOW: [u8; 3] = [0xff, 0xff, 0x00];
+        const MAGENTA: [u8; 3] = [0xff, 0x00, 0xff];
+
+        // 2x2 source, pitch = 8 bytes/row. There is no row tail to skip.
         #[rustfmt::skip]
-        let src: [u8; 36] = [
-            0xff, 0x00, 0x00, 0x00,  0x00, 0xff, 0x00, 0x00,  0xaa, 0xaa, 0xaa, 0xaa, // blue, green
-            0x00, 0x00, 0xff, 0x00,  0xff, 0xff, 0xff, 0x00,  0xaa, 0xaa, 0xaa, 0xaa, // red, white
-            0x00, 0xff, 0xff, 0x00,  0xff, 0x00, 0xff, 0x00,  0xaa, 0xaa, 0xaa, 0xaa, // yellow, magenta
+        let tight: [u8; 16] = [
+            0xff, 0x00, 0x00, 0x00,    0x00, 0xff, 0x00, 0x00, // blue, green
+            0x00, 0x00, 0xff, 0x00,    0xff, 0xff, 0xff, 0x00, // red, white
         ];
-        let encoded = unsafe { build_png_24bpp(2, 3, 12, src.as_ptr()) }.expect("encode");
+        assert_eq!(
+            round_trip(2, 2, 8, &tight),
+            (2, 2, [BLUE, GREEN, RED, WHITE].concat()),
+        );
 
-        let mut reader = Decoder::new(encoded.as_slice())
-            .read_info()
-            .expect("read_info");
-        let mut buf = vec![0u8; reader.output_buffer_size()];
-        let info = reader.next_frame(&mut buf).expect("next_frame");
-
-        assert_eq!((info.width, info.height), (2, 3));
-        assert_eq!(&buf[0..3], &[0x00, 0x00, 0xff], "(0,0) blue");
-        assert_eq!(&buf[3..6], &[0x00, 0xff, 0x00], "(1,0) green");
-        assert_eq!(&buf[6..9], &[0xff, 0x00, 0x00], "(0,1) red");
-        assert_eq!(&buf[9..12], &[0xff, 0xff, 0xff], "(1,1) white");
-        assert_eq!(&buf[12..15], &[0xff, 0xff, 0x00], "(0,2) yellow");
-        assert_eq!(&buf[15..18], &[0xff, 0x00, 0xff], "(1,2) magenta");
+        // 2x3 source, pitch = 12 bytes/row. The 0xAA row tail padding must be skipped by the stride math.
+        // If it leaked into the output, then the decoded pixels would be wrong.
+        #[rustfmt::skip]
+        let padded: [u8; 36] = [
+            0xff, 0x00, 0x00, 0x00,    0x00, 0xff, 0x00, 0x00,    0xaa, 0xaa, 0xaa, 0xaa, // blue, green
+            0x00, 0x00, 0xff, 0x00,    0xff, 0xff, 0xff, 0x00,    0xaa, 0xaa, 0xaa, 0xaa, // red, white
+            0x00, 0xff, 0xff, 0x00,    0xff, 0x00, 0xff, 0x00,    0xaa, 0xaa, 0xaa, 0xaa, // yellow, magenta
+        ];
+        assert_eq!(
+            round_trip(2, 3, 12, &padded),
+            (2, 3, [BLUE, GREEN, RED, WHITE, YELLOW, MAGENTA].concat()),
+        );
     }
 }

@@ -65,7 +65,7 @@ impl Resolution {
         }
     }
 
-    /// Index of the render scale for this size and `mode`.
+    /// Index of the render scale for this size and `mode`. Indexes the game's scale table at `0x4b7fbc`.
     pub(crate) fn scale_index(self, mode: Th18DisplayMode) -> u8 {
         match self.radio_index(mode) {
             i @ 0..=2 => i,
@@ -153,16 +153,11 @@ pub(crate) fn write_manifest_extras<W: Write + ?Sized>(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use neopatch_core::config::{DisplayMode as CoreDisplayMode, PriorityClass, RefreshRateMode};
-    use std::num::NonZero;
-
-    fn nz(n: u32) -> NonZero<u32> {
-        NonZero::new(n).unwrap()
-    }
+    use super::{Resolution, Th18DisplayMode, parse_config, parse_display_mode, parse_resolution};
+    use neopatch_core::config::{CoreConfig, DisplayMode as CoreDisplayMode};
 
     #[test]
-    fn parse_resolution_accepts_canonical_trio() {
+    fn parse_resolution_setting() {
         assert_eq!(parse_resolution("640x480"), Some(Resolution::R640x480));
         assert_eq!(parse_resolution("960x720"), Some(Resolution::R960x720));
         assert_eq!(parse_resolution("1280x960"), Some(Resolution::R1280x960));
@@ -171,7 +166,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_display_mode_accepts_all_three() {
+    fn parse_display_mode_setting() {
         assert_eq!(
             parse_display_mode("windowed"),
             Some(Th18DisplayMode::Windowed)
@@ -188,61 +183,23 @@ mod tests {
     }
 
     #[test]
-    fn radio_index_combines_mode_and_resolution() {
-        assert_eq!(
-            Resolution::R640x480.radio_index(Th18DisplayMode::Fullscreen),
-            0,
-        );
-        assert_eq!(
-            Resolution::R960x720.radio_index(Th18DisplayMode::Fullscreen),
-            1,
-        );
-        assert_eq!(
-            Resolution::R1280x960.radio_index(Th18DisplayMode::Fullscreen),
-            2,
-        );
-        assert_eq!(
-            Resolution::R640x480.radio_index(Th18DisplayMode::Windowed),
-            3,
-        );
-        assert_eq!(
-            Resolution::R960x720.radio_index(Th18DisplayMode::Windowed),
-            4,
-        );
-        assert_eq!(
-            Resolution::R1280x960.radio_index(Th18DisplayMode::Windowed),
-            5,
-        );
-        assert_eq!(
-            Resolution::R640x480.radio_index(Th18DisplayMode::Borderless),
-            8,
-        );
-        assert_eq!(
-            Resolution::R960x720.radio_index(Th18DisplayMode::Borderless),
-            8,
-        );
-        assert_eq!(
-            Resolution::R1280x960.radio_index(Th18DisplayMode::Borderless),
-            8,
-        );
-    }
+    fn dialog_indices_match_startup_dialog() {
+        // Borderless has no resolution buttons of its own, so all three sizes collapse onto one pair.
+        let cases = [
+            (Th18DisplayMode::Fullscreen, Resolution::R640x480, 0, 0),
+            (Th18DisplayMode::Fullscreen, Resolution::R960x720, 1, 1),
+            (Th18DisplayMode::Fullscreen, Resolution::R1280x960, 2, 2),
+            (Th18DisplayMode::Windowed, Resolution::R640x480, 3, 0),
+            (Th18DisplayMode::Windowed, Resolution::R960x720, 4, 1),
+            (Th18DisplayMode::Windowed, Resolution::R1280x960, 5, 2),
+            (Th18DisplayMode::Borderless, Resolution::R640x480, 8, 5),
+            (Th18DisplayMode::Borderless, Resolution::R960x720, 8, 5),
+            (Th18DisplayMode::Borderless, Resolution::R1280x960, 8, 5),
+        ];
 
-    #[test]
-    fn scale_index_matches_dat_004b7fbc() {
-        for r in [
-            Resolution::R640x480,
-            Resolution::R960x720,
-            Resolution::R1280x960,
-        ] {
-            assert_eq!(
-                r.scale_index(Th18DisplayMode::Fullscreen),
-                r.radio_index(Th18DisplayMode::Fullscreen),
-            );
-            assert_eq!(
-                r.scale_index(Th18DisplayMode::Windowed),
-                r.radio_index(Th18DisplayMode::Windowed) - 3,
-            );
-            assert_eq!(r.scale_index(Th18DisplayMode::Borderless), 5);
+        for (mode, res, radio, scale) in cases {
+            assert_eq!(res.radio_index(mode), radio, "{mode:?} {res:?} radio");
+            assert_eq!(res.scale_index(mode), scale, "{mode:?} {res:?} scale");
         }
     }
 
@@ -266,10 +223,8 @@ mod tests {
     fn default_matches_documented_defaults() {
         let (th18, core) = parse_config("");
         assert_eq!(th18.display_mode, Th18DisplayMode::Windowed);
-        assert_eq!(core.display.mode, CoreDisplayMode::Windowed);
-        assert_eq!(core.display.refresh_rate, RefreshRateMode::NativeMultiple);
         assert_eq!(th18.resolution, Resolution::R1280x960);
-        assert_eq!(core.framerate.game_fps, 60);
+        assert_eq!(core, CoreConfig::default());
     }
 
     #[test]
@@ -277,24 +232,17 @@ mod tests {
         let text = "
             [framerate]
             game_fps = 120
-            replay_skip_fps = 480
-
-            [process]
-            priority = High
-            affinity_mask = 0xFF
 
             [display]
             mode = Borderless
             resolution = 960x720
         ";
         let (th18, core) = parse_config(text);
-        assert_eq!(core.framerate.game_fps, 120);
-        assert_eq!(core.framerate.replay_skip_fps, 480);
-        assert_eq!(core.process.priority, PriorityClass::High);
-        assert_eq!(core.process.affinity_mask, Some(nz(0xff)));
         assert_eq!(th18.display_mode, Th18DisplayMode::Borderless);
-        assert_eq!(core.display.mode, CoreDisplayMode::Fullscreen);
         assert_eq!(th18.resolution, Resolution::R960x720);
+        // The game's own display mode is what reaches the core config.
+        assert_eq!(core.display.mode, CoreDisplayMode::Fullscreen);
+        assert_eq!(core.framerate.game_fps, 120);
     }
 
     #[test]

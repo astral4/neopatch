@@ -22,13 +22,13 @@ pub(crate) enum Resolution {
 }
 
 const _: () = {
-    assert!(Resolution::R640x480 as u8 == 0);
-    assert!(Resolution::R960x720 as u8 == 1);
-    assert!(Resolution::R1280x960 as u8 == 2);
+    assert!(Resolution::R640x480.index() == 0);
+    assert!(Resolution::R960x720.index() == 1);
+    assert!(Resolution::R1280x960.index() == 2);
 };
 
 impl Resolution {
-    pub(crate) fn index(self) -> u8 {
+    pub(crate) const fn index(self) -> u8 {
         self as u8
     }
 
@@ -88,13 +88,8 @@ pub(crate) fn write_manifest_extras<W: Write + ?Sized>(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use neopatch_core::config::{DisplayMode, PriorityClass, RefreshRateMode};
-    use std::num::NonZero;
-
-    fn nz(n: u32) -> NonZero<u32> {
-        NonZero::new(n).unwrap()
-    }
+    use super::{Resolution, parse_config, parse_resolution};
+    use neopatch_core::config::{CoreConfig, DisplayMode};
 
     #[test]
     fn parse_resolution_rejects_unsupported() {
@@ -105,19 +100,10 @@ mod tests {
     }
 
     #[test]
-    fn resolution_index_locks_external_encoding() {
-        assert_eq!(Resolution::R640x480.index(), 0);
-        assert_eq!(Resolution::R960x720.index(), 1);
-        assert_eq!(Resolution::R1280x960.index(), 2);
-    }
-
-    #[test]
     fn default_matches_documented_defaults() {
         let (th16, core) = parse_config("");
-        assert_eq!(core.display.mode, DisplayMode::Windowed);
-        assert_eq!(core.display.refresh_rate, RefreshRateMode::NativeMultiple);
         assert_eq!(th16.resolution, Resolution::R1280x960);
-        assert_eq!(core.framerate.game_fps, 60);
+        assert_eq!(core, CoreConfig::default());
     }
 
     #[test]
@@ -125,39 +111,13 @@ mod tests {
         let text = "
             [framerate]
             game_fps = 120
-            replay_skip_fps = 480
-
-            [process]
-            priority = High
-            affinity_mask = 0xFF
 
             [display]
             resolution = 960x720
         ";
         let (th16, core) = parse_config(text);
-        assert_eq!(core.framerate.game_fps, 120);
-        assert_eq!(core.framerate.replay_skip_fps, 480);
-        assert_eq!(core.process.priority, PriorityClass::High);
-        assert_eq!(core.process.affinity_mask, Some(nz(0xff)));
         assert_eq!(th16.resolution, Resolution::R960x720);
-    }
-
-    #[test]
-    fn parse_silently_ignores_unknown() {
-        let text = "
-            [does_not_exist]
-            x = 1
-
-            [framerate]
-            unknown_key = whatever
-            game_fps = NotANumber
-
-            no_equals_sign
-            ; comment line
-            # also a comment
-        ";
-        let (_, core) = parse_config(text);
-        assert_eq!(core.framerate.game_fps, 60);
+        assert_eq!(core.framerate.game_fps, 120);
     }
 
     #[test]

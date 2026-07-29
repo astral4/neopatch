@@ -241,7 +241,7 @@ unsafe fn sites_hold(groups: &[&[PatchSite]]) -> bool {
 
     if let Some(site) = first_mismatch {
         error!(
-            kind = "preflight",
+            kind = "precheck",
             status = "HOST_MISMATCH",
             sites = total,
             held,
@@ -250,7 +250,7 @@ unsafe fn sites_hold(groups: &[&[PatchSite]]) -> bool {
         );
         false
     } else {
-        info!(kind = "preflight", status = "OK", sites = total);
+        info!(kind = "precheck", status = "OK", sites = total);
         true
     }
 }
@@ -260,7 +260,7 @@ fn abort_on_partial_patch(addr: usize, name: &'static str) -> ! {
         kind = "patch_write_refused",
         addr = format_args!("{addr:#010x}"),
         name,
-        detail = "protection changed between preflight and write; process is partially patched",
+        detail = "protection changed between precheck and write; process is partially patched",
     );
     flush();
     abort();
@@ -345,45 +345,46 @@ mod tests {
     }
 
     #[test]
-    fn written_bytes_replace() {
-        let site = PatchSite::replace(0x1000, &[0x74, 0x11], &[0xeb, 0x11], "test");
-        let mut buf = [0u8; MAX_PATCH_LEN];
-        assert_eq!(site.written_bytes(&mut buf), &[0xeb, 0x11]);
+    fn written_bytes_encoding() {
+        // Branch displacements are relative to the end of the 5-byte rel32, with the tail NOP-padded out
+        // to the length of the instruction being displaced.
+        let cases = [
+            (
+                PatchSite::replace(0x1000, &[0x74, 0x11], &[0xeb, 0x11], "replace"),
+                &[0xeb, 0x11][..],
+            ),
+            (
+                PatchSite::nop(0x1000, &[0x75, 0x22], "nop"),
+                &[0x90, 0x90][..],
+            ),
+            (
+                PatchSite::jmp(
+                    0x2000,
+                    &[0x0f, 0x8f, 0x00, 0x00, 0x00, 0x00],
+                    without_provenance_mut(0x1000),
+                    "jmp",
+                ),
+                &[0xe9, 0xfb, 0xef, 0xff, 0xff, 0x90][..],
+            ),
+            (
+                PatchSite::call(
+                    0x1000,
+                    &[0xff, 0x15, 0x00, 0x00, 0x00, 0x00],
+                    without_provenance_mut(0x2000),
+                    "call",
+                ),
+                &[0xe8, 0xfb, 0x0f, 0x00, 0x00, 0x90][..],
+            ),
+        ];
+
+        for (site, expected) in cases {
+            let mut buf = [0u8; MAX_PATCH_LEN];
+            assert_eq!(site.written_bytes(&mut buf), expected, "{}", site.name);
+        }
     }
 
     #[test]
-    fn written_bytes_jmp() {
-        let site = PatchSite::jmp(
-            0x2000,
-            &[0x0f, 0x8f, 0x00, 0x00, 0x00, 0x00],
-            without_provenance_mut(0x1000),
-            "test",
-        );
-        let mut buf = [0u8; MAX_PATCH_LEN];
-        assert_eq!(
-            site.written_bytes(&mut buf),
-            &[0xe9, 0xfb, 0xef, 0xff, 0xff, 0x90]
-        );
-    }
-
-    #[test]
-    fn written_bytes_call() {
-        let site = PatchSite::call(
-            0x1000,
-            &[0xff, 0x15, 0x00, 0x00, 0x00, 0x00],
-            without_provenance_mut(0x2000),
-            "test",
-        );
-        let mut buf = [0u8; MAX_PATCH_LEN];
-
-        assert_eq!(
-            site.written_bytes(&mut buf),
-            &[0xe8, 0xfb, 0x0f, 0x00, 0x00, 0x90]
-        );
-    }
-
-    #[test]
-    fn sites_hold_accept_matching_sites() {
+    fn precheck_success_then_install() {
         static A: Patchable = Patchable::new([0x74, 0x11]);
         static B: Patchable = Patchable::new([0x75, 0x22]);
 
@@ -398,48 +399,6 @@ mod tests {
         assert!(unsafe { sites_hold(&[&first, &second]) });
         assert_eq!(A.read(), [0x74, 0x11]);
         assert_eq!(B.read(), [0x75, 0x22]);
-    }
-
-    #[test]
-    fn sites_hold_reject_site_drifted() {
-        static A: Patchable = Patchable::new([0x74, 0x11]);
-
-        let sites = [
-            PatchSite::replace(A.addr(), &[0x74, 0x11], &[0xeb, 0x11], "works"),
-            PatchSite::replace(0x1000, &[0x74], &[0xeb], "out of image"),
-        ];
-
-        assert!(!unsafe { sites_hold(&[&sites]) });
-        assert_eq!(A.read(), [0x74, 0x11]);
-    }
-
-    #[test]
-    fn sites_hold_reject_bytes_drifted() {
-        static A: Patchable = Patchable::new([0x74, 0x11]);
-        static B: Patchable = Patchable::new([0x90, 0x90]);
-
-        let sites = [
-            PatchSite::replace(A.addr(), &[0x74, 0x11], &[0xeb, 0x11], "works"),
-            PatchSite::replace(B.addr(), &[0x74, 0x11], &[0xeb, 0x11], "drifted"),
-        ];
-
-        assert!(!unsafe { sites_hold(&[&sites]) });
-        assert_eq!(A.read(), [0x74, 0x11]);
-        assert_eq!(B.read(), [0x90, 0x90]);
-    }
-
-    #[test]
-    fn install_all_accept() {
-        static A: Patchable = Patchable::new([0x74, 0x11]);
-        static B: Patchable = Patchable::new([0x75, 0x22]);
-
-        let first = [PatchSite::replace(
-            A.addr(),
-            &[0x74, 0x11],
-            &[0xeb, 0x11],
-            "a",
-        )];
-        let second = [PatchSite::nop(B.addr(), &[0x75, 0x22], "b")];
 
         assert!(unsafe { install_all(&[&first, &second]) });
         assert_eq!(A.read(), [0xeb, 0x11]);
@@ -447,7 +406,28 @@ mod tests {
     }
 
     #[test]
-    fn install_all_reject() {
+    fn sites_hold_rejection() {
+        static A: Patchable = Patchable::new([0x74, 0x11]);
+        static B: Patchable = Patchable::new([0x90, 0x90]);
+
+        let sites = [
+            PatchSite::replace(A.addr(), &[0x74, 0x11], &[0xeb, 0x11], "works"),
+            PatchSite::replace(0x1000, &[0x74], &[0xeb], "out of image"),
+        ];
+        assert!(!unsafe { sites_hold(&[&sites]) });
+
+        let sites = [
+            PatchSite::replace(A.addr(), &[0x74, 0x11], &[0xeb, 0x11], "works"),
+            PatchSite::replace(B.addr(), &[0x74, 0x11], &[0xeb, 0x11], "drifted"),
+        ];
+        assert!(!unsafe { sites_hold(&[&sites]) });
+
+        assert_eq!(A.read(), [0x74, 0x11]);
+        assert_eq!(B.read(), [0x90, 0x90]);
+    }
+
+    #[test]
+    fn precheck_failure_then_install() {
         static A: Patchable = Patchable::new([0x74, 0x11]);
         static B: Patchable = Patchable::new([0x90, 0x90]);
 
