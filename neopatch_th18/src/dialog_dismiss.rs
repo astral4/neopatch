@@ -10,8 +10,8 @@ const SCALE_INDEX_VA: GameAddr<u8> = unsafe { GameAddr::new(0x004c_d012) };
 const DIALOG_LIFECYCLE_FLAGS_VA: GameAddr<u32> = unsafe { GameAddr::new(0x0056_ac70) };
 const DIALOG_LIFECYCLE_BITS: u32 = 0x300;
 
-const FUN_00474850: usize = 0x0047_4850;
-const FUN_00474850_PROLOGUE: [u8; 5] = [0x55, 0x8b, 0xec, 0x81, 0xec];
+const DIALOG_DISPATCH_VA: usize = 0x0047_4850;
+const DIALOG_DISPATCH_PROLOGUE: [u8; 5] = [0x55, 0x8b, 0xec, 0x81, 0xec];
 
 unsafe extern "stdcall" fn dialog_short_circuit() {
     let cfg = CONFIG.get().unwrap();
@@ -32,8 +32,8 @@ unsafe extern "stdcall" fn dialog_short_circuit() {
 }
 
 pub(crate) const DIALOG_PATCHES: &[PatchSite] = &[PatchSite::jmp(
-    FUN_00474850,
-    &FUN_00474850_PROLOGUE,
+    DIALOG_DISPATCH_VA,
+    &DIALOG_DISPATCH_PROLOGUE,
     dialog_short_circuit as *mut (),
     "dialog short-circuit (fcn.00474850)",
 )];
