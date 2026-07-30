@@ -31,7 +31,6 @@ use crate::{fmt_hr, iat_hook, match_named};
 use std::cmp::min;
 use std::ffi::c_void;
 use std::ptr::{NonNull, null, null_mut};
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU32, Ordering};
 use tracing::{error, info, warn};
 use windows::Win32::Foundation::{HANDLE, HWND, RECT};
@@ -250,12 +249,11 @@ pub const fn call_site_rewrite<const N: usize>(
 }
 
 /// Present-parameter policy for the devices created from one `IDirect3D9Ex` object.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) struct PresentPolicy {
     /// Keep `D3DPRESENTFLAG_LOCKABLE_BACKBUFFER` instead of stripping it.
     pub(crate) keep_lockable_back_buffer: bool,
     /// Substitute a 32-bit back buffer for a 16-bit request up front, rather than only after the device refuses one.
-    /// See [`run_with_present_failsafe`] for more details.
     pub(crate) upgrade_16bit_back_buffer: bool,
 }
 
@@ -272,20 +270,11 @@ unsafe extern "system" fn create_hooked_d3d9(sdk_version: u32) -> *mut c_void {
 }
 
 /// Creates an `IDirect3D9Ex` with our vtable hooks installed, exactly as if the game had called `Direct3DCreate9`.
-/// `policy` determines the present-parameter rewrites applied to every device created from it; see [`rewrite_present_params`].
+/// `policy` determines the present-parameter rewrites applied to every device created from it; see [`materialize`].
 pub(crate) unsafe fn create_hooked_d3d9_with(
     sdk_version: u32,
     policy: PresentPolicy,
 ) -> Option<NonNull<c_void>> {
-    let first = PRESENT_POLICY.set(policy).is_ok();
-    let effective = present_policy();
-    log_at!(first => info / warn,
-        kind = "present_params_policy",
-        keep_lockable_back_buffer = effective.keep_lockable_back_buffer,
-        upgrade_16bit_back_buffer = effective.upgrade_16bit_back_buffer,
-        status = if first { "OK" } else { "ALREADY_SET" },
-    );
-
     // The Ex object's first 17 vtable slots are the `IDirect3D9` vtable,
     // so the game can keep using the returned pointer as plain `IDirect3D9` while we get the Ex methods.
     let ex = match unsafe { Direct3DCreate9Ex(sdk_version) } {
@@ -312,6 +301,16 @@ pub(crate) unsafe fn create_hooked_d3d9_with(
         );
         return Some(p_ex);
     };
+
+    // A changed policy means two creation paths with different policies coexist in a single session, which no supported game does.
+    let replaced = SESSION_POLICY.get(&tok).is_some_and(|prev| prev != policy);
+    SESSION_POLICY.set(&tok, Some(policy));
+    log_at!(!replaced => info / warn,
+        kind = "present_params_policy",
+        keep_lockable_back_buffer = policy.keep_lockable_back_buffer,
+        upgrade_16bit_back_buffer = policy.upgrade_16bit_back_buffer,
+        status = if replaced { "REPLACED" } else { "OK" },
+    );
 
     // SAFETY: `p_ex` is the live object created above.
     unsafe { record_d3d9(&tok, p_ex) };
@@ -376,38 +375,54 @@ unsafe fn install_d3d9_hooks(d3d9_ex: NonNull<c_void>) {
     info!(kind = "d3d9_hooks_installed", protect_ok = result.is_some());
 }
 
-struct PresentParams {
-    before: Option<D3DPRESENT_PARAMETERS>,
-    after: Option<D3DPRESENT_PARAMETERS>,
-    display_mode: Option<D3DDISPLAYMODEEX>,
+/// The optional overrides active for one device creation/reset attempt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FixSet {
+    /// Pick the fullscreen refresh rate instead of resolving the game's own request. See [`pick_refresh_rate`].
+    rate_override: bool,
+    /// Substitute a 32-bit back buffer for a 16-bit request. See [`upgraded_back_buffer_format`].
+    format_upgrade: bool,
 }
 
-impl PresentParams {
-    fn empty() -> Self {
-        Self {
-            before: None,
-            after: None,
-            display_mode: None,
-        }
-    }
+/// One round of modification attempts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Round {
+    /// The primary attempt.
+    primary: FixSet,
+    /// The primary attempt without the refresh-rate override. This is tried when the primary attempt fails due to a non-transient error.
+    rollback: FixSet,
+}
 
-    /// Returns a tuple of the game's requested fullscreen rate, the rate after rewriting,
-    /// and whether an active display-mode override changed it.
-    fn refresh_override(&self) -> (u32, u32, bool) {
-        let original = self.before.map_or(0, |b| b.FullScreen_RefreshRateInHz);
-        let chosen = self.after.map_or(0, |a| a.FullScreen_RefreshRateInHz);
-        (
-            original,
-            chosen,
-            self.display_mode.is_some() && chosen != original,
-        )
-    }
+fn plan_attempts(policy_upgrade: bool, escalatable: bool) -> [Option<Round>; 2] {
+    let round = |format_upgrade| Round {
+        primary: FixSet {
+            rate_override: true,
+            format_upgrade,
+        },
+        rollback: FixSet {
+            rate_override: false,
+            format_upgrade,
+        },
+    };
 
-    /// Raw pointer to the fullscreen display mode for the Ex calls. This is populated for exclusive fullscreen and null for windowed.
-    fn display_mode_ptr(&mut self) -> *mut D3DDISPLAYMODEEX {
-        self.display_mode
-            .as_mut()
-            .map_or_else(null_mut, |m| &raw mut *m)
+    if !policy_upgrade && escalatable {
+        [Some(round(false)), Some(round(true))]
+    } else {
+        [Some(round(policy_upgrade)), None]
+    }
+}
+
+/// One fully-materialized device creation/reset attempt.
+struct Attempt {
+    pp: D3DPRESENT_PARAMETERS,
+    /// Populated for exclusive fullscreen; `None` for windowed.
+    mode: Option<D3DDISPLAYMODEEX>,
+}
+
+impl Attempt {
+    /// Returns a raw pointer to the fullscreen display mode for the Ex calls; null for windowed.
+    fn mode_ptr(&mut self) -> *mut D3DDISPLAYMODEEX {
+        self.mode.as_mut().map_or_else(null_mut, |m| &raw mut *m)
     }
 }
 
@@ -434,47 +449,252 @@ impl<'a> Adapter<'a> {
     }
 }
 
-/// Snapshots, rewrites, and (if exclusive fullscreen) populates a `D3DDISPLAYMODEEX`
-/// for the present-params block needed by both `CreateDeviceEx` and `ResetEx`.
-unsafe fn prep_present_params(
-    pp: *mut D3DPRESENT_PARAMETERS,
-    adapter: Adapter<'_>,
+/// A distinct-refresh-rate table for one back buffer format, as returned by [`enumerate_supported_rates`].
+type RateTable = ([u32; MAX_ENUM_RATES], usize);
+
+/// Adapter information used by [`materialize`].
+#[derive(Clone)]
+struct AdapterSnapshot {
+    /// The adapter's mode when sampling succeeded. Doubles as the [`warn_if_exclusive_degraded`] baseline.
     desktop_mode: Option<D3DDISPLAYMODEEX>,
-    upgrade_16bit_back_buffer: bool,
-) -> PresentParams {
-    let Some(p) = (unsafe { pp.as_mut() }) else {
-        return PresentParams::empty();
-    };
-    let before = *p;
-    rewrite_present_params(p, upgrade_16bit_back_buffer);
-    let display_mode = if p.Windowed.0 == 0 {
-        let cfg = CONFIG.get().unwrap();
-        unsafe { apply_refresh_override(p, adapter, cfg.display.refresh_rate, desktop_mode) };
-        p.FullScreen_RefreshRateInHz = unsafe { mode_refresh_rate(p, adapter, desktop_mode) };
-        Some(build_display_mode_ex(p))
-    } else {
-        None
-    };
-    PresentParams {
-        before: Some(before),
-        after: Some(*p),
-        display_mode,
+    /// The desktop refresh rate, resolved through the Win32 fallback chain down to 60 Hz.
+    desktop_rate: u32,
+    /// Supported rates per candidate back buffer format. The 16-bit-escalation attempts materialize
+    /// with a different format than the primary ones, and the two formats can advertise different mode sets.
+    rates: [(D3DFORMAT, RateTable); 2],
+    rates_len: usize,
+}
+
+impl AdapterSnapshot {
+    fn empty() -> Self {
+        Self {
+            desktop_mode: None,
+            desktop_rate: 60,
+            rates: [(D3DFMT_UNKNOWN, ([0; MAX_ENUM_RATES], 0)); 2],
+            rates_len: 0,
+        }
+    }
+
+    /// Returns the supported rates recorded for `format`, or an empty slice for a format that wasn't sampled.
+    fn rates_for(&self, format: D3DFORMAT) -> &[u32] {
+        self.rates[..self.rates_len]
+            .iter()
+            .find(|(f, _)| *f == format)
+            .map_or(&[], |(_, (rates, len))| &rates[..*len])
+    }
+
+    /// Samples the adapter for a fullscreen `requested`. Returns [`AdapterSnapshot::empty`] for windowed or null requests.
+    unsafe fn capture(
+        adapter: Adapter<'_>,
+        requested: Option<&D3DPRESENT_PARAMETERS>,
+        policy: PresentPolicy,
+        controls_timing: bool,
+    ) -> Self {
+        let Some(req) = requested else {
+            return Self::empty();
+        };
+        if req.Windowed.0 != 0 {
+            return Self::empty();
+        }
+
+        let desktop_mode = unsafe { sample_adapter_display_mode(adapter) };
+        // A rate pick happens exactly when the config override applies or the game's own rate is a magic value
+        // needing the `Native` default, and only picks consult the resolved desktop rate (rollbacks read the raw desktop mode).
+        // When no pick can occur, the Win32 fallback probe and its warn are skipped.
+        let will_pick = controls_timing || !is_real_refresh_rate(req.FullScreen_RefreshRateInHz);
+        let reported_hz = desktop_mode.map(|m| m.RefreshRate);
+        let desktop_rate = match reported_hz {
+            _ if !will_pick => 60,
+            Some(hz) if is_real_refresh_rate(hz) => hz,
+            _ => {
+                let device = unsafe { adapter_display_device(adapter) };
+                let win32_rate = win32_current_refresh_rate(device.as_ref());
+                let fallback = win32_rate.unwrap_or(60);
+                warn!(
+                    kind = "pick_refresh_rate_fallback",
+                    reported_hz = ?reported_hz,
+                    win32_rate = ?win32_rate,
+                    fallback,
+                );
+                fallback
+            }
+        };
+
+        let mut snap = Self {
+            desktop_mode,
+            desktop_rate,
+            ..Self::empty()
+        };
+        let windowed = req.Windowed.0 != 0;
+        let first = format_plan(
+            req.BackBufferFormat,
+            windowed,
+            policy.upgrade_16bit_back_buffer,
+        );
+        snap.rates[0] = (first.format, unsafe {
+            enumerate_supported_rates(
+                adapter,
+                first.format,
+                req.BackBufferWidth,
+                req.BackBufferHeight,
+            )
+        });
+        snap.rates_len = 1;
+
+        if !policy.upgrade_16bit_back_buffer {
+            let escalated = format_plan(req.BackBufferFormat, windowed, true);
+            if escalated.format != first.format {
+                snap.rates[1] = (escalated.format, unsafe {
+                    enumerate_supported_rates(
+                        adapter,
+                        escalated.format,
+                        req.BackBufferWidth,
+                        req.BackBufferHeight,
+                    )
+                });
+                snap.rates_len = 2;
+            }
+        }
+        snap
     }
 }
 
-/// The process-wide policy recorded by [`create_hooked_d3d9_with`]. See [`PresentPolicy`].
-static PRESENT_POLICY: OnceLock<PresentPolicy> = OnceLock::new();
+/// The back-buffer-format decision for one attempt.
+#[derive(Clone, Copy)]
+struct FormatPlan {
+    format: D3DFORMAT,
+    /// The format after the 16-bit upgrade, when that rule fired.
+    upgraded: Option<D3DFORMAT>,
+    /// Whether the fullscreen scanout substitution fired. `CreateDeviceEx` rejects `A8R8G8B8` in fullscreen
+    /// because it isn't scanout-compatible, so it is substituted with `X8R8G8B8`.
+    scanout_substituted: bool,
+}
 
-/// The recorded policy, or [`DIRECT_POLICY`] before one exists.
-fn present_policy() -> PresentPolicy {
-    PRESENT_POLICY.get().copied().unwrap_or(DIRECT_POLICY)
+fn format_plan(requested: D3DFORMAT, windowed: bool, upgrade: bool) -> FormatPlan {
+    let mut format = requested;
+    let mut upgraded = None;
+    if upgrade && let Some(up) = upgraded_back_buffer_format(format) {
+        format = up;
+        upgraded = Some(up);
+    }
+    let scanout_substituted = !windowed && format == D3DFMT_A8R8G8B8;
+    if scanout_substituted {
+        format = D3DFMT_X8R8G8B8;
+    }
+    FormatPlan {
+        format,
+        upgraded,
+        scanout_substituted,
+    }
+}
+
+/// Per-call configuration for one create/reset attempt sequence.
+struct LadderCtx {
+    snapshot: AdapterSnapshot,
+    policy: PresentPolicy,
+    /// Whether the pacer controls frame timing; see [`rewrite_present_params_impl`].
+    /// This also gates the config-driven rate override, which is meaningless when the game is left synced to vblank.
+    controls_timing: bool,
+    refresh_mode: RefreshRateMode,
+    /// Whether the attempt runner will actually pass the Ex display mode.
+    consumes_display_mode: bool,
+}
+
+impl LadderCtx {
+    /// Resolves the entire attempt sequence context for one hook call.
+    ///
+    /// # Safety
+    /// `pp` must be null or point to a live `D3DPRESENT_PARAMETERS`. `adapter` must be live for the call.
+    unsafe fn resolve(
+        tok: &MainToken,
+        adapter: Adapter<'_>,
+        pp: *mut D3DPRESENT_PARAMETERS,
+        consumes_display_mode: bool,
+    ) -> Self {
+        let policy = session_policy(tok);
+        let controls_timing = PACER.get().is_some();
+        Self {
+            snapshot: unsafe {
+                AdapterSnapshot::capture(adapter, pp.as_ref(), policy, controls_timing)
+            },
+            policy,
+            controls_timing,
+            refresh_mode: CONFIG.get().unwrap().display.refresh_rate,
+            consumes_display_mode,
+        }
+    }
+}
+
+/// Builds the complete attempt for `fixes` from the game's `requested` params.
+fn materialize(requested: &D3DPRESENT_PARAMETERS, fixes: FixSet, ctx: &LadderCtx) -> Attempt {
+    let mut pp = *requested;
+    rewrite_present_params_impl(
+        &mut pp,
+        PresentPolicy {
+            keep_lockable_back_buffer: ctx.policy.keep_lockable_back_buffer,
+            upgrade_16bit_back_buffer: fixes.format_upgrade,
+        },
+        ctx.controls_timing,
+    );
+
+    let mode = if pp.Windowed.0 == 0 {
+        let rates = ctx.snapshot.rates_for(pp.BackBufferFormat);
+        if fixes.rate_override {
+            if ctx.controls_timing {
+                pp.FullScreen_RefreshRateInHz =
+                    pick_refresh_rate(ctx.refresh_mode, rates, ctx.snapshot.desktop_rate);
+            }
+            // The Ex display mode must have a real refresh rate, so a leftover magic value is resolved with the `Native` policy.
+            if !is_real_refresh_rate(pp.FullScreen_RefreshRateInHz) {
+                let chosen =
+                    pick_refresh_rate(RefreshRateMode::Native, rates, ctx.snapshot.desktop_rate);
+                info!(
+                    kind = "display_mode_refresh_defaulted",
+                    requested_hz = pp.FullScreen_RefreshRateInHz,
+                    chosen_hz = chosen,
+                );
+                pp.FullScreen_RefreshRateInHz = chosen;
+            }
+        } else {
+            // We roll back the game's own rate, resolving a magic value to the sampled desktop rate for the display mode.
+            // We don't pick a rate again here since the pick has just been rejected and rederiving it would fail the same way.
+            let original = requested.FullScreen_RefreshRateInHz;
+            let mode_rate = if is_real_refresh_rate(original) {
+                original
+            } else {
+                ctx.snapshot
+                    .desktop_mode
+                    .map(|m| m.RefreshRate)
+                    .filter(|&r| is_real_refresh_rate(r))
+                    .unwrap_or(60)
+            };
+            pp.FullScreen_RefreshRateInHz = if ctx.consumes_display_mode {
+                mode_rate
+            } else {
+                original
+            };
+        }
+        Some(build_display_mode_ex(&pp))
+    } else {
+        None
+    };
+
+    Attempt { pp, mode }
+}
+
+/// The present-parameter policy recorded by [`create_hooked_d3d9_with`] for the current session.
+static SESSION_POLICY: MainCell<Option<PresentPolicy>> = MainCell::new(None);
+
+/// Returns the recorded policy, or [`DIRECT_POLICY`] before one exists.
+fn session_policy(tok: &MainToken) -> PresentPolicy {
+    SESSION_POLICY.get(tok).unwrap_or(DIRECT_POLICY)
 }
 
 /// The back buffer format of the live device, or `D3DFMT_UNKNOWN` before one exists.
 static ACTIVE_BACK_BUFFER_FORMAT: AtomicU32 = AtomicU32::new(D3DFMT_UNKNOWN.0);
 
 /// The back buffer format the live device was actually created or last reset with, or `None` before the first device exists.
-/// This isn't necessarily what the game requested, since [`rewrite_present_params_impl`] and [`run_with_present_failsafe`]
+/// This isn't necessarily what the game requested, since [`rewrite_present_params_impl`] and [`run_fix_ladder`]'s escalation
 /// both change the format without the in-game caller knowing.
 pub fn active_back_buffer_format() -> Option<D3DFORMAT> {
     let format = D3DFORMAT(ACTIVE_BACK_BUFFER_FORMAT.load(Ordering::Relaxed));
@@ -482,11 +702,11 @@ pub fn active_back_buffer_format() -> Option<D3DFORMAT> {
 }
 
 /// Records the format the device ended up with once one is known to be alive.
-fn record_back_buffer_format(prep: &PresentParams) {
-    // `prep.after` is the request as we rewrote it, snapshotted before the device call, whereas `d3d8::sync_present_params_back`
+fn record_back_buffer_format(attempt: Option<&Attempt>) {
+    // `Attempt::pp` is the request as we rewrote it, snapshotted before the device call, whereas `d3d8::sync_present_params_back`
     // reads what the runtime wrote back after the device call. `D3DFMT_UNKNOWN` means the game let the runtime choose,
     // so there is no concrete format to reconcile against and it is not recorded.
-    if let Some(format) = prep.after.map(|a| a.BackBufferFormat)
+    if let Some(format) = attempt.map(|a| a.pp.BackBufferFormat)
         && format != D3DFMT_UNKNOWN
     {
         ACTIVE_BACK_BUFFER_FORMAT.store(format.0, Ordering::Relaxed);
@@ -502,14 +722,6 @@ fn upgraded_back_buffer_format(f: D3DFORMAT) -> Option<D3DFORMAT> {
     }
 }
 
-fn rewrite_present_params(pp: &mut D3DPRESENT_PARAMETERS, upgrade_16bit_back_buffer: bool) {
-    let policy = PresentPolicy {
-        keep_lockable_back_buffer: present_policy().keep_lockable_back_buffer,
-        upgrade_16bit_back_buffer,
-    };
-    rewrite_present_params_impl(pp, policy, PACER.get().is_some());
-}
-
 fn rewrite_present_params_impl(
     pp: &mut D3DPRESENT_PARAMETERS,
     policy: PresentPolicy,
@@ -521,14 +733,16 @@ fn rewrite_present_params_impl(
     if controls_timing {
         pp.PresentationInterval = D3DPRESENT_INTERVAL_IMMEDIATE.cast_unsigned();
     }
-    if policy.upgrade_16bit_back_buffer
-        && let Some(substituted) = upgraded_back_buffer_format(pp.BackBufferFormat)
-    {
-        substitute_back_buffer_format(pp, substituted, "16bit_back_buffer_upgraded");
+    let plan = format_plan(
+        pp.BackBufferFormat,
+        pp.Windowed.0 != 0,
+        policy.upgrade_16bit_back_buffer,
+    );
+    if let Some(upgraded) = plan.upgraded {
+        substitute_back_buffer_format(pp, upgraded, "16bit_back_buffer_upgraded");
     }
-    // `CreateDeviceEx` rejects `A8R8G8B8` in fullscreen because it isn't scanout-compatible, so we substitute with `X8R8G8B8`.
-    if pp.Windowed.0 == 0 && pp.BackBufferFormat == D3DFMT_A8R8G8B8 {
-        substitute_back_buffer_format(pp, D3DFMT_X8R8G8B8, "back_buffer_format_substituted");
+    if plan.scanout_substituted {
+        substitute_back_buffer_format(pp, plan.format, "back_buffer_format_substituted");
     }
 }
 
@@ -540,61 +754,6 @@ fn substitute_back_buffer_format(
     let old = pp.BackBufferFormat;
     pp.BackBufferFormat = new;
     info!(kind, old = format_name(old), new = format_name(new));
-}
-
-/// Overrides the game's hard-coded 60 Hz in `pp.FullScreen_RefreshRateInHz` with the result of [`pick_refresh_rate`],
-/// validated against the back buffer format/dimensions.
-unsafe fn apply_refresh_override(
-    pp: &mut D3DPRESENT_PARAMETERS,
-    adapter: Adapter<'_>,
-    mode: RefreshRateMode,
-    desktop_mode: Option<D3DDISPLAYMODEEX>,
-) {
-    if PACER.get().is_none() {
-        return;
-    }
-
-    pp.FullScreen_RefreshRateInHz = unsafe {
-        pick_refresh_rate(
-            adapter,
-            mode,
-            desktop_mode,
-            pp.BackBufferFormat,
-            pp.BackBufferWidth,
-            pp.BackBufferHeight,
-        )
-    };
-}
-
-/// The refresh rate for a fullscreen `D3DDISPLAYMODEEX`.
-///
-/// [`run_with_refresh_failsafe`] resolves this differently on purpose: by the time it runs,
-/// the rate picked here has already been rejected, so re-picking it would just fail again.
-unsafe fn mode_refresh_rate(
-    pp: &D3DPRESENT_PARAMETERS,
-    adapter: Adapter<'_>,
-    desktop_mode: Option<D3DDISPLAYMODEEX>,
-) -> u32 {
-    if is_real_refresh_rate(pp.FullScreen_RefreshRateInHz) {
-        return pp.FullScreen_RefreshRateInHz;
-    }
-
-    let chosen = unsafe {
-        pick_refresh_rate(
-            adapter,
-            RefreshRateMode::Native,
-            desktop_mode,
-            pp.BackBufferFormat,
-            pp.BackBufferWidth,
-            pp.BackBufferHeight,
-        )
-    };
-    info!(
-        kind = "display_mode_refresh_defaulted",
-        requested_hz = pp.FullScreen_RefreshRateInHz,
-        chosen_hz = chosen,
-    );
-    chosen
 }
 
 /// Returns the distinct refresh rates advertised by the adapter at exactly `width` × `height` in `format`,
@@ -661,55 +820,30 @@ unsafe fn enumerate_supported_rates(
     (rates, len)
 }
 
-/// Chooses the fullscreen refresh rate for `mode`, validated against the modes the adapter advertises at `width` x `height` in `format`.
-/// `desktop_mode` is the desktop mode already sampled by the caller, or `None` if the read failed.
-unsafe fn pick_refresh_rate(
-    adapter: Adapter<'_>,
-    mode: RefreshRateMode,
-    desktop_mode: Option<D3DDISPLAYMODEEX>,
-    format: D3DFORMAT,
-    width: u32,
-    height: u32,
-) -> u32 {
-    let (rates, n) = unsafe { enumerate_supported_rates(adapter, format, width, height) };
-    let reported_hz = desktop_mode.map(|m| m.RefreshRate);
-    let desktop_rate = match reported_hz {
-        Some(hz) if is_real_refresh_rate(hz) => hz,
-        _ => {
-            let device = unsafe { adapter_display_device(adapter) };
-            let win32_rate = win32_current_refresh_rate(device.as_ref());
-            let fallback = win32_rate.unwrap_or(60);
-            warn!(
-                kind = "pick_refresh_rate_fallback",
-                reported_hz = ?reported_hz,
-                win32_rate = ?win32_rate,
-                fallback,
-            );
-            fallback
-        }
-    };
-
+/// Chooses the fullscreen refresh rate for `mode`. Rates are validated against `supported`, the rates the adapter advertises
+/// at the target resolution and format; see [`AdapterSnapshot`]. `desktop_rate` is the resolved desktop rate.
+fn pick_refresh_rate(mode: RefreshRateMode, supported: &[u32], desktop_rate: u32) -> u32 {
     if let RefreshRateMode::Fixed(target) = mode {
         let target = target.get();
-        if n == 0 {
+        if supported.is_empty() {
             info!(kind = "refresh_rate_fixed_unvalidated", target_hz = target);
-        } else if !rates[..n]
+        } else if !supported
             .iter()
             .any(|&r| r == target || normalize_reported_rate(r) == target)
         {
             error!(
                 kind = "refresh_rate_fixed_unsupported",
                 target_hz = target,
-                supported = ?&rates[..n],
+                supported = ?supported,
             );
         }
     }
 
-    let chosen = select_refresh_rate(mode, &rates[..n], desktop_rate);
+    let chosen = select_refresh_rate(mode, supported, desktop_rate);
     info!(
         kind = "refresh_rate_decision",
         desktop_rate_hz = desktop_rate,
-        supported_n = n,
+        supported_n = supported.len(),
         chosen_hz = chosen,
     );
     chosen
@@ -810,7 +944,7 @@ fn win32_current_refresh_rate(device: Option<&[u16; 32]>) -> Option<u32> {
 }
 
 /// Populates a `D3DDISPLAYMODEEX` from the present params.
-/// Callers should normalize `pp.FullScreen_RefreshRateInHz` (see [`mode_refresh_rate`]) beforehand.
+/// Callers should resolve `pp.FullScreen_RefreshRateInHz` to a real rate beforehand, as [`materialize`] does.
 ///
 /// The Ex `CreateDevice` and `Reset` signatures require a fully-filled struct for exclusive fullscreen and a null pointer for windowed
 /// (a non-null struct there is `D3DERR_INVALIDCALL`), so callers should only use this when `Windowed == FALSE` holds.
@@ -977,18 +1111,17 @@ unsafe extern "system" fn hook_create_device(
     let adapter = unsafe { Adapter::from_hook(&this, adapter) }
         .expect("the gate matched `this` against a non-null recording");
 
-    let desktop_before = unsafe { sample_for_degradation_check(adapter, pp) };
+    let requested = unsafe { pp.as_ref().copied() };
+    // `CreateDeviceEx` always takes the display mode, so `pp` must keep agreeing with it.
+    let ctx = unsafe { LadderCtx::resolve(&tok, adapter, pp, true) };
 
-    let mut dev: *mut c_void = null_mut();
-    let (hr, prep) = unsafe {
-        run_with_present_failsafe(
+    let mut dev = null_mut();
+    let (hr, attempt) = unsafe {
+        run_fix_ladder(
             pp,
-            adapter,
-            desktop_before,
+            &ctx,
             "create_device_refresh_failsafe",
-            // `CreateDeviceEx` always takes the display mode, so `pp` must keep agreeing with it.
-            true,
-            |display_mode_ptr, attempt| {
+            |display_mode_ptr, slot| {
                 let (hr, d) = create_device_once(
                     adapter,
                     device_type,
@@ -998,7 +1131,7 @@ unsafe extern "system" fn hook_create_device(
                     pp,
                     display_mode_ptr,
                     returned_device,
-                    attempt,
+                    slot,
                 );
                 dev = d;
                 hr
@@ -1017,6 +1150,11 @@ unsafe extern "system" fn hook_create_device(
                     "written_null"
                 },
             );
+            // The ladder left its successful attempt's rewrite (plus driver write-back) in `pp`.
+            // This exit is a failure from the game's point of view, so it gets its own request back like every other one.
+            if let (Some(p), Some(req)) = (unsafe { pp.as_mut() }, requested) {
+                *p = req;
+            }
             return D3DERR_INVALIDCALL;
         };
 
@@ -1034,11 +1172,11 @@ unsafe extern "system" fn hook_create_device(
             );
 
             install_device_hooks(dev);
-            post_device_alive(&tok, dev, &prep);
+            post_device_alive(&tok, dev, attempt.as_ref());
         }
 
-        if let Some(before) = desktop_before {
-            unsafe { warn_if_exclusive_degraded(adapter, before, &prep) };
+        if let Some(before) = ctx.snapshot.desktop_mode {
+            unsafe { warn_if_exclusive_degraded(adapter, before, attempt.as_ref()) };
         }
     }
     hr
@@ -1066,19 +1204,6 @@ unsafe fn sample_adapter_display_mode(adapter: Adapter<'_>) -> Option<D3DDISPLAY
     if hr.is_ok() { Some(current) } else { None }
 }
 
-/// Captures the adapter mode before a `CreateDevice` or `Reset` call, but only when exclusive fullscreen is requested
-/// (i.e. `pp.Windowed == FALSE`). Returns `None` if no sample is needed or the read failed.
-unsafe fn sample_for_degradation_check(
-    adapter: Adapter<'_>,
-    pp: *mut D3DPRESENT_PARAMETERS,
-) -> Option<D3DDISPLAYMODEEX> {
-    let pp = unsafe { pp.as_ref()? };
-    if pp.Windowed.0 != 0 {
-        return None;
-    }
-    unsafe { sample_adapter_display_mode(adapter) }
-}
-
 /// Heuristic warning for situations where exclusive fullscreen is silently degraded to windowed presentation.
 /// It's possible for an adapter to not actually move to the requested mode even if `CreateDeviceEx` returns `S_OK`,
 /// so we compare the desktop mode before and after device creation.
@@ -1088,9 +1213,11 @@ unsafe fn sample_for_degradation_check(
 unsafe fn warn_if_exclusive_degraded(
     adapter: Adapter<'_>,
     before: D3DDISPLAYMODEEX,
-    prep: &PresentParams,
+    attempt: Option<&Attempt>,
 ) {
-    let Some(after_pp) = prep.after else { return };
+    let Some(after_pp) = attempt.map(|a| a.pp) else {
+        return;
+    };
     let req_w = after_pp.BackBufferWidth;
     let req_h = after_pp.BackBufferHeight;
     let req_hz = after_pp.FullScreen_RefreshRateInHz;
@@ -1275,11 +1402,11 @@ unsafe fn apply_device_ex_tunables(dev: NonNull<c_void>) {
 
 /// Re-applies the device tunables, since D3D9Ex preserves them across `Reset` but a translation layer might not.
 /// Also records (and pins) the device as the session's. Fires after successful `CreateDeviceEx` and successful `Reset` / `ResetEx`.
-unsafe fn post_device_alive(tok: &MainToken, dev: NonNull<c_void>, prep: &PresentParams) {
+unsafe fn post_device_alive(tok: &MainToken, dev: NonNull<c_void>, attempt: Option<&Attempt>) {
     unsafe { apply_device_ex_tunables(dev) };
     // SAFETY: `dev` is the live device the successful call just created or reset.
     unsafe { record_device(tok, dev) };
-    record_back_buffer_format(prep);
+    record_back_buffer_format(attempt);
 }
 
 unsafe extern "system" fn hook_present(
@@ -1452,135 +1579,114 @@ unsafe extern "system" fn hook_reset(this: *mut c_void, pp: *mut D3DPRESENT_PARA
     };
 
     let adapter = parent.adapter();
-    let desktop_before = unsafe { sample_for_degradation_check(adapter, pp) };
-    // We reapply refresh rate selection so runtime rate toggles take effect at the next `Reset`.
     let use_reset_ex = REAL_RESET_EX.try_get().is_some();
+    // Plain `Reset` ignores the display mode entirely, so on that path `pp` is the whole request.
+    let ctx = unsafe { LadderCtx::resolve(&tok, adapter, pp, use_reset_ex) };
 
-    let (hr, prep) = unsafe {
-        run_with_present_failsafe(
+    // We reapply refresh rate selection so runtime rate toggles take effect at the next `Reset`.
+    let (hr, attempt) = unsafe {
+        run_fix_ladder(
             pp,
-            adapter,
-            desktop_before,
+            &ctx,
             "reset_refresh_failsafe",
-            // Plain `Reset` ignores the display mode entirely, so on that path `pp` is the whole request.
-            use_reset_ex,
-            |display_mode_ptr, attempt| {
-                reset_once(this, pp, display_mode_ptr, use_reset_ex, attempt)
-            },
+            |display_mode_ptr, slot| reset_once(this, pp, display_mode_ptr, use_reset_ex, slot),
         )
     };
 
     if hr.is_ok() {
         // `Reset` keeps the same object, so the gate's device is still the one that just came back alive.
-        unsafe { post_device_alive(&tok, dev, &prep) };
-        if let Some(before) = desktop_before {
-            unsafe { warn_if_exclusive_degraded(adapter, before, &prep) };
+        unsafe { post_device_alive(&tok, dev, attempt.as_ref()) };
+        if let Some(before) = ctx.snapshot.desktop_mode {
+            unsafe { warn_if_exclusive_degraded(adapter, before, attempt.as_ref()) };
         }
     }
     hr
 }
 
-/// Runs a `CreateDeviceEx` or `ResetEx` call with the refresh-override failsafe.
+/// Runs a `CreateDeviceEx`, `Reset`, or `ResetEx` call through the attempt sequence/ladder from [`plan_attempts`].
 ///
-/// `attempt` receives the fullscreen display-mode pointer and the attempt index.
-/// If the first attempt fails while a refresh override is active and the error isn't a transient device error,
-/// the override is rolled back to the game's original rate and the call is retried once.
-unsafe fn run_with_refresh_failsafe(
-    pp: *mut D3DPRESENT_PARAMETERS,
-    prep: &mut PresentParams,
-    desktop_before: Option<D3DDISPLAYMODEEX>,
-    failsafe_kind: &'static str,
-    base_attempt: u32,
-    consumes_display_mode: bool,
-    mut attempt: impl FnMut(*mut D3DDISPLAYMODEEX, u32) -> HRESULT,
-) -> HRESULT {
-    let (original_refresh, chosen_refresh, overrode_fs) = prep.refresh_override();
-    info!(kind = "present_rewrite", pp_before = ?prep.before, pp_after = ?prep.after);
-
-    let hr = attempt(prep.display_mode_ptr(), base_attempt);
-    if hr.is_ok() || !overrode_fs {
-        return hr;
-    }
-    if is_transient_device_error(hr) {
-        info!(
-            kind = "refresh_failsafe_declined",
-            context = failsafe_kind,
-            hr = fmt_hr!(hr),
-            chosen_hz = chosen_refresh,
-        );
-        return hr;
-    }
-    // We roll back to the game's original rate, resolving `D3DPRESENT_RATE_DEFAULT` to the sampled desktop rate for the Ex display mode,
-    // which must specify a real one. We don't use `mode_refresh_rate`'s `Native` pick because that rate has just been rejected
-    // and re-deriving it would fail the same way.
-    let mode_refresh = if is_real_refresh_rate(original_refresh) {
-        original_refresh
-    } else {
-        desktop_before
-            .map(|m| m.RefreshRate)
-            .filter(|&r| is_real_refresh_rate(r))
-            .unwrap_or(60)
-    };
-    let pp_refresh = if consumes_display_mode {
-        mode_refresh
-    } else {
-        original_refresh
-    };
-    let display_mode_ptr = unsafe {
-        rollback_refresh_override(pp, prep, pp_refresh, chosen_refresh, failsafe_kind, hr)
-    };
-    attempt(display_mode_ptr, base_attempt + 1)
-}
-
-/// Prepares present params and runs `attempt` under [`run_with_refresh_failsafe`], escalating the back buffer format once
-/// if a 16-bit request was deliberately passed through and the device refused it.
+/// On success, the runtime's write-back is left in `pp` for the game to read; when every attempt fails,
+/// `pp` is restored to the game's own request so its retry logic sees its own values, not our rewrites.
 ///
-/// `consumes_display_mode` indicates whether `attempt` will actually read the `D3DDISPLAYMODEEX` it is handed.
-/// `CreateDeviceEx` always does; `Reset` never does, and [`reset_once`] only reaches `ResetEx` when the device exposes it.
-unsafe fn run_with_present_failsafe(
+/// `attempt_fn` receives the fullscreen display-mode pointer (null for windowed) and the ladder slot index,
+/// which is the attempt number in logs.
+///
+/// Returns the final result and the last attempt made, or `None` when `pp` is null and a single bare call was made.
+unsafe fn run_fix_ladder(
     pp: *mut D3DPRESENT_PARAMETERS,
-    adapter: Adapter<'_>,
-    desktop_before: Option<D3DDISPLAYMODEEX>,
+    ctx: &LadderCtx,
     failsafe_kind: &'static str,
-    consumes_display_mode: bool,
-    mut attempt: impl FnMut(*mut D3DDISPLAYMODEEX, u32) -> HRESULT,
-) -> (HRESULT, PresentParams) {
-    // The params exactly as the game handed them to us, needed to re-prepare from scratch on escalation.
-    let requested = unsafe { pp.as_ref().copied() };
-    let escalatable =
-        requested.is_some_and(|p| upgraded_back_buffer_format(p.BackBufferFormat).is_some());
+    mut attempt_fn: impl FnMut(*mut D3DDISPLAYMODEEX, u32) -> HRESULT,
+) -> (HRESULT, Option<Attempt>) {
+    let Some(requested) = (unsafe { pp.as_ref() }).copied() else {
+        return (attempt_fn(null_mut(), 0), None);
+    };
 
-    let mut upgrade = present_policy().upgrade_16bit_back_buffer;
-    let mut round = 0;
-    loop {
-        let mut prep = unsafe { prep_present_params(pp, adapter, desktop_before, upgrade) };
-        let hr = unsafe {
-            run_with_refresh_failsafe(
-                pp,
-                &mut prep,
-                desktop_before,
-                failsafe_kind,
-                round * 2,
-                consumes_display_mode,
-                &mut attempt,
-            )
-        };
-        if hr.is_ok() || upgrade || !escalatable || is_transient_device_error(hr) {
-            return (hr, prep);
+    let escalatable = upgraded_back_buffer_format(requested.BackBufferFormat).is_some();
+    let ladder = plan_attempts(ctx.policy.upgrade_16bit_back_buffer, escalatable);
+    let materialize_slot = |fixes: FixSet| materialize(&requested, fixes, ctx);
+
+    // Round 0 always runs, so every `last`-returning exit has been overwritten by then.
+    let mut last = (D3DERR_INVALIDCALL, None);
+    for (round_index, round) in ladder.iter().enumerate() {
+        let Some(round) = round else { break };
+        #[allow(clippy::cast_possible_truncation)]
+        let primary_slot = (round_index * 2) as u32;
+        if round_index > 0 {
+            // A 16-bit fullscreen mode may simply not exist on this adapter, and a substituted format beats no device at all.
+            warn!(
+                kind = "back_buffer_upgrade_escalated",
+                context = failsafe_kind,
+                hr = %fmt_hr!(last.0),
+            );
         }
 
-        // A 16-bit fullscreen mode may simply not exist on this adapter, and a substituted format beats no device at all.
-        warn!(
-            kind = "back_buffer_upgrade_escalated",
-            context = failsafe_kind,
-            hr = %fmt_hr!(hr),
-        );
-        if let (Some(dst), Some(src)) = (unsafe { pp.as_mut() }, requested) {
-            *dst = src;
+        let mut attempt = materialize_slot(round.primary);
+        info!(kind = "present_rewrite", pp_before = ?Some(requested), pp_after = ?Some(attempt.pp));
+        unsafe { *pp = attempt.pp };
+        let mut hr = attempt_fn(attempt.mode_ptr(), primary_slot);
+        if hr.is_ok() {
+            return (hr, Some(attempt));
         }
-        upgrade = true;
-        round += 1;
+
+        let chosen = attempt.pp.FullScreen_RefreshRateInHz;
+        let overrode_fs = attempt.mode.is_some() && chosen != requested.FullScreen_RefreshRateInHz;
+        if overrode_fs {
+            if is_transient_device_error(hr) {
+                info!(
+                    kind = "refresh_failsafe_declined",
+                    context = failsafe_kind,
+                    hr = fmt_hr!(hr),
+                    chosen_hz = chosen,
+                );
+                unsafe { *pp = requested };
+                return (hr, Some(attempt));
+            }
+
+            let mut rollback = materialize_slot(round.rollback);
+            warn!(
+                kind = failsafe_kind,
+                from_hz = chosen,
+                to_hz = rollback.pp.FullScreen_RefreshRateInHz,
+                first_hr = fmt_hr!(hr),
+            );
+            unsafe { *pp = rollback.pp };
+            hr = attempt_fn(rollback.mode_ptr(), primary_slot + 1);
+            attempt = rollback;
+            if hr.is_ok() {
+                return (hr, Some(attempt));
+            }
+        }
+
+        last = (hr, Some(attempt));
+        if is_transient_device_error(hr) {
+            break;
+        }
     }
+
+    // Every attempt failed: hand the game back its own request, not our last rewrite.
+    unsafe { *pp = requested };
+    last
 }
 
 pub(crate) fn is_transient_device_error(hr: HRESULT) -> bool {
@@ -1588,31 +1694,6 @@ pub(crate) fn is_transient_device_error(hr: HRESULT) -> bool {
         hr,
         D3DERR_DEVICELOST | D3DERR_DEVICEREMOVED | D3DERR_DEVICEHUNG | D3DERR_OUTOFVIDEOMEMORY
     )
-}
-
-/// Rewrites `pp` and `prep` back to `pp_refresh` after a failed attempt, keeping the present params and the Ex display mode in agreement.
-unsafe fn rollback_refresh_override(
-    pp: *mut D3DPRESENT_PARAMETERS,
-    prep: &mut PresentParams,
-    pp_refresh: u32,
-    chosen_refresh: u32,
-    kind: &'static str,
-    first_hr: HRESULT,
-) -> *mut D3DDISPLAYMODEEX {
-    if let Some(clean) = prep.after {
-        // We discard any driver write-back from the failed attempt.
-        unsafe { *pp = clean };
-    }
-    unsafe { (*pp).FullScreen_RefreshRateInHz = pp_refresh };
-    prep.display_mode = Some(unsafe { build_display_mode_ex(&*pp) });
-    prep.after = Some(unsafe { *pp });
-    warn!(
-        kind = kind,
-        from_hz = chosen_refresh,
-        to_hz = pp_refresh,
-        first_hr = fmt_hr!(first_hr),
-    );
-    prep.display_mode_ptr()
 }
 
 unsafe extern "system" fn hook_create_texture(
@@ -1735,16 +1816,18 @@ unsafe extern "system" fn hook_create_vertex_buffer(
 #[cfg(test)]
 mod tests {
     use super::{
-        Adapter, D3D_OK, D3DDISPLAYMODEEX_SIZE, D3DERR_DEVICEHUNG, D3DERR_DEVICELOST,
-        D3DERR_DEVICEREMOVED, D3DERR_INVALIDCALL, D3DERR_OUTOFVIDEOMEMORY, PresentPolicy,
-        RefreshRateMode, build_display_mode_ex, format_name, is_real_refresh_rate,
-        is_transient_device_error, mode_refresh_rate, normalize_reported_rate,
-        rewrite_behavior_flags, rewrite_present_params_impl, select_refresh_rate,
-        translate_managed_pool, upgraded_back_buffer_format,
+        AdapterSnapshot, Attempt, D3D_OK, D3DDISPLAYMODEEX_SIZE, D3DERR_DEVICEHUNG,
+        D3DERR_DEVICELOST, D3DERR_DEVICEREMOVED, D3DERR_INVALIDCALL, D3DERR_OUTOFVIDEOMEMORY,
+        FixSet, LadderCtx, MAX_ENUM_RATES, PresentPolicy, RefreshRateMode, Round,
+        build_display_mode_ex, format_name, is_real_refresh_rate, is_transient_device_error,
+        materialize, normalize_reported_rate, plan_attempts, rewrite_behavior_flags,
+        rewrite_present_params_impl, run_fix_ladder, select_refresh_rate, translate_managed_pool,
+        upgraded_back_buffer_format,
     };
     use crate::fmt_hr;
     use std::num::NonZero;
-    use std::ptr::NonNull;
+    use std::ptr::null_mut;
+    use windows::Win32::Graphics::Direct3D9::D3DDISPLAYMODEEX;
     use windows::Win32::Graphics::Direct3D9::{
         D3DCREATE_HARDWARE_VERTEXPROCESSING, D3DCREATE_MULTITHREADED, D3DFMT_A1R5G5B5,
         D3DFMT_A8R8G8B8, D3DFMT_R5G6B5, D3DFMT_X1R5G5B5, D3DFMT_X8R8G8B8, D3DFORMAT,
@@ -1754,6 +1837,7 @@ mod tests {
         D3DSCANLINEORDERING_PROGRESSIVE, D3DSWAPEFFECT_DISCARD, D3DUSAGE_DYNAMIC,
         D3DUSAGE_WRITEONLY,
     };
+    use windows::core::HRESULT;
 
     fn policy(keep_lockable_back_buffer: bool) -> PresentPolicy {
         PresentPolicy {
@@ -1824,20 +1908,31 @@ mod tests {
     }
 
     #[test]
-    fn rewrite_present_params_forces_immediate_interval() {
+    fn rewrite_present_params_interval() {
         for original in [
             0u32,
             D3DPRESENT_INTERVAL_ONE.cast_unsigned(),
             D3DPRESENT_INTERVAL_IMMEDIATE.cast_unsigned(),
         ] {
-            let mut pp = D3DPRESENT_PARAMETERS {
+            let base = D3DPRESENT_PARAMETERS {
                 PresentationInterval: original,
                 ..Default::default()
             };
-            rewrite_present_params_impl(&mut pp, policy(false), true);
+
+            // When the pacer controls timing, any interval becomes IMMEDIATE so `Present` never blocks.
+            let mut paced = base;
+            rewrite_present_params_impl(&mut paced, policy(false), true);
             assert_eq!(
-                pp.PresentationInterval,
+                paced.PresentationInterval,
                 D3DPRESENT_INTERVAL_IMMEDIATE.cast_unsigned(),
+                "input interval {original:#x}",
+            );
+
+            // Otherwise, the game's own choice stands untouched.
+            let mut unpaced = base;
+            rewrite_present_params_impl(&mut unpaced, policy(false), false);
+            assert_eq!(
+                unpaced.PresentationInterval, original,
                 "input interval {original:#x}",
             );
         }
@@ -1865,21 +1960,6 @@ mod tests {
         };
         rewrite_present_params_impl(&mut pp, policy(true), true);
         assert_eq!(pp.Flags, D3DPRESENTFLAG_LOCKABLE_BACKBUFFER);
-    }
-
-    #[test]
-    fn rewrite_present_params_presentation_interval() {
-        let mut pp = D3DPRESENT_PARAMETERS {
-            Flags: D3DPRESENTFLAG_LOCKABLE_BACKBUFFER,
-            PresentationInterval: D3DPRESENT_INTERVAL_ONE.cast_unsigned(),
-            ..Default::default()
-        };
-        rewrite_present_params_impl(&mut pp, policy(false), false);
-        assert_eq!(
-            pp.PresentationInterval,
-            D3DPRESENT_INTERVAL_ONE.cast_unsigned()
-        );
-        assert_eq!(pp.Flags, 0);
     }
 
     #[test]
@@ -1997,18 +2077,413 @@ mod tests {
         assert_eq!(mode.ScanLineOrdering, D3DSCANLINEORDERING_PROGRESSIVE);
     }
 
-    #[test]
-    fn mode_refresh_rate_real_rate_passes_through() {
-        // `slot` is never dereferenced since a real rate returns before the interface is read.
-        let slot = NonNull::dangling().as_ptr();
-        let adapter = unsafe { Adapter::from_hook(&slot, 0) }.expect("dangling is not null");
-        for hz in [60, 120, 143] {
-            let pp = D3DPRESENT_PARAMETERS {
-                FullScreen_RefreshRateInHz: hz,
-                ..Default::default()
-            };
-            assert_eq!(unsafe { mode_refresh_rate(&pp, adapter, None) }, hz);
+    fn fixes(rate_override: bool, format_upgrade: bool) -> FixSet {
+        FixSet {
+            rate_override,
+            format_upgrade,
         }
+    }
+
+    fn snapshot(
+        desktop_hz: Option<u32>,
+        desktop_rate: u32,
+        rates: &[(D3DFORMAT, &[u32])],
+    ) -> AdapterSnapshot {
+        let mut snap = AdapterSnapshot::empty();
+        snap.desktop_mode = desktop_hz.map(|hz| D3DDISPLAYMODEEX {
+            Size: D3DDISPLAYMODEEX_SIZE,
+            RefreshRate: hz,
+            ..Default::default()
+        });
+        snap.desktop_rate = desktop_rate;
+        for (i, (format, list)) in rates.iter().enumerate() {
+            let mut table = [0u32; MAX_ENUM_RATES];
+            table[..list.len()].copy_from_slice(list);
+            snap.rates[i] = (*format, (table, list.len()));
+            snap.rates_len = i + 1;
+        }
+        snap
+    }
+
+    fn fs_pp(format: D3DFORMAT, hz: u32) -> D3DPRESENT_PARAMETERS {
+        D3DPRESENT_PARAMETERS {
+            BackBufferWidth: 640,
+            BackBufferHeight: 480,
+            BackBufferFormat: format,
+            Windowed: false.into(),
+            FullScreen_RefreshRateInHz: hz,
+            ..Default::default()
+        }
+    }
+
+    fn ctx(
+        snapshot: AdapterSnapshot,
+        policy: PresentPolicy,
+        controls_timing: bool,
+        refresh_mode: RefreshRateMode,
+        consumes_display_mode: bool,
+    ) -> LadderCtx {
+        LadderCtx {
+            snapshot,
+            policy,
+            controls_timing,
+            refresh_mode,
+            consumes_display_mode,
+        }
+    }
+
+    fn round(format_upgrade: bool) -> Round {
+        Round {
+            primary: fixes(true, format_upgrade),
+            rollback: fixes(false, format_upgrade),
+        }
+    }
+
+    #[test]
+    fn plan_attempts_sequences() {
+        // Shim policy
+        for escalatable in [false, true] {
+            assert_eq!(plan_attempts(true, escalatable), [Some(round(true)), None]);
+        }
+
+        // Direct policy + 16-bit request
+        assert_eq!(
+            plan_attempts(false, true),
+            [Some(round(false)), Some(round(true))],
+        );
+
+        // Direct policy, nothing to escalate to
+        assert_eq!(plan_attempts(false, false), [Some(round(false)), None]);
+    }
+
+    #[test]
+    fn materialize_mode_agreement() {
+        let snap = snapshot(Some(120), 120, &[(D3DFMT_X8R8G8B8, &[60, 120])]);
+        let c = ctx(snap, policy(false), true, RefreshRateMode::Native, true);
+        let att = materialize(&fs_pp(D3DFMT_X8R8G8B8, 0), fixes(true, false), &c);
+        let mode = att.mode.expect("fullscreen materializes a display mode");
+        assert_eq!(mode.Width, att.pp.BackBufferWidth);
+        assert_eq!(mode.Height, att.pp.BackBufferHeight);
+        assert_eq!(mode.Format, att.pp.BackBufferFormat);
+        assert_eq!(mode.RefreshRate, att.pp.FullScreen_RefreshRateInHz);
+        assert_eq!(att.pp.FullScreen_RefreshRateInHz, 120);
+
+        let windowed = D3DPRESENT_PARAMETERS {
+            Windowed: true.into(),
+            ..fs_pp(D3DFMT_X8R8G8B8, 0)
+        };
+        let att = materialize(&windowed, fixes(true, false), &c);
+        assert!(att.mode.is_none());
+        assert_eq!(att.pp.FullScreen_RefreshRateInHz, 0);
+    }
+
+    #[test]
+    fn materialize_rate_pipeline() {
+        let snap = snapshot(Some(144), 144, &[(D3DFMT_X8R8G8B8, &[60, 120, 144])]);
+        let mk = |hz, controls_timing, mode| {
+            let c = ctx(snap.clone(), policy(false), controls_timing, mode, true);
+            materialize(&fs_pp(D3DFMT_X8R8G8B8, hz), fixes(true, false), &c)
+                .pp
+                .FullScreen_RefreshRateInHz
+        };
+
+        // With the pacer, the configured mode overrides the game's rate.
+        assert_eq!(mk(60, true, RefreshRateMode::Native), 144);
+        assert_eq!(mk(60, true, RefreshRateMode::NativeMultiple), 120);
+        assert_eq!(mk(60, true, RefreshRateMode::Fixed(nz(120))), 120);
+        // A `Fixed` target below 2 is a magic value; the display mode resolves it with the `Native` pick.
+        assert_eq!(mk(0, true, RefreshRateMode::Fixed(nz(1))), 144);
+        // Without the pacer, a real game rate passes through untouched.
+        assert_eq!(mk(75, false, RefreshRateMode::Fixed(nz(120))), 75);
+        // However, a magic value is still resolved for the display mode.
+        assert_eq!(mk(0, false, RefreshRateMode::Fixed(nz(120))), 144);
+    }
+
+    #[test]
+    fn materialize_rates_follow_materialized_format() {
+        // The 16-bit and upgraded formats advertise different mode sets; each attempt consults its own format's table.
+        let snap = snapshot(
+            Some(144),
+            144,
+            &[(D3DFMT_R5G6B5, &[60]), (D3DFMT_X8R8G8B8, &[60, 144])],
+        );
+        let requested = fs_pp(D3DFMT_R5G6B5, 0);
+        let c = ctx(snap, policy(false), true, RefreshRateMode::Native, true);
+        let plain = materialize(&requested, fixes(true, false), &c);
+        assert_eq!(plain.pp.BackBufferFormat, D3DFMT_R5G6B5);
+        assert_eq!(plain.pp.FullScreen_RefreshRateInHz, 60);
+        let upgraded = materialize(&requested, fixes(true, true), &c);
+        assert_eq!(upgraded.pp.BackBufferFormat, D3DFMT_X8R8G8B8);
+        assert_eq!(upgraded.pp.FullScreen_RefreshRateInHz, 144);
+    }
+
+    #[test]
+    fn materialize_rollback_rate_resolution() {
+        let snap = snapshot(Some(59), 60, &[(D3DFMT_X8R8G8B8, &[60, 120])]);
+        let mk = |hz, consumes| {
+            let c = ctx(
+                snap.clone(),
+                policy(false),
+                true,
+                RefreshRateMode::Native,
+                consumes,
+            );
+            materialize(&fs_pp(D3DFMT_X8R8G8B8, hz), fixes(false, false), &c)
+        };
+
+        // A real game rate rolls back to itself.
+        assert_eq!(mk(120, true).pp.FullScreen_RefreshRateInHz, 120);
+        // A magic value resolves to the sampled desktop rate where the Ex display mode must carry a real one.
+        let att = mk(0, true);
+        assert_eq!(att.pp.FullScreen_RefreshRateInHz, 59);
+        assert_eq!(att.mode.unwrap().RefreshRate, 59);
+        // However, plain `Reset` keeps the game's raw value, since there `pp` is the whole request.
+        assert_eq!(mk(0, false).pp.FullScreen_RefreshRateInHz, 0);
+
+        let no_desktop = snapshot(None, 60, &[(D3DFMT_X8R8G8B8, &[120])]);
+        let c = ctx(
+            no_desktop,
+            policy(false),
+            true,
+            RefreshRateMode::Native,
+            true,
+        );
+        let att = materialize(&fs_pp(D3DFMT_X8R8G8B8, 0), fixes(false, false), &c);
+        assert_eq!(att.pp.FullScreen_RefreshRateInHz, 60);
+    }
+
+    #[test]
+    fn materialize_shim_policy_changes() {
+        let shim = PresentPolicy {
+            keep_lockable_back_buffer: true,
+            upgrade_16bit_back_buffer: true,
+        };
+        let snap = snapshot(Some(60), 60, &[(D3DFMT_X8R8G8B8, &[60])]);
+        let requested = D3DPRESENT_PARAMETERS {
+            Flags: D3DPRESENTFLAG_LOCKABLE_BACKBUFFER,
+            ..fs_pp(D3DFMT_R5G6B5, 0)
+        };
+        let first = plan_attempts(true, true)[0].unwrap().primary;
+        let c = ctx(snap, shim, true, RefreshRateMode::Native, true);
+        let att = materialize(&requested, first, &c);
+        assert_eq!(att.pp.BackBufferFormat, D3DFMT_X8R8G8B8);
+        assert_eq!(att.pp.Flags, D3DPRESENTFLAG_LOCKABLE_BACKBUFFER);
+        assert_eq!(
+            att.pp.PresentationInterval,
+            D3DPRESENT_INTERVAL_IMMEDIATE.cast_unsigned(),
+        );
+    }
+
+    struct LadderRun {
+        hr: HRESULT,
+        /// Per call: the slot index, the caller-struct contents at call time, and the display mode handed over.
+        calls: Vec<(u32, D3DPRESENT_PARAMETERS, Option<D3DDISPLAYMODEEX>)>,
+        /// The caller struct after the ladder finished.
+        final_pp: D3DPRESENT_PARAMETERS,
+        attempt: Option<Attempt>,
+    }
+
+    fn run_ladder(
+        requested: D3DPRESENT_PARAMETERS,
+        c: &LadderCtx,
+        script: &[HRESULT],
+        write_back: Option<u32>,
+    ) -> LadderRun {
+        let mut pp = requested;
+        let pp_ptr = &raw mut pp;
+        let mut calls = Vec::new();
+        let (hr, attempt) = unsafe {
+            run_fix_ladder(pp_ptr, c, "test_failsafe", |mode_ptr, slot| {
+                let hr = script[calls.len()];
+                calls.push((slot, *pp_ptr, mode_ptr.as_ref().copied()));
+                // Simulated runtime write-back into the caller's struct on success.
+                if hr.is_ok()
+                    && let Some(marker) = write_back
+                {
+                    (*pp_ptr).BackBufferCount = marker;
+                }
+                hr
+            })
+        };
+        LadderRun {
+            hr,
+            calls,
+            final_pp: pp,
+            attempt,
+        }
+    }
+
+    #[test]
+    fn ladder_success_first_try_keeps_write_back() {
+        let snap = snapshot(Some(120), 120, &[(D3DFMT_X8R8G8B8, &[60, 120])]);
+        let run = run_ladder(
+            fs_pp(D3DFMT_X8R8G8B8, 0),
+            &ctx(snap, policy(false), true, RefreshRateMode::Native, true),
+            &[D3D_OK],
+            Some(7),
+        );
+        assert!(run.hr.is_ok());
+        assert_eq!(run.calls.len(), 1);
+        assert_eq!(run.calls[0].0, 0);
+        assert_eq!(run.calls[0].1.FullScreen_RefreshRateInHz, 120);
+        assert_eq!(run.final_pp.BackBufferCount, 7);
+        assert_eq!(run.attempt.unwrap().pp.FullScreen_RefreshRateInHz, 120);
+    }
+
+    #[test]
+    fn ladder_rollback_after_refused_override() {
+        let snap = snapshot(Some(59), 59, &[(D3DFMT_X8R8G8B8, &[60, 120])]);
+        let run = run_ladder(
+            fs_pp(D3DFMT_X8R8G8B8, 0),
+            &ctx(
+                snap,
+                policy(false),
+                true,
+                RefreshRateMode::Fixed(nz(120)),
+                true,
+            ),
+            &[D3DERR_INVALIDCALL, D3D_OK],
+            None,
+        );
+        assert!(run.hr.is_ok());
+        assert_eq!(run.calls.len(), 2);
+        assert_eq!(
+            (run.calls[0].0, run.calls[0].1.FullScreen_RefreshRateInHz),
+            (0, 120)
+        );
+        assert_eq!(
+            (run.calls[1].0, run.calls[1].1.FullScreen_RefreshRateInHz),
+            (1, 59)
+        );
+        assert_eq!(run.calls[1].2.unwrap().RefreshRate, 59);
+    }
+
+    #[test]
+    fn ladder_rollback_skipped_when_rate_unchanged() {
+        let snap = snapshot(Some(60), 60, &[(D3DFMT_X8R8G8B8, &[60])]);
+        let run = run_ladder(
+            fs_pp(D3DFMT_X8R8G8B8, 60),
+            &ctx(snap, policy(false), true, RefreshRateMode::Native, true),
+            &[D3DERR_INVALIDCALL],
+            None,
+        );
+        assert_eq!(run.hr, D3DERR_INVALIDCALL);
+        assert_eq!(run.calls.len(), 1);
+        assert_eq!(run.final_pp.PresentationInterval, 0);
+        assert_eq!(run.final_pp.FullScreen_RefreshRateInHz, 60);
+    }
+
+    #[test]
+    fn ladder_redundant_rollback_still_retries() {
+        let snap = snapshot(Some(60), 60, &[(D3DFMT_X8R8G8B8, &[60])]);
+        let run = run_ladder(
+            fs_pp(D3DFMT_X8R8G8B8, 0),
+            &ctx(snap, policy(false), true, RefreshRateMode::Native, true),
+            &[D3DERR_INVALIDCALL, D3DERR_INVALIDCALL],
+            None,
+        );
+        assert_eq!(run.calls.len(), 2);
+        assert_eq!(run.calls[0].1.FullScreen_RefreshRateInHz, 60);
+        assert_eq!(run.calls[1].1.FullScreen_RefreshRateInHz, 60);
+        assert_eq!(run.final_pp.FullScreen_RefreshRateInHz, 0);
+    }
+
+    #[test]
+    fn ladder_transient_stops_everything() {
+        let snap = snapshot(
+            Some(120),
+            120,
+            &[(D3DFMT_R5G6B5, &[60]), (D3DFMT_X8R8G8B8, &[60, 120])],
+        );
+        let c = ctx(snap, policy(false), true, RefreshRateMode::Native, true);
+        let run = run_ladder(fs_pp(D3DFMT_R5G6B5, 0), &c, &[D3DERR_DEVICELOST], None);
+        assert_eq!(run.hr, D3DERR_DEVICELOST);
+        assert_eq!(run.calls.len(), 1);
+
+        let run = run_ladder(
+            fs_pp(D3DFMT_R5G6B5, 0),
+            &c,
+            &[D3DERR_INVALIDCALL, D3DERR_DEVICELOST],
+            None,
+        );
+        assert_eq!(run.hr, D3DERR_DEVICELOST);
+        assert_eq!(run.calls.len(), 2);
+    }
+
+    #[test]
+    fn ladder_full_escalation_rederives_from_the_request() {
+        let snap = snapshot(
+            Some(120),
+            120,
+            &[(D3DFMT_R5G6B5, &[60]), (D3DFMT_X8R8G8B8, &[60, 120])],
+        );
+        let run = run_ladder(
+            fs_pp(D3DFMT_R5G6B5, 0),
+            &ctx(snap, policy(false), true, RefreshRateMode::Native, true),
+            &[D3DERR_INVALIDCALL; 4],
+            None,
+        );
+        assert_eq!(run.hr, D3DERR_INVALIDCALL);
+        let seen: Vec<_> = run
+            .calls
+            .iter()
+            .map(|(slot, pp, _)| (*slot, pp.BackBufferFormat, pp.FullScreen_RefreshRateInHz))
+            .collect();
+        assert_eq!(
+            seen,
+            vec![
+                (0, D3DFMT_R5G6B5, 60),
+                (1, D3DFMT_R5G6B5, 120),
+                (2, D3DFMT_X8R8G8B8, 120),
+                (3, D3DFMT_X8R8G8B8, 120),
+            ],
+        );
+        assert_eq!(run.final_pp.BackBufferFormat, D3DFMT_R5G6B5);
+        assert_eq!(run.final_pp.FullScreen_RefreshRateInHz, 0);
+    }
+
+    #[test]
+    fn ladder_windowed_escalation_skips_rollbacks() {
+        // Windowed: no display mode, so no rate rollback; a refused 16-bit request still escalates to 32-bit.
+        let windowed = D3DPRESENT_PARAMETERS {
+            BackBufferFormat: D3DFMT_R5G6B5,
+            Windowed: true.into(),
+            ..Default::default()
+        };
+        let snap = AdapterSnapshot::empty();
+        let run = run_ladder(
+            windowed,
+            &ctx(snap, policy(false), true, RefreshRateMode::Native, true),
+            &[D3DERR_INVALIDCALL, D3DERR_INVALIDCALL],
+            None,
+        );
+        assert_eq!(run.calls.len(), 2);
+        assert_eq!(
+            (run.calls[0].0, run.calls[0].1.BackBufferFormat),
+            (0, D3DFMT_R5G6B5)
+        );
+        assert_eq!(
+            (run.calls[1].0, run.calls[1].1.BackBufferFormat),
+            (2, D3DFMT_X8R8G8B8)
+        );
+        assert!(run.calls[1].2.is_none());
+        assert_eq!(run.final_pp.BackBufferFormat, D3DFMT_R5G6B5);
+    }
+
+    #[test]
+    fn ladder_null_pp_single_bare_call() {
+        let snap = AdapterSnapshot::empty();
+        let c = ctx(snap, policy(false), true, RefreshRateMode::Native, true);
+        let mut seen = Vec::new();
+        let (hr, attempt) = unsafe {
+            run_fix_ladder(null_mut(), &c, "test_failsafe", |mode_ptr, slot| {
+                seen.push((slot, mode_ptr.is_null()));
+                D3DERR_INVALIDCALL
+            })
+        };
+        assert_eq!(hr, D3DERR_INVALIDCALL);
+        assert!(attempt.is_none());
+        assert_eq!(seen, vec![(0, true)]);
     }
 
     #[test]
@@ -2030,7 +2505,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_supported_refresh_rates() {
+    fn select_refresh_rate_without_advertised_modes() {
         for rate in [0u32, 30, 59, 60, 100, 144, 240] {
             assert_eq!(
                 select_refresh_rate(RefreshRateMode::Native, &[], rate),
@@ -2041,6 +2516,7 @@ mod tests {
                 rate,
             );
         }
+
         assert_eq!(
             select_refresh_rate(RefreshRateMode::Fixed(nz(144)), &[], 60),
             144,
@@ -2052,103 +2528,37 @@ mod tests {
     }
 
     #[test]
-    fn select_refresh_rate_native() {
-        assert_eq!(
-            select_refresh_rate(RefreshRateMode::Native, &[60, 120, 144], 144),
-            144,
-        );
-        assert_eq!(
-            select_refresh_rate(RefreshRateMode::Native, &[60, 100], 144),
-            100,
-        );
-        assert_eq!(
-            select_refresh_rate(RefreshRateMode::Native, &[100, 120], 60),
-            100,
-        );
-        assert_eq!(
-            select_refresh_rate(RefreshRateMode::Native, &[144, 60, 120], 120),
-            120,
-        );
-        assert_eq!(
-            select_refresh_rate(RefreshRateMode::Native, &[60, 80], 70),
-            60
-        );
-        assert_eq!(
-            select_refresh_rate(RefreshRateMode::Native, &[120, 144], 60),
-            120,
-        );
-    }
+    fn select_refresh_rate_picks_from_advertised_modes() {
+        // (mode, advertised rates, desktop rate, expected pick)
+        let cases: &[(RefreshRateMode, &[u32], u32, u32)] = &[
+            (RefreshRateMode::Native, &[60, 120, 144], 144, 144),
+            (RefreshRateMode::Native, &[60, 100], 144, 100),
+            (RefreshRateMode::Native, &[144, 60, 120], 120, 120),
+            (RefreshRateMode::Native, &[60, 80], 70, 60),
+            (RefreshRateMode::Native, &[100, 120], 60, 100),
+            (RefreshRateMode::Native, &[120, 144], 60, 120),
+            (RefreshRateMode::NativeMultiple, &[60, 120, 144], 144, 120),
+            (RefreshRateMode::NativeMultiple, &[60, 120], 60, 60),
+            (RefreshRateMode::NativeMultiple, &[60, 120], 120, 120),
+            (RefreshRateMode::NativeMultiple, &[60], 144, 60),
+            (RefreshRateMode::NativeMultiple, &[50, 75], 75, 75),
+            (RefreshRateMode::NativeMultiple, &[50, 75], 60, 50),
+            (RefreshRateMode::NativeMultiple, &[120, 144], 60, 120),
+            (RefreshRateMode::NativeMultiple, &[119, 143], 144, 119),
+            (RefreshRateMode::Native, &[119, 143], 144, 143),
+            (RefreshRateMode::Fixed(nz(120)), &[60, 120], 60, 120),
+            (RefreshRateMode::Fixed(nz(120)), &[119, 120], 120, 120),
+            (RefreshRateMode::Fixed(nz(120)), &[119], 119, 119),
+            (RefreshRateMode::Fixed(nz(240)), &[60, 120], 120, 240),
+        ];
 
-    #[test]
-    fn select_refresh_rate_native_multiple() {
-        assert_eq!(
-            select_refresh_rate(RefreshRateMode::NativeMultiple, &[60, 120, 144], 144),
-            120,
-        );
-        assert_eq!(
-            select_refresh_rate(RefreshRateMode::NativeMultiple, &[60, 120], 60),
-            60,
-        );
-        assert_eq!(
-            select_refresh_rate(RefreshRateMode::NativeMultiple, &[50, 75], 75),
-            75,
-        );
-        assert_eq!(
-            select_refresh_rate(RefreshRateMode::NativeMultiple, &[60], 144),
-            60,
-        );
-    }
-
-    #[test]
-    fn select_refresh_rate_native_multiple_fallback() {
-        assert_eq!(
-            select_refresh_rate(RefreshRateMode::NativeMultiple, &[120, 144], 60),
-            120,
-        );
-        assert_eq!(
-            select_refresh_rate(RefreshRateMode::Native, &[120, 144], 60),
-            120,
-        );
-        assert_eq!(
-            select_refresh_rate(RefreshRateMode::NativeMultiple, &[50, 75], 60),
-            50,
-        );
-        assert_eq!(
-            select_refresh_rate(RefreshRateMode::NativeMultiple, &[60, 120], 120),
-            120,
-        );
-    }
-
-    #[test]
-    fn select_refresh_rate_fixed() {
-        assert_eq!(
-            select_refresh_rate(RefreshRateMode::Fixed(nz(240)), &[60, 120], 120),
-            240,
-        );
-        assert_eq!(
-            select_refresh_rate(RefreshRateMode::Fixed(nz(120)), &[60, 120], 60),
-            120,
-        );
-        assert_eq!(
-            select_refresh_rate(RefreshRateMode::Fixed(nz(120)), &[119], 119),
-            119,
-        );
-        assert_eq!(
-            select_refresh_rate(RefreshRateMode::Fixed(nz(120)), &[119, 120], 120),
-            120,
-        );
-    }
-
-    #[test]
-    fn select_refresh_rate_normalize_rates() {
-        assert_eq!(
-            select_refresh_rate(RefreshRateMode::NativeMultiple, &[119, 143], 144),
-            119,
-        );
-        assert_eq!(
-            select_refresh_rate(RefreshRateMode::Native, &[119, 143], 144),
-            143,
-        );
+        for &(mode, supported, desktop, expected) in cases {
+            assert_eq!(
+                select_refresh_rate(mode, supported, desktop),
+                expected,
+                "{mode:?} supported={supported:?} desktop={desktop}",
+            );
+        }
     }
 
     #[test]

@@ -277,18 +277,10 @@ fn convert_present_params(pp8: &D3DPresentParameters8) -> D3DPRESENT_PARAMETERS 
 /// This should only be called after a successful call, since the games may mutate their own copy between retries.
 /// (For example, th06's `InitD3dRendering` drops the refresh rate and lockable back buffer flag.)
 ///
-/// The D3D9 call took `pp9` as in/out, so it no longer holds what [`convert_present_params`] built: `d3d9::prep_present_params`
-/// rewrote it in place and the runtime filled in whatever the game left it to choose. What comes back is what the game must see
-/// and cannot get elsewhere — the runtime's `BackBufferWidth` and `BackBufferHeight`, plus `BackBufferFormat`, which is ours but
-/// has a real reader: th06 probes `CheckDeviceFormat` with it right after creation, where a stale value asks about the wrong
-/// display mode. Only the struct the caller passed is updated, which need not be the copy the game keeps; see [`SHIM_POLICY`].
-///
-/// Everything else keeps the game's own value; for most fields nothing on either side changed it. `SwapEffect`,
-/// `FullScreen_PresentationInterval` and `FullScreen_RefreshRateInHz` are withheld on purpose, since `pp9` carries our
-/// translation, the pacer's forced `IMMEDIATE`, and `d3d9::apply_refresh_override`'s pick. The games resubmit this struct on
-/// their next `Reset`, so handing those back would make our overrides look like the game's own request. For the refresh rate
-/// that has teeth: `d3d9::run_with_refresh_failsafe` reads the resubmitted rate as the value to roll back to, so a laundered
-/// pick would displace the game's original as the failsafe's recovery target.
+/// The D3D9 call took `pp9` as in/out, so it no longer holds what [`convert_present_params`] built. Here, we set what the game must see
+/// and cannot get elsewhere: the runtime's `BackBufferWidth` and `BackBufferHeight`, plus `BackBufferFormat`, which is ours
+/// but has a real reader (e.g. th06 probes `CheckDeviceFormat` with it right after creation, where a stale value would lead to
+/// the wrong display mode). Only the struct the caller passed is updated, which need not be the copy the game keeps; see [`SHIM_POLICY`].
 fn sync_present_params_back(pp8: &mut D3DPresentParameters8, pp9: &D3DPRESENT_PARAMETERS) {
     let D3DPRESENT_PARAMETERS {
         BackBufferWidth,
