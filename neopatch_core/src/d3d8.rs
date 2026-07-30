@@ -3,7 +3,7 @@
 //! Rather than calling into `d3d8.dll`, we implement the subset of the D3D8 COM surface the games use.
 //! `Direct3DCreate8` is intercepted and returns an `IDirect3D8` whose methods translate to an `IDirect3D9Ex`.
 //!
-//! Wrapper refcounts are plain `Cell`s, so every game that uses this code must call D3D from one thread only.
+//! Wrapper state uses `Cell`, so every game that uses this code must call D3D from one thread only.
 
 use crate::d3d9::{
     D3D_OK, D3DERR_INVALIDCALL, D3DERR_NOTAVAILABLE, PresentPolicy, create_hooked_d3d9_with,
@@ -15,7 +15,8 @@ use crate::{fmt_hr, iat_hook};
 use std::cell::Cell;
 use std::ffi::c_void;
 use std::mem::offset_of;
-use std::ptr::{copy_nonoverlapping, null_mut};
+use std::num::NonZero;
+use std::ptr::{NonNull, copy_nonoverlapping, null_mut};
 use std::sync::OnceLock;
 use tracing::{debug, info, warn};
 use windows::Win32::Foundation::{E_NOINTERFACE, HWND, POINT, RECT, S_FALSE};
@@ -294,22 +295,134 @@ fn sync_present_params_back(pp8: &mut D3DPresentParameters8, pp9: &D3DPRESENT_PA
     pp8.BackBufferFormat = BackBufferFormat;
 }
 
+/// Liveness and ownership state of a wrapper. `Alive` holds the game-facing reference count together with the wrapped D3D9 object,
+/// on which the wrapper owns exactly one reference for its whole live period.
+#[derive(Clone, Copy)]
+enum WrapperState {
+    Dead,
+    Alive {
+        game_refs: NonZero<u32>,
+        inner: NonNull<c_void>,
+    },
+}
+
+const _: () = assert!(size_of::<Cell<WrapperState>>() == 8);
+
 /// Common prefix of every wrapper object.
 #[repr(C)]
 struct ComHeader {
     vtbl: *const c_void,
-    refs: Cell<u32>,
-    /// The wrapped D3D9 interface pointer.
-    inner: Cell<*mut c_void>,
+    state: Cell<WrapperState>,
 }
 
-/// Reads the wrapped D3D9 pointer out of a game-supplied wrapper pointer. Null passes through.
-unsafe fn unwrap8(p: *mut c_void) -> *mut c_void {
-    if p.is_null() {
-        null_mut()
-    } else {
-        unsafe { (*p.cast::<ComHeader>()).inner.get() }
+const _: () = assert!(size_of::<ComHeader>() == 12);
+
+impl ComHeader {
+    fn new_alive(vtbl: *const c_void, inner: NonNull<c_void>) -> Self {
+        Self {
+            vtbl,
+            state: Cell::new(WrapperState::Alive {
+                game_refs: NonZero::<u32>::MIN,
+                inner,
+            }),
+        }
     }
+
+    fn new_dead(vtbl: *const c_void) -> Self {
+        Self {
+            vtbl,
+            state: Cell::new(WrapperState::Dead),
+        }
+    }
+
+    /// Returns the wrapped D3D9 object, or `None` when the wrapper is dead.
+    fn inner(&self) -> Option<NonNull<c_void>> {
+        match self.state.get() {
+            WrapperState::Alive { inner, .. } => Some(inner),
+            WrapperState::Dead => None,
+        }
+    }
+
+    /// Returns the game-facing reference count (0 when dead).
+    #[cfg(test)]
+    fn game_refs(&self) -> u32 {
+        match self.state.get() {
+            WrapperState::Alive { game_refs, .. } => game_refs.get(),
+            WrapperState::Dead => 0,
+        }
+    }
+}
+
+/// Returns the wrapped D3D9 object behind a receiver, or `None` for a null or dead wrapper. Unwrap through `require_live!`.
+unsafe fn unwrap8(p: *mut c_void) -> Option<NonNull<c_void>> {
+    if p.is_null() {
+        return None;
+    }
+    unsafe { (*p.cast::<ComHeader>()).inner() }
+}
+
+/// Marker for a dead wrapper passed in an argument position. Represents a use-after-release, distinct from a legitimate null.
+struct DeadArg;
+
+/// Unwraps an argument-position wrapper. Null passes through (e.g. `SetTexture(null)` unbinds), a live wrapper yields its inner object,
+/// and a dead wrapper (i.e. the game reusing something it fully released) is refused.
+unsafe fn unwrap8_arg(p: *mut c_void, method: &'static str) -> Result<*mut c_void, DeadArg> {
+    if p.is_null() {
+        Ok(null_mut())
+    } else if let Some(nn) = unsafe { (*p.cast::<ComHeader>()).inner() } {
+        Ok(nn.as_ptr())
+    } else {
+        warn_dead_wrapper_call(method);
+        Err(DeadArg)
+    }
+}
+
+/// Logs a method call on a wrapper the game has already released to death. The caller returns its refusal value.
+fn warn_dead_wrapper_call(method: &'static str) {
+    warn!(kind = "d3d8_dead_wrapper_call", method);
+}
+
+/// Unwraps a receiver accessor ([`unwrap8`], [`dev9`], the `inner` methods), refusing the call when the wrapper is dead.
+/// Early-returns the method's [`DeadDefault`], or, in the `nulls` form for `Create*`-style methods,
+/// nulls the interface out-slot like real D3D8 does on failure.
+macro_rules! require_live {
+    ($acc:expr, $method:expr) => {
+        match $acc {
+            Some(p) => p.as_ptr(),
+            None => {
+                warn_dead_wrapper_call($method);
+                return DeadDefault::dead();
+            }
+        }
+    };
+    ($acc:expr, $method:expr, nulls $out:expr) => {
+        match $acc {
+            Some(p) => p.as_ptr(),
+            None => return unsafe { refuse_dead_create($method, $out) },
+        }
+    };
+}
+
+/// The value a method returns when invoked on a dead wrapper: refusal for `HRESULT`s, zero for counters,
+/// unit for notifications. Used by `forward8!`'s dead-wrapper guard.
+trait DeadDefault {
+    fn dead() -> Self;
+}
+
+impl DeadDefault for HRESULT {
+    fn dead() -> Self {
+        D3DERR_INVALIDCALL
+    }
+}
+
+impl DeadDefault for u32 {
+    fn dead() -> Self {
+        0
+    }
+}
+
+impl DeadDefault for () {
+    fn dead() -> Self {}
 }
 
 unsafe fn com_add_ref(p: *mut c_void) -> u32 {
@@ -362,12 +475,13 @@ macro_rules! stub8 {
 
 /// A D3D8 method implemented by calling the wrapped D3D9 object.
 /// `$acc` unwraps the wrapper (`dev9` for the device, `unwrap8` for resources) and `$vt` projects its vtable.
+/// A dead receiver (see [`WrapperState`]) is refused with the [`DeadDefault`] for the return type.
 macro_rules! forward8 {
     ($(#[$attr:meta])* $fn_name:ident, $acc:ident / $vt:ident . $($slot:ident).+ ( $($arg:ident : $ty:ty),* $(,)? ) -> $ret:ty) => {
         $(#[$attr])*
         unsafe extern "system" fn $fn_name(this: *mut c_void $(, $arg : $ty)*) -> $ret {
             unsafe {
-                let p = $acc(this);
+                let p = require_live!($acc(this), stringify!($fn_name));
                 ($vt(p).$($slot).+)(p $(, $arg)*)
             }
         }
@@ -376,7 +490,7 @@ macro_rules! forward8 {
         $(#[$attr])*
         unsafe extern "system" fn $fn_name(this: *mut c_void $(, $arg : $ty)*) -> $ret {
             unsafe {
-                let p = $acc(this);
+                let p = require_live!($acc(this), stringify!($fn_name));
                 ($vt(p).$($slot).+)(p $(, $fwd)*)
             }
         }
@@ -400,27 +514,46 @@ unsafe extern "system" fn wrap_query_interface(
 
 unsafe extern "system" fn wrap_add_ref(this: *mut c_void) -> u32 {
     let h = unsafe { &*this.cast::<ComHeader>() };
-    // A dead wrapper's inner reference is gone. Resurrecting it would AddRef a possibly destroyed D3D9 object.
-    if h.refs.get() == 0 {
-        warn!(kind = "wrapper_add_ref_after_death");
-        return 0;
+    match h.state.get() {
+        // A dead wrapper's D3D9 object is gone; resurrecting the wrapper here would hand out a dangling reference.
+        WrapperState::Dead => {
+            warn!(kind = "wrapper_add_ref_after_death");
+            0
+        }
+        WrapperState::Alive { game_refs, inner } => {
+            let n = game_refs.checked_add(1).expect("wrapper refcount overflow");
+            h.state.set(WrapperState::Alive {
+                game_refs: n,
+                inner,
+            });
+            n.get()
+        }
     }
-    unsafe { com_add_ref(h.inner.get()) };
-    let n = h.refs.get() + 1;
-    h.refs.set(n);
-    n
 }
 
+/// Drops one game-facing reference. At the 1 -> 0 refcount transition, the wrapper dies and the single owned reference
+/// on the inner D3D9 object is released. Returns the new count, or `None` on over-release.
 unsafe fn com_header_release(this: *mut c_void, wrapper: &'static str) -> Option<u32> {
     let h = unsafe { &*this.cast::<ComHeader>() };
-    if h.refs.get() == 0 {
-        warn!(kind = "wrapper_over_release", wrapper);
-        return None;
+    match h.state.get() {
+        WrapperState::Dead => {
+            warn!(kind = "wrapper_over_release", wrapper);
+            None
+        }
+        WrapperState::Alive { game_refs, inner } => {
+            if let Some(n) = NonZero::new(game_refs.get() - 1) {
+                h.state.set(WrapperState::Alive {
+                    game_refs: n,
+                    inner,
+                });
+                Some(n.get())
+            } else {
+                h.state.set(WrapperState::Dead);
+                unsafe { com_release(inner.as_ptr()) };
+                Some(0)
+            }
+        }
     }
-    unsafe { com_release(h.inner.get()) };
-    let n = h.refs.get() - 1;
-    h.refs.set(n);
-    Some(n)
 }
 
 macro_rules! vtable_accessors {
@@ -465,7 +598,7 @@ const D3D8_INTERNAL_LOCKABLE: u32 = 1 << 26;
 impl Resource8 {
     unsafe fn new_raw(
         vtbl: *const c_void,
-        inner: *mut c_void,
+        inner: NonNull<c_void>,
         device: *mut Device8,
         lockable: bool,
     ) -> *mut c_void {
@@ -474,45 +607,57 @@ impl Resource8 {
         }
 
         Box::into_raw(Box::new(Self {
-            header: ComHeader {
-                vtbl,
-                refs: Cell::new(1),
-                inner: Cell::new(inner),
-            },
+            header: ComHeader::new_alive(vtbl, inner),
             device,
             internal_flags: if lockable { D3D8_INTERNAL_LOCKABLE } else { 0 },
         }))
         .cast()
     }
 
-    /// Takes over the caller's freshly acquired D3D9 reference (which carries ownership of the refcount increment that
-    /// D3D9's `GetBackBuffer` performed on the surface) and mints the game's reference on the wrapper itself, reviving the wrapper if dead.
+    /// Takes over the caller's freshly acquired D3D9 surface reference (the refcount increment D3D9's `GetBackBuffer` performed)
+    /// and mints the game's reference on the wrapper itself, reviving the wrapper if dead.
     ///
-    /// This method and [`resource8_release`] form two halves of a ledger: this files one D3D9 reference in and mints
-    /// one game-facing reference out; `resource8_release` burns one of each. The device lifetime reference at [`Resource8::device`]
-    /// bounds the entire live period. The full cycle balances like double-entry bookkeeping:
+    /// The wrapper owns exactly one reference on the wrapped surface for its whole `Alive` period
+    /// (released by [`com_header_release`] at death), so:
+    /// - Dead: the incoming reference becomes that single owned reference, a reference is taken on the owning device
+    ///   for the new live period (returned at death by [`resource8_release`]), and `game_refs` starts at 1.
+    /// - Alive with the same surface: the incoming reference is redundant and is released immediately; only `game_refs` increments.
+    /// - Alive with a different surface: refused. Re-pointing a live wrapper would silently re-home every outstanding game reference
+    ///   onto the new surface, over-releasing it while orphaning the old one. We assume no game requests more than one back buffer
+    ///   or holds one across a `Reset`, so this would be a contract violation.
+    ///   The incoming reference is released and the wrapper is left untouched.
     ///
-    /// | Event                                        | Wrapper `refs` | Inner refs held      | Device ref    |
-    /// |:---------------------------------------------|:---------------|:---------------------|:--------------|
-    /// | `GetBackBuffer` -> `Resource8::adopt` (dead) | 0 -> 1         | +1 (absorbed)        | +1 (taken)    |
-    /// | `GetBackBuffer` -> `Resource8::adopt` (live) | n -> n + 1     | +1 (absorbed)        | no change     |
-    /// | game `Release`                               | n -> n - 1     | -1 ([`com_release`]) | no change     |
-    /// | game `Release` reaching 0                    | 1 -> 0         | -1                   | -1 (returned) |
-    ///
-    /// The two entries are similar to different `Rc` operations: `Rc::from_raw` for the surface, whose reference already exists
-    /// and only changes owner, and `Rc::increment_strong_count` for the wrapper, which returns nothing yet leaves a reference
-    /// the game must release. However, unlike an `Rc`, `refs` is owed against whatever `header.inner` holds at release time,
-    /// not against a fixed object.
-    unsafe fn adopt(&self, inner: *mut c_void) {
-        // NOTE/TODO: We assume the result of `GetBackBuffer(0, MONO)` is stable. Adopting a different surface onto a live wrapper
-        // would silently ref all of them to the new one, over-releasing it while orphaning the old one.
-        // If a game requests more than one back buffer or holds a surface across a `Present`, then we need to revisit this.
-        if self.header.refs.get() == 0 && !self.device.is_null() {
-            unsafe { wrap_add_ref(self.device.cast()) };
+    /// Returns whether the adoption happened.
+    unsafe fn adopt(&self, incoming: NonNull<c_void>) -> bool {
+        match self.header.state.get() {
+            WrapperState::Dead => {
+                if !self.device.is_null() {
+                    unsafe { wrap_add_ref(self.device.cast()) };
+                }
+                self.header.state.set(WrapperState::Alive {
+                    game_refs: NonZero::<u32>::MIN,
+                    inner: incoming,
+                });
+                true
+            }
+            WrapperState::Alive { game_refs, inner } if inner == incoming => {
+                unsafe { com_release(incoming.as_ptr()) };
+                self.header.state.set(WrapperState::Alive {
+                    game_refs: game_refs.checked_add(1).expect("wrapper refcount overflow"),
+                    inner,
+                });
+                true
+            }
+            WrapperState::Alive { inner, .. } => {
+                warn!(
+                    kind = "wrapper_adopt_divergent_inner",
+                    held = format_args!("{:p}", inner.as_ptr()),
+                    incoming = format_args!("{:p}", incoming.as_ptr()),
+                );
+                unsafe { com_release(incoming.as_ptr()) };
+                false
+            }
         }
-        // A dead wrapper's stored surface may have been destroyed by a `Reset` and must not be reused, so we always overwrite.
-        self.header.inner.set(inner);
-        self.header.refs.update(|n| n + 1);
     }
 }
 
@@ -537,13 +682,22 @@ unsafe fn wrap_created(
         unsafe { *out = null_mut() };
         return hr;
     }
-    if inner.is_null() {
+    let Some(inner) = NonNull::new(inner) else {
         warn!(kind = "d3d9_null_on_success", call);
         unsafe { *out = null_mut() };
         return D3DERR_INVALIDCALL;
-    }
+    };
     unsafe { *out = Resource8::new_raw(vtbl, inner, device, lockable) };
     hr
+}
+
+/// Refuses a `Create*`-style call on a dead device wrapper, nulling the out-slot like real D3D8 does on failure.
+unsafe fn refuse_dead_create(method: &'static str, out: *mut *mut c_void) -> HRESULT {
+    warn_dead_wrapper_call(method);
+    if !out.is_null() {
+        unsafe { out.write(null_mut()) };
+    }
+    D3DERR_INVALIDCALL
 }
 
 unsafe extern "system" fn resource8_release(this: *mut c_void) -> u32 {
@@ -567,6 +721,9 @@ unsafe extern "system" fn resource8_get_device(
     out: *mut *mut c_void,
 ) -> HRESULT {
     let h = unsafe { &*this.cast::<Resource8>() };
+    // A live receiver's backpointer target is itself alive: resources hold a device reference for their whole live period
+    // (see `Resource8::new_raw`/`adopt`), so only the dead-receiver case needs refusing.
+    let _ = require_live!(h.header.inner(), "resource8_get_device", nulls out);
     if out.is_null() || h.device.is_null() {
         return D3DERR_INVALIDCALL;
     }
@@ -584,10 +741,8 @@ forward8!(resource8_set_priority, unwrap8 / res9_vt.SetPriority(priority: u32) -
 stub8!(resource8_get_priority, "IDirect3DResource8::GetPriority"() -> u32 = 0);
 
 unsafe extern "system" fn resource8_pre_load(this: *mut c_void) {
-    unsafe {
-        let inner = unwrap8(this);
-        (res9_vt(inner).PreLoad)(inner);
-    }
+    let inner = require_live!(unsafe { unwrap8(this) }, "resource8_pre_load");
+    unsafe { (res9_vt(inner).PreLoad)(inner) };
 }
 
 // 0 is deliberately not a valid `D3DRESOURCETYPE`.
@@ -672,7 +827,8 @@ unsafe extern "system" fn surface8_get_desc(
     if out.is_null() {
         return D3DERR_INVALIDCALL;
     }
-    match unsafe { surface_desc9(unwrap8(this)) } {
+    let inner = require_live!(unsafe { unwrap8(this) }, "surface8_get_desc");
+    match unsafe { surface_desc9(inner) } {
         Ok(d9) => {
             unsafe { *out = surface_desc_9_to_8(&d9) };
             D3D_OK
@@ -744,7 +900,7 @@ unsafe extern "system" fn texture8_get_level_desc(
     if out.is_null() {
         return D3DERR_INVALIDCALL;
     }
-    let inner = unsafe { unwrap8(this) };
+    let inner = require_live!(unsafe { unwrap8(this) }, "texture8_get_level_desc");
     let mut d9 = D3DSURFACE_DESC::default();
     let hr = unsafe { (tex9_vt(inner).GetLevelDesc)(inner, level, &raw mut d9) };
     if hr.is_ok() {
@@ -759,8 +915,8 @@ unsafe extern "system" fn texture8_get_surface_level(
     out: *mut *mut c_void,
 ) -> HRESULT {
     let h = unsafe { &*this.cast::<Resource8>() };
+    let inner = require_live!(h.header.inner(), "texture8_get_surface_level", nulls out);
     let mut s9 = null_mut();
-    let inner = h.header.inner.get();
     let hr = unsafe { (tex9_vt(inner).GetSurfaceLevel)(inner, level, &raw mut s9) };
     // Texture levels are not directly lockable surfaces in the internal-flags sense.
     unsafe {
@@ -872,8 +1028,9 @@ struct Device8 {
 }
 
 impl Device8 {
-    fn inner(&self) -> *mut c_void {
-        self.header.inner.get()
+    /// Returns the wrapped `IDirect3DDevice9Ex`, or `None` when the wrapper is dead. Unwrap through `require_live!`.
+    fn inner(&self) -> Option<NonNull<c_void>> {
+        self.header.inner()
     }
 }
 
@@ -881,8 +1038,9 @@ unsafe fn device8<'a>(this: *mut c_void) -> &'a Device8 {
     unsafe { &*this.cast() }
 }
 
-/// Returns the wrapped `IDirect3DDevice9Ex` of a game-facing device pointer.
-unsafe fn dev9(this: *mut c_void) -> *mut c_void {
+/// Returns the wrapped `IDirect3DDevice9Ex` of a game-facing device pointer, or `None` when the wrapper is dead.
+/// Unwrap through `require_live!`.
+unsafe fn dev9(this: *mut c_void) -> Option<NonNull<c_void>> {
     unsafe { device8(this).inner() }
 }
 
@@ -1116,6 +1274,9 @@ unsafe extern "system" fn device8_get_direct3d(
     out: *mut *mut c_void,
 ) -> HRESULT {
     let d = unsafe { device8(this) };
+    // A live receiver's backpointer target is itself alive: the device holds a parent reference for its whole live period
+    // (see `d3d8_create_device`), so only the dead-receiver case needs refusing.
+    let _ = require_live!(d.inner(), "device8_get_direct3d", nulls out);
     if out.is_null() || d.parent.is_null() {
         return D3DERR_INVALIDCALL;
     }
@@ -1133,7 +1294,7 @@ unsafe extern "system" fn device8_get_device_caps(
     if out.is_null() {
         return D3DERR_INVALIDCALL;
     }
-    let p = unsafe { dev9(this) };
+    let p = require_live!(unsafe { dev9(this) }, "device8_get_device_caps");
     let mut caps9 = D3DCAPS9::default();
     let hr = unsafe { (dev9_vt(p).base__.GetDeviceCaps)(p, &raw mut caps9) };
     if hr.is_ok() {
@@ -1157,9 +1318,9 @@ unsafe extern "system" fn device8_reset(
         return D3DERR_INVALIDCALL;
     };
     info!(kind = "d3d8_reset", pp8 = ?pp8);
-    let d = unsafe { device8(this) };
+    let p = require_live!(unsafe { dev9(this) }, "device8_reset");
     let mut pp9 = convert_present_params(pp8);
-    let hr = unsafe { (dev9_vt(d.inner()).base__.Reset)(d.inner(), &raw mut pp9) };
+    let hr = unsafe { (dev9_vt(p).base__.Reset)(p, &raw mut pp9) };
     if hr.is_ok() {
         sync_present_params_back(pp8, &pp9);
     }
@@ -1181,10 +1342,9 @@ unsafe extern "system" fn device8_get_back_buffer(
         return D3DERR_INVALIDCALL;
     }
 
+    let p = require_live!(d.inner(), "device8_get_back_buffer", nulls out);
     let mut s9 = null_mut();
-    let hr = unsafe {
-        (dev9_vt(d.inner()).base__.GetBackBuffer)(d.inner(), 0, back_buffer, ty, &raw mut s9)
-    };
+    let hr = unsafe { (dev9_vt(p).base__.GetBackBuffer)(p, 0, back_buffer, ty, &raw mut s9) };
     if !embedded {
         return unsafe {
             wrap_created(
@@ -1202,18 +1362,19 @@ unsafe extern "system" fn device8_get_back_buffer(
         unsafe { *out = null_mut() };
         return hr;
     }
-    if s9.is_null() {
+    let Some(s9) = NonNull::new(s9) else {
         warn!(
             kind = "d3d9_null_on_success",
             call = "IDirect3DDevice9::GetBackBuffer",
         );
         unsafe { *out = null_mut() };
         return D3DERR_INVALIDCALL;
+    };
+    if !unsafe { d.back_buffer.adopt(s9) } {
+        unsafe { *out = null_mut() };
+        return D3DERR_INVALIDCALL;
     }
-    unsafe {
-        d.back_buffer.adopt(s9);
-        *out = (&raw const d.back_buffer).cast_mut().cast();
-    }
+    unsafe { *out = (&raw const d.back_buffer).cast_mut().cast() };
     hr
 }
 
@@ -1224,17 +1385,13 @@ unsafe extern "system" fn device8_set_gamma_ramp(
     flags: u32,
     ramp: *const D3DGAMMARAMP,
 ) {
-    unsafe {
-        let p = dev9(this);
-        (dev9_vt(p).base__.SetGammaRamp)(p, 0, flags, ramp);
-    }
+    let p = require_live!(unsafe { dev9(this) }, "device8_set_gamma_ramp");
+    unsafe { (dev9_vt(p).base__.SetGammaRamp)(p, 0, flags, ramp) };
 }
 
 unsafe extern "system" fn device8_get_gamma_ramp(this: *mut c_void, ramp: *mut D3DGAMMARAMP) {
-    unsafe {
-        let p = dev9(this);
-        (dev9_vt(p).base__.GetGammaRamp)(p, 0, ramp);
-    }
+    let p = require_live!(unsafe { dev9(this) }, "device8_get_gamma_ramp");
+    unsafe { (dev9_vt(p).base__.GetGammaRamp)(p, 0, ramp) };
 }
 
 unsafe extern "system" fn device8_create_texture(
@@ -1247,11 +1404,11 @@ unsafe extern "system" fn device8_create_texture(
     pool: D3DPOOL,
     out: *mut *mut c_void,
 ) -> HRESULT {
-    let d = unsafe { device8(this) };
+    let p = require_live!(unsafe { dev9(this) }, "device8_create_texture", nulls out);
     let mut t9 = null_mut();
     let hr = unsafe {
-        (dev9_vt(d.inner()).base__.CreateTexture)(
-            d.inner(),
+        (dev9_vt(p).base__.CreateTexture)(
+            p,
             width,
             height,
             levels,
@@ -1286,11 +1443,11 @@ unsafe extern "system" fn device8_create_vertex_buffer(
     pool: D3DPOOL,
     out: *mut *mut c_void,
 ) -> HRESULT {
-    let d = unsafe { device8(this) };
+    let p = require_live!(unsafe { dev9(this) }, "device8_create_vertex_buffer", nulls out);
     let mut vb9 = null_mut();
     let hr = unsafe {
-        (dev9_vt(d.inner()).base__.CreateVertexBuffer)(
-            d.inner(),
+        (dev9_vt(p).base__.CreateVertexBuffer)(
+            p,
             length,
             usage,
             fvf,
@@ -1323,11 +1480,11 @@ unsafe extern "system" fn device8_create_render_target(
     lockable: BOOL,
     out: *mut *mut c_void,
 ) -> HRESULT {
-    let d = unsafe { device8(this) };
+    let p = require_live!(unsafe { dev9(this) }, "device8_create_render_target", nulls out);
     let mut s9 = null_mut();
     let hr = unsafe {
-        (dev9_vt(d.inner()).base__.CreateRenderTarget)(
-            d.inner(),
+        (dev9_vt(p).base__.CreateRenderTarget)(
+            p,
             width,
             height,
             format,
@@ -1362,11 +1519,11 @@ unsafe extern "system" fn device8_create_image_surface(
     format: D3DFORMAT,
     out: *mut *mut c_void,
 ) -> HRESULT {
-    let d = unsafe { device8(this) };
+    let p = require_live!(unsafe { dev9(this) }, "device8_create_image_surface", nulls out);
     let mut s9 = null_mut();
     let hr = unsafe {
-        (dev9_vt(d.inner()).base__.CreateOffscreenPlainSurface)(
-            d.inner(),
+        (dev9_vt(p).base__.CreateOffscreenPlainSurface)(
+            p,
             width,
             height,
             format,
@@ -1567,12 +1724,16 @@ unsafe extern "system" fn device8_copy_rects(
     dst8: *mut c_void,
     points: *const POINT,
 ) -> HRESULT {
-    let src9 = unsafe { unwrap8(src8) };
-    let dst9 = unsafe { unwrap8(dst8) };
-
+    let (Ok(src9), Ok(dst9)) = (
+        unsafe { unwrap8_arg(src8, "device8_copy_rects(src)") },
+        unsafe { unwrap8_arg(dst8, "device8_copy_rects(dst)") },
+    ) else {
+        return D3DERR_INVALIDCALL;
+    };
     if src9.is_null() || dst9.is_null() {
         return D3DERR_INVALIDCALL;
     }
+
     let (Ok(sd), Ok(dd)) = (unsafe { surface_desc9(src9) }, unsafe {
         surface_desc9(dst9)
     }) else {
@@ -1587,7 +1748,7 @@ unsafe extern "system" fn device8_copy_rects(
         return D3DERR_INVALIDCALL;
     }
 
-    let p = unsafe { dev9(this) };
+    let p = require_live!(unsafe { dev9(this) }, "device8_copy_rects");
 
     // Every call site in the games passes either zero or one rects.
     if rect_count > 1 {
@@ -1633,7 +1794,21 @@ unsafe extern "system" fn device8_copy_rects(
     hr
 }
 
-forward8!(device8_update_texture, dev9 / dev9_vt.base__.UpdateTexture(src8: *mut c_void, dst8: *mut c_void) -> HRESULT => (unwrap8(src8), unwrap8(dst8)));
+unsafe extern "system" fn device8_update_texture(
+    this: *mut c_void,
+    src8: *mut c_void,
+    dst8: *mut c_void,
+) -> HRESULT {
+    let p = require_live!(unsafe { dev9(this) }, "device8_update_texture");
+    let (Ok(src9), Ok(dst9)) = (
+        unsafe { unwrap8_arg(src8, "device8_update_texture(src)") },
+        unsafe { unwrap8_arg(dst8, "device8_update_texture(dst)") },
+    ) else {
+        return D3DERR_INVALIDCALL;
+    };
+    unsafe { (dev9_vt(p).base__.UpdateTexture)(p, src9, dst9) }
+}
+
 stub8!(device8_get_front_buffer, "IDirect3DDevice8::GetFrontBuffer"(_dst8: *mut c_void) -> D3DERR_NOTAVAILABLE);
 stub8!(device8_set_render_target, "IDirect3DDevice8::SetRenderTarget"(_rt8: *mut c_void, _zs8: *mut c_void) -> D3DERR_NOTAVAILABLE);
 stub8!(device8_get_render_target, "IDirect3DDevice8::GetRenderTarget"(_out: *mut *mut c_void) nulls _out -> D3DERR_NOTAVAILABLE);
@@ -1670,6 +1845,8 @@ unsafe extern "system" fn device8_set_render_state(
     const D3DRS8_SOFTWAREVERTEXPROCESSING: u32 = 153;
     const D3DRS8_PATCHSEGMENTS: u32 = 164;
 
+    let p = require_live!(unsafe { dev9(this) }, "device8_set_render_state");
+
     match state {
         // th07/th08 unconditionally set this to 0 (disabled) at initialization, so dropping this is fine.
         D3DRS8_EDGEANTIALIAS => {
@@ -1681,24 +1858,15 @@ unsafe extern "system" fn device8_set_render_state(
             warn!(kind = "d3d8_render_state_dropped", state, value);
             D3D_OK
         }
-        D3DRS8_SOFTWAREVERTEXPROCESSING => {
-            let p = unsafe { dev9(this) };
-            unsafe { (dev9_vt(p).base__.SetSoftwareVertexProcessing)(p, BOOL(value.cast_signed())) }
-        }
-        D3DRS8_PATCHSEGMENTS => {
-            let p = unsafe { dev9(this) };
-            unsafe { (dev9_vt(p).base__.SetNPatchMode)(p, f32::from_bits(value)) }
-        }
-        _ => {
-            let p = unsafe { dev9(this) };
-            unsafe {
-                (dev9_vt(p).base__.SetRenderState)(
-                    p,
-                    D3DRENDERSTATETYPE(state.cast_signed()),
-                    value,
-                )
-            }
-        }
+        D3DRS8_SOFTWAREVERTEXPROCESSING => unsafe {
+            (dev9_vt(p).base__.SetSoftwareVertexProcessing)(p, BOOL(value.cast_signed()))
+        },
+        D3DRS8_PATCHSEGMENTS => unsafe {
+            (dev9_vt(p).base__.SetNPatchMode)(p, f32::from_bits(value))
+        },
+        _ => unsafe {
+            (dev9_vt(p).base__.SetRenderState)(p, D3DRENDERSTATETYPE(state.cast_signed()), value)
+        },
     }
 }
 
@@ -1712,7 +1880,18 @@ stub8!(device8_create_state_block, "IDirect3DDevice8::CreateStateBlock"(_ty: D3D
 stub8!(device8_set_clip_status, "IDirect3DDevice8::SetClipStatus"(_status: *const D3DCLIPSTATUS9) -> D3D_OK);
 stub8!(device8_get_clip_status, "IDirect3DDevice8::GetClipStatus"(_status: *mut D3DCLIPSTATUS9) -> D3DERR_NOTAVAILABLE);
 stub8!(device8_get_texture, "IDirect3DDevice8::GetTexture"(_stage: u32, _out: *mut *mut c_void) nulls _out -> D3DERR_NOTAVAILABLE);
-forward8!(device8_set_texture, dev9 / dev9_vt.base__.SetTexture(stage: u32, texture8: *mut c_void) -> HRESULT => (stage, unwrap8(texture8)));
+unsafe extern "system" fn device8_set_texture(
+    this: *mut c_void,
+    stage: u32,
+    texture8: *mut c_void,
+) -> HRESULT {
+    let p = require_live!(unsafe { dev9(this) }, "device8_set_texture");
+    // A null texture is a legitimate unbind; a dead wrapper is a use-after-release and is refused.
+    let Ok(t9) = (unsafe { unwrap8_arg(texture8, "device8_set_texture(texture)") }) else {
+        return D3DERR_INVALIDCALL;
+    };
+    unsafe { (dev9_vt(p).base__.SetTexture)(p, stage, t9) }
+}
 stub8!(device8_get_texture_stage_state, "IDirect3DDevice8::GetTextureStageState"(_stage: u32, _ty: u32, _out: *mut u32) -> D3DERR_NOTAVAILABLE);
 
 unsafe extern "system" fn device8_set_texture_stage_state(
@@ -1721,7 +1900,7 @@ unsafe extern "system" fn device8_set_texture_stage_state(
     ty: u32,
     value: u32,
 ) -> HRESULT {
-    let p = unsafe { dev9(this) };
+    let p = require_live!(unsafe { dev9(this) }, "device8_set_texture_stage_state");
     match tss_to_sampler_state(ty) {
         Some(sampler) => unsafe { (dev9_vt(p).base__.SetSamplerState)(p, stage, sampler, value) },
         None => unsafe {
@@ -1749,11 +1928,9 @@ stub8!(device8_process_vertices, "IDirect3DDevice8::ProcessVertices"(_src_start:
 stub8!(device8_create_vertex_shader, "IDirect3DDevice8::CreateVertexShader"(_declaration: *const u32, _function: *const u32, _handle: *mut u32, _usage: u32) -> D3DERR_NOTAVAILABLE);
 
 unsafe extern "system" fn device8_set_vertex_shader(this: *mut c_void, handle: u32) -> HRESULT {
-    unsafe {
-        let p = dev9(this);
-        // The games never create shaders, so every handle is an FVF code.
-        (dev9_vt(p).base__.SetFVF)(p, handle)
-    }
+    let p = require_live!(unsafe { dev9(this) }, "device8_set_vertex_shader");
+    // The games never create shaders, so every handle is an FVF code.
+    unsafe { (dev9_vt(p).base__.SetFVF)(p, handle) }
 }
 
 stub8!(device8_get_vertex_shader, "IDirect3DDevice8::GetVertexShader"(_out: *mut u32) -> D3DERR_NOTAVAILABLE);
@@ -1762,7 +1939,20 @@ stub8!(device8_set_vertex_shader_constant, "IDirect3DDevice8::SetVertexShaderCon
 stub8!(device8_get_vertex_shader_constant, "IDirect3DDevice8::GetVertexShaderConstant"(_register: u32, _data: *mut c_void, _count: u32) -> D3DERR_NOTAVAILABLE);
 stub8!(device8_get_vertex_shader_declaration, "IDirect3DDevice8::GetVertexShaderDeclaration"(_handle: u32, _data: *mut c_void, _size: *mut u32) -> D3DERR_NOTAVAILABLE);
 stub8!(device8_get_vertex_shader_function, "IDirect3DDevice8::GetVertexShaderFunction"(_handle: u32, _data: *mut c_void, _size: *mut u32) -> D3DERR_NOTAVAILABLE);
-forward8!(device8_set_stream_source, dev9 / dev9_vt.base__.SetStreamSource(stream: u32, vb8: *mut c_void, stride: u32) -> HRESULT => (stream, unwrap8(vb8), 0, stride));
+
+unsafe extern "system" fn device8_set_stream_source(
+    this: *mut c_void,
+    stream: u32,
+    vb8: *mut c_void,
+    stride: u32,
+) -> HRESULT {
+    let p = require_live!(unsafe { dev9(this) }, "device8_set_stream_source");
+    let Ok(vb9) = (unsafe { unwrap8_arg(vb8, "device8_set_stream_source(vb)") }) else {
+        return D3DERR_INVALIDCALL;
+    };
+    unsafe { (dev9_vt(p).base__.SetStreamSource)(p, stream, vb9, 0, stride) }
+}
+
 stub8!(device8_get_stream_source, "IDirect3DDevice8::GetStreamSource"(_stream: u32, _out: *mut *mut c_void, _stride: *mut u32) nulls _out -> D3DERR_NOTAVAILABLE);
 stub8!(device8_set_indices, "IDirect3DDevice8::SetIndices"(_ib8: *mut c_void, _base_vertex_index: u32) -> D3D_OK);
 stub8!(device8_get_indices, "IDirect3DDevice8::GetIndices"(_out: *mut *mut c_void, _base: *mut u32) nulls _out -> D3DERR_NOTAVAILABLE);
@@ -1784,8 +1974,9 @@ struct D3d8 {
 }
 
 impl D3d8 {
-    fn inner(&self) -> *mut c_void {
-        self.header.inner.get()
+    /// The wrapped `IDirect3D9Ex`, or `None` when the wrapper is dead. Unwrap through `require_live!`.
+    fn inner(&self) -> Option<NonNull<c_void>> {
+        self.header.inner()
     }
 }
 
@@ -1856,10 +2047,11 @@ unsafe extern "system" fn d3d8_get_adapter_display_mode(
     adapter: u32,
     out: *mut D3DDISPLAYMODE,
 ) -> HRESULT {
-    unsafe {
-        let p = d3d8(this).inner();
-        (d3d9_vt(p).base__.GetAdapterDisplayMode)(p, adapter, out)
-    }
+    let p = require_live!(
+        unsafe { d3d8(this).inner() },
+        "d3d8_get_adapter_display_mode"
+    );
+    unsafe { (d3d9_vt(p).base__.GetAdapterDisplayMode)(p, adapter, out) }
 }
 
 stub8!(d3d8_check_device_type, "IDirect3D8::CheckDeviceType"(_adapter: u32, _device_type: D3DDEVTYPE, _display_format: D3DFORMAT, _back_buffer_format: D3DFORMAT, _windowed: BOOL) -> D3DERR_NOTAVAILABLE);
@@ -1873,8 +2065,8 @@ unsafe extern "system" fn d3d8_check_device_format(
     rtype: u32,
     check_format: D3DFORMAT,
 ) -> HRESULT {
+    let p = require_live!(unsafe { d3d8(this).inner() }, "d3d8_check_device_format");
     unsafe {
-        let p = d3d8(this).inner();
         (d3d9_vt(p).base__.CheckDeviceFormat)(
             p,
             adapter,
@@ -1912,12 +2104,12 @@ unsafe extern "system" fn d3d8_create_device(
     };
     info!(kind = "d3d8_create_device", pp8 = ?pp8_ref);
 
-    let d = unsafe { d3d8(this) };
+    let p = require_live!(unsafe { d3d8(this).inner() }, "d3d8_create_device");
     let mut pp9 = convert_present_params(pp8_ref);
     let mut dev9_ptr = null_mut();
     let hr = unsafe {
-        (d3d9_vt(d.inner()).base__.CreateDevice)(
-            d.inner(),
+        (d3d9_vt(p).base__.CreateDevice)(
+            p,
             adapter,
             device_type,
             focus_window,
@@ -1930,14 +2122,14 @@ unsafe extern "system" fn d3d8_create_device(
         warn!(kind = "d3d8_create_device_failed", hr = %fmt_hr!(hr));
         return hr;
     }
-    if dev9_ptr.is_null() {
+    let Some(dev9_nn) = NonNull::new(dev9_ptr) else {
         warn!(
             kind = "d3d9_null_on_success",
             call = "IDirect3D9::CreateDevice",
         );
         warn!(kind = "d3d8_create_device_failed", hr = %fmt_hr!(D3DERR_INVALIDCALL));
         return D3DERR_INVALIDCALL;
-    }
+    };
 
     sync_present_params_back(pp8_ref, &pp9);
 
@@ -1945,18 +2137,11 @@ unsafe extern "system" fn d3d8_create_device(
     // so doing `CreateDevice(...); parent->Release()` can't leave `GetDirect3D` dangling.
     unsafe { wrap_add_ref(this) };
     let device = Box::into_raw(Box::new(Device8 {
-        header: ComHeader {
-            vtbl: (&raw const DEVICE8_VTBL).cast(),
-            refs: Cell::new(1),
-            inner: Cell::new(dev9_ptr),
-        },
+        header: ComHeader::new_alive((&raw const DEVICE8_VTBL).cast(), dev9_nn),
         parent: this.cast(),
         back_buffer: Resource8 {
-            header: ComHeader {
-                vtbl: (&raw const SURFACE8_VTBL).cast(),
-                refs: Cell::new(0),
-                inner: Cell::new(null_mut()),
-            },
+            // Dead until the first `GetBackBuffer` adopts a surface.
+            header: ComHeader::new_dead((&raw const SURFACE8_VTBL).cast()),
             // Set below; the backpointer only exists once the box has an address.
             device: null_mut(),
             internal_flags: D3D8_INTERNAL_LOCKABLE,
@@ -2039,11 +2224,7 @@ unsafe extern "system" fn hook_direct3dcreate8(sdk_version: u32) -> *mut c_void 
     };
 
     let wrapper = Box::into_raw(Box::new(D3d8 {
-        header: ComHeader {
-            vtbl: (&raw const D3D8_VTBL).cast(),
-            refs: Cell::new(1),
-            inner: Cell::new(d3d9.as_ptr()),
-        },
+        header: ComHeader::new_alive((&raw const D3D8_VTBL).cast(), d3d9),
     }));
 
     info!(
@@ -2059,18 +2240,20 @@ unsafe extern "system" fn hook_direct3dcreate8(sdk_version: u32) -> *mut c_void 
 mod tests {
     use super::{
         ComHeader, D3D_OK, D3D8_INTERNAL_LOCKABLE, D3DERR_INVALIDCALL, D3DPresentParameters8,
-        DEVICE8_VTBL, Device8, Resource8, SURFACE8_VTBL, caps_9_to_8, convert_present_params,
-        copy_rect_valid, resource8_release, surface_desc_9_to_8, wrap_add_ref, wrap_created,
+        DEVICE8_VTBL, Device8, Resource8, SURFACE8_VTBL, Surface8Vtbl, TEXTURE8_VTBL, Texture8Vtbl,
+        caps_9_to_8, convert_present_params, copy_rect_valid, device8_release, device8_set_texture,
+        resource8_release, surface_desc_9_to_8, unwrap8, unwrap8_arg, wrap_add_ref, wrap_created,
     };
     use std::cell::Cell;
     use std::ffi::c_void;
-    use std::ptr::null_mut;
+    use std::ptr::{NonNull, null, null_mut};
     use windows::Win32::Foundation::{E_NOINTERFACE, HWND, POINT, RECT};
     use windows::Win32::Graphics::Direct3D9::{
         D3DCAPS9, D3DFMT_A1R5G5B5, D3DFMT_A8R8G8B8, D3DFMT_D16, D3DFMT_DXT1, D3DFMT_R5G6B5,
-        D3DFMT_X1R5G5B5, D3DFMT_X8R8G8B8, D3DMULTISAMPLE_2_SAMPLES, D3DMULTISAMPLE_NONE,
-        D3DPOOL_SYSTEMMEM, D3DPRESENT_INTERVAL_ONE, D3DPRESENTFLAG_LOCKABLE_BACKBUFFER,
-        D3DSURFACE_DESC, D3DSWAPEFFECT_COPY, D3DSWAPEFFECT_DISCARD, D3DSWAPEFFECT_FLIP,
+        D3DFMT_X1R5G5B5, D3DFMT_X8R8G8B8, D3DLOCKED_RECT, D3DMULTISAMPLE_2_SAMPLES,
+        D3DMULTISAMPLE_NONE, D3DPOOL_SYSTEMMEM, D3DPRESENT_INTERVAL_ONE,
+        D3DPRESENTFLAG_LOCKABLE_BACKBUFFER, D3DSURFACE_DESC, D3DSWAPEFFECT_COPY,
+        D3DSWAPEFFECT_DISCARD, D3DSWAPEFFECT_FLIP,
     };
     use windows::core::{BOOL, GUID, HRESULT, IUnknown_Vtbl};
 
@@ -2181,6 +2364,10 @@ mod tests {
         fn ptr(&self) -> *mut c_void {
             (&raw const *self).cast_mut().cast()
         }
+
+        fn nn(&self) -> NonNull<c_void> {
+            NonNull::new(self.ptr()).unwrap()
+        }
     }
 
     unsafe extern "system" fn mock_com_query_interface(
@@ -2250,7 +2437,7 @@ mod tests {
     #[test]
     fn wrap_created_wrap_live_interface() {
         let inner = MockCom::new();
-        let mut out: *mut c_void = null_mut();
+        let mut out = null_mut();
         let hr = unsafe {
             wrap_created(
                 "test",
@@ -2267,7 +2454,7 @@ mod tests {
 
         let wrapper = unsafe { &*out.cast::<Resource8>() };
         assert_eq!(wrapper.internal_flags, D3D8_INTERNAL_LOCKABLE);
-        assert_eq!(wrapper.header.inner.get(), inner.ptr());
+        assert_eq!(wrapper.header.inner(), NonNull::new(inner.ptr()));
 
         // Releasing the wrapper returns the adopted D3D9 reference exactly once.
         assert_eq!(unsafe { resource8_release(out) }, 0);
@@ -2282,18 +2469,10 @@ mod tests {
 
         // Mirrors construction in `d3d8_create_device` with a mock D3D9 device.
         let device = Box::into_raw(Box::new(Device8 {
-            header: ComHeader {
-                vtbl: (&raw const DEVICE8_VTBL).cast(),
-                refs: Cell::new(1),
-                inner: Cell::new(dev9.ptr()),
-            },
+            header: ComHeader::new_alive((&raw const DEVICE8_VTBL).cast(), dev9.nn()),
             parent: null_mut(),
             back_buffer: Resource8 {
-                header: ComHeader {
-                    vtbl: (&raw const SURFACE8_VTBL).cast(),
-                    refs: Cell::new(0),
-                    inner: Cell::new(null_mut()),
-                },
+                header: ComHeader::new_dead((&raw const SURFACE8_VTBL).cast()),
                 device: null_mut(),
                 internal_flags: D3D8_INTERNAL_LOCKABLE,
             },
@@ -2304,44 +2483,191 @@ mod tests {
 
             let wrapper = (&raw const (*device).back_buffer).cast_mut().cast();
 
-            // `adopt` absorbs the pre-owned D3D9 reference and takes the device reference, entering the alive state.
-            (*device).back_buffer.adopt(surf_a.ptr());
-            assert_eq!((*device).back_buffer.header.refs.get(), 1);
-            assert_eq!((*device).header.refs.get(), 2);
-            assert_eq!(dev9.adds.get(), 1);
+            // `adopt` absorbs the pre-owned D3D9 reference as the wrapper's single owned reference
+            // and takes the device reference, entering the alive state.
+            assert!((*device).back_buffer.adopt(surf_a.nn()));
+            assert_eq!((*device).back_buffer.header.game_refs(), 1);
+            assert_eq!((*device).header.game_refs(), 2);
+            assert_eq!(surf_a.releases.get(), 0);
 
-            // When another pre-owned D3D9 reference joins, a second device reference is not taken.
-            (*device).back_buffer.adopt(surf_a.ptr());
-            assert_eq!((*device).back_buffer.header.refs.get(), 2);
-            assert_eq!((*device).header.refs.get(), 2);
-            assert_eq!(dev9.adds.get(), 1);
+            // A second pre-owned reference to the same surface is redundant and returned immediately; no second device reference is taken.
+            assert!((*device).back_buffer.adopt(surf_a.nn()));
+            assert_eq!((*device).back_buffer.header.game_refs(), 2);
+            assert_eq!((*device).header.game_refs(), 2);
+            assert_eq!(surf_a.releases.get(), 1);
 
-            // A game-side AddRef on the live wrapper still references the inner surface.
+            // A game-side AddRef touches only the wrapper count; the single owned surface reference is enough.
             assert_eq!(wrap_add_ref(wrapper), 3);
-            assert_eq!(surf_a.adds.get(), 1);
+            assert_eq!(surf_a.adds.get(), 0);
+            assert_eq!(dev9.adds.get(), 0);
 
-            // Reaching 0 returns the surface references and the device reference, entering the dead state.
+            // Reaching 0 releases the single surface reference and returns the device reference, entering the dead state.
+            // The device's own D3D9 reference is untouched: it belongs to the device wrapper, which is still alive.
             assert_eq!(resource8_release(wrapper), 2);
             assert_eq!(resource8_release(wrapper), 1);
+            assert_eq!(surf_a.releases.get(), 1);
             assert_eq!(resource8_release(wrapper), 0);
-            assert_eq!(surf_a.releases.get(), 3);
-            assert_eq!(dev9.releases.get(), 1);
-            assert_eq!((*device).header.refs.get(), 1);
+            assert_eq!(surf_a.releases.get(), 2);
+            assert_eq!(dev9.releases.get(), 0);
+            assert_eq!((*device).header.game_refs(), 1);
 
             // AddRef or Release calls after death are refused without touching the stale inner pointer.
             assert_eq!(resource8_release(wrapper), 0);
             assert_eq!(wrap_add_ref(wrapper), 0);
-            assert_eq!(surf_a.releases.get(), 3);
-            assert_eq!(surf_a.adds.get(), 1);
+            assert_eq!(surf_a.releases.get(), 2);
+            assert_eq!(surf_a.adds.get(), 0);
 
             // Adoption after a Reset wraps the freshly acquired surface, not the stale one.
-            (*device).back_buffer.adopt(surf_b.ptr());
-            assert_eq!((*device).back_buffer.header.inner.get(), surf_b.ptr());
-            assert_eq!(dev9.adds.get(), 2);
+            assert!((*device).back_buffer.adopt(surf_b.nn()));
+            assert_eq!(unwrap8(wrapper), NonNull::new(surf_b.ptr()));
             assert_eq!(resource8_release(wrapper), 0);
             assert_eq!(surf_b.releases.get(), 1);
-            assert_eq!((*device).header.refs.get(), 1);
+            assert_eq!((*device).header.game_refs(), 1);
 
+            // Releasing the device to death releases its single D3D9 device reference.
+            assert_eq!(device8_release(device.cast()), 0);
+            assert_eq!(dev9.releases.get(), 1);
+
+            drop(Box::from_raw(device));
+        }
+    }
+
+    #[test]
+    fn adopt_divergent_inner_refused() {
+        let surf_a = MockCom::new();
+        let surf_b = MockCom::new();
+        let wrapper = Resource8 {
+            header: ComHeader::new_dead((&raw const SURFACE8_VTBL).cast()),
+            device: null_mut(),
+            internal_flags: D3D8_INTERNAL_LOCKABLE,
+        };
+        unsafe {
+            assert!(wrapper.adopt(NonNull::new(surf_a.ptr()).unwrap()));
+            // A different surface arriving on a live wrapper is refused; the incoming reference is returned
+            // and the wrapper still holds the original surface.
+            assert!(!wrapper.adopt(NonNull::new(surf_b.ptr()).unwrap()));
+        }
+        assert_eq!(surf_b.releases.get(), 1);
+        assert_eq!(surf_a.releases.get(), 0);
+        assert_eq!(wrapper.header.game_refs(), 1);
+        assert_eq!(wrapper.header.inner(), NonNull::new(surf_a.ptr()));
+    }
+
+    #[test]
+    fn dead_wrapper_calls_are_refused() {
+        // A surface wrapper released to death refuses methods without touching the released D3D9 object.
+        let surf = MockCom::new();
+        let mut out = null_mut();
+        let hr = unsafe {
+            wrap_created(
+                "test",
+                D3D_OK,
+                surf.ptr(),
+                (&raw const SURFACE8_VTBL).cast(),
+                null_mut(),
+                true,
+                &raw mut out,
+            )
+        };
+        assert_eq!(hr, D3D_OK);
+        assert_eq!(unsafe { resource8_release(out) }, 0);
+        assert_eq!(surf.releases.get(), 1);
+
+        let vtbl = unsafe { &*(*out.cast::<ComHeader>()).vtbl.cast::<Surface8Vtbl>() };
+        let mut locked = D3DLOCKED_RECT::default();
+        assert_eq!(
+            unsafe { (vtbl.lock_rect)(out, &raw mut locked, null(), 0) },
+            D3DERR_INVALIDCALL,
+        );
+        assert_eq!(unsafe { (vtbl.unlock_rect)(out) }, D3DERR_INVALIDCALL);
+        assert_eq!(surf.adds.get(), 0);
+        assert_eq!(surf.releases.get(), 1);
+
+        // A `u32`-returning slot gets the zero dead-default.
+        let tex = MockCom::new();
+        let mut tex_out = null_mut();
+        let hr = unsafe {
+            wrap_created(
+                "test",
+                D3D_OK,
+                tex.ptr(),
+                (&raw const TEXTURE8_VTBL).cast(),
+                null_mut(),
+                false,
+                &raw mut tex_out,
+            )
+        };
+        assert_eq!(hr, D3D_OK);
+        assert_eq!(unsafe { resource8_release(tex_out) }, 0);
+        let tvtbl = unsafe { &*(*tex_out.cast::<ComHeader>()).vtbl.cast::<Texture8Vtbl>() };
+        assert_eq!(unsafe { (tvtbl.get_level_count)(tex_out) }, 0);
+        assert_eq!(tex.adds.get(), 0);
+        assert_eq!(tex.releases.get(), 1);
+
+        // The reference-handing methods refuse a dead receiver too, nulling the out-slot.
+        let mut got = (&raw const MOCK_COM_VTBL).cast_mut().cast();
+        assert_eq!(
+            unsafe { (vtbl.get_device)(out, &raw mut got) },
+            D3DERR_INVALIDCALL,
+        );
+        assert!(got.is_null());
+    }
+
+    #[test]
+    fn dead_argument_wrapper_refused() {
+        let dev9_mock = MockCom::new();
+        let device = Box::into_raw(Box::new(Device8 {
+            header: ComHeader::new_alive(
+                (&raw const DEVICE8_VTBL).cast(),
+                NonNull::new(dev9_mock.ptr()).unwrap(),
+            ),
+            parent: null_mut(),
+            back_buffer: Resource8 {
+                header: ComHeader::new_dead((&raw const SURFACE8_VTBL).cast()),
+                device: null_mut(),
+                internal_flags: D3D8_INTERNAL_LOCKABLE,
+            },
+        }));
+
+        let tex = MockCom::new();
+        let mut tex_out = null_mut();
+        let hr = unsafe {
+            wrap_created(
+                "test",
+                D3D_OK,
+                tex.ptr(),
+                (&raw const TEXTURE8_VTBL).cast(),
+                null_mut(),
+                false,
+                &raw mut tex_out,
+            )
+        };
+        assert_eq!(hr, D3D_OK);
+        assert_eq!(unsafe { resource8_release(tex_out) }, 0);
+
+        // A dead wrapper in an argument position is a use-after-release and refused before the live device's vtable is ever touched.
+        assert_eq!(
+            unsafe { device8_set_texture(device.cast(), 0, tex_out) },
+            D3DERR_INVALIDCALL,
+        );
+
+        assert!(matches!(unsafe { unwrap8_arg(null_mut(), "test") }, Ok(p) if p.is_null()));
+        assert!(unsafe { unwrap8_arg(tex_out, "test") }.is_err());
+
+        let live = MockCom::new();
+        let mut live_out = null_mut();
+        unsafe {
+            let hr = wrap_created(
+                "test",
+                D3D_OK,
+                live.ptr(),
+                (&raw const TEXTURE8_VTBL).cast(),
+                null_mut(),
+                false,
+                &raw mut live_out,
+            );
+            assert_eq!(hr, D3D_OK);
+            assert!(matches!(unwrap8_arg(live_out, "test"), Ok(p) if p == live.ptr()));
             drop(Box::from_raw(device));
         }
     }
