@@ -224,6 +224,8 @@ iat_hook! {
 /// For defense against tools that IAT-hook the same import after us, game-specific crates should additionally apply
 /// [`call_site_rewrite`] for each known live call site. Rewritten sites bypass the IAT entirely.
 ///
+/// [`crate::config::CONFIG`] must be populated before calling this.
+///
 /// # Safety
 /// `host` must be a loaded module handle.
 pub unsafe fn install(host: HMODULE) {
@@ -851,7 +853,7 @@ fn pick_refresh_rate(mode: RefreshRateMode, supported: &[u32], desktop_rate: u32
 
 /// Applies the refresh-rate policy against the adapter's `supported` rates at the target resolution.
 /// `desktop_rate` is the raw reported rate.
-/// - `Native`: see `native_rate`.
+/// - `Native`: see [`native_rate`].
 /// - `NativeMultiple`: the highest supported multiple of 60 not above the desktop rate,
 ///   or the `Native` value if no multiple of 60 is available.
 /// - `Fixed`: the supported rate equal to the target, else one that normalizes to it
@@ -1050,7 +1052,7 @@ unsafe fn create_device_once(
             returned_device,
         )
     };
-    let dev: *mut c_void = if returned_device.is_null() {
+    let dev = if returned_device.is_null() {
         null_mut()
     } else {
         unsafe { *returned_device }
@@ -1158,8 +1160,7 @@ unsafe extern "system" fn hook_create_device(
             return D3DERR_INVALIDCALL;
         };
 
-        // Apparently D3D9Ex breaks the window style on `CreateDeviceEx`.
-        // OILP's `CreateDevice_hook` applies the same `SWP_SHOWWINDOW` fix.
+        // Apparently D3D9Ex breaks the window style on `CreateDeviceEx`. OILP's `CreateDevice_hook` applies the same `SWP_SHOWWINDOW` fix.
         unsafe {
             SetWindowPos(
                 focus_window.0,

@@ -1265,8 +1265,8 @@ unsafe extern "system" fn device8_release(this: *mut c_void) -> u32 {
 
 forward8!(device8_test_cooperative_level, dev9 / dev9_vt.base__.TestCooperativeLevel() -> HRESULT);
 forward8!(device8_get_available_texture_mem, dev9 / dev9_vt.base__.GetAvailableTextureMem() -> u32);
-// This is vacuously successful because D3D9Ex has no managed pool and `d3d9::translate_managed_pool` rewrites
-// every `D3DPOOL_MANAGED` request to `DEFAULT | DYNAMIC`, so nothing is under management to discard.
+// This is vacuously successful because D3D9Ex has no managed pool and `d3d9::translate_managed_pool` rewrites every `D3DPOOL_MANAGED` request
+// to `DEFAULT | DYNAMIC`, so nothing is under management to discard.
 forward8!(device8_resource_manager_discard_bytes, dev9 / dev9_vt.base__.EvictManagedResources(_bytes: u32) -> HRESULT => ());
 
 unsafe extern "system" fn device8_get_direct3d(
@@ -2177,6 +2177,8 @@ pub fn set_pre_create_fn(f: fn()) {
 
 /// IAT-hooks `Direct3DCreate8` against `host`'s import table.
 /// The system `d3d8.dll` stays mapped but is never called into; the returned object translates everything to D3D9Ex.
+///
+/// [`crate::config::CONFIG`] must be populated before calling this.
 ///
 /// # Safety
 /// `host` must be a loaded module handle.
