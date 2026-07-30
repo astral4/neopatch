@@ -39,19 +39,6 @@ macro_rules! vtable_slot {
 }
 pub(crate) use vtable_slot;
 
-/// Declares a typed `static Sig<F>` for type inference of `F` at a redirector's call site.
-macro_rules! vtable_sig {
-    (
-        $slot:ident :
-            as fn($($arg:ident : $argty:ty),* $(,)?) -> $ret:ty;
-    ) => {
-        static $slot: $crate::vtable::Sig<
-            unsafe extern "system" fn($($argty),*) -> $ret,
-        > = $crate::vtable::Sig::new();
-    };
-}
-pub(crate) use vtable_sig;
-
 /// Constructs a [`SlotProjection<V, F>`] for a field path in vtable type `V`. `F` is inferred from the context.
 macro_rules! vtable_field {
     ($vtbl_ty:ty, $($field:tt).+) => {
@@ -65,22 +52,6 @@ pub(crate) use vtable_field;
 // Set exactly once from `DllMain` and read lock-free thereafter. We want the OS's authoritative `hinst`
 // rather than guessing via `GetModuleHandleW("dinput8.dll")`, which would collide with the real `System32\dinput8.dll`.
 static OUR_DLL_RANGE: OnceLock<ModuleRange> = OnceLock::new();
-
-/// Marker for a function-pointer type `F`. Use through [`vtable_sig!`].
-pub(crate) struct Sig<F>(PhantomData<F>);
-
-impl<F> Default for Sig<F> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<F> Sig<F> {
-    #[must_use]
-    pub(crate) const fn new() -> Self {
-        Self(PhantomData)
-    }
-}
 
 /// Slot for a function-pointer type `F`.
 pub(crate) struct FnSlot<F> {
@@ -290,37 +261,12 @@ impl<V> VtblScope<'_, V> {
     ) where
         F: Copy + Send + Sync + Unpin + 'static,
     {
-        self.write_slot(proj, name, hook, Some(original));
-    }
-
-    /// Like `intercept`, except the displaced original isn't captured.
-    /// `_sig` is declared via [`vtable_sig!`] and used to infer `F` at the call site.
-    // TODO: Tighten to `F: FnPtr` if the `fn_ptr_trait` feature stabilizes.
-    pub(crate) fn redirect<F>(&self, _sig: &Sig<F>, proj: SlotProjection<V, F>, name: &str, hook: F)
-    where
-        F: Copy + Send + Sync + Unpin + 'static,
-    {
-        self.write_slot(proj, name, hook, None);
-    }
-
-    // TODO: Tighten to `F: FnPtr` if the `fn_ptr_trait` feature stabilizes.
-    fn write_slot<F>(
-        &self,
-        proj: SlotProjection<V, F>,
-        name: &str,
-        hook: F,
-        original: Option<&FnSlot<F>>,
-    ) where
-        F: Copy + Send + Sync + Unpin + 'static,
-    {
         let slot_ptr = proj.slot_ptr(self.vtbl.as_ptr());
         let slot_raw: *mut *mut () = slot_ptr.cast();
         // SAFETY: The writable window is open for the scope, and the projection's const assert
         // guarantees that the slot lies within the `size_of::<V>()` protected range.
         let current_raw = unsafe { read_unaligned(slot_raw) };
         let offset = proj.offset();
-
-        let is_redirector = original.is_none();
 
         #[allow(clippy::cast_possible_truncation)]
         if let Some(ours) = self.our_range
@@ -332,49 +278,46 @@ impl<V> VtblScope<'_, V> {
                 current_raw,
                 current_raw,
                 PatchOutcome::AlreadyOurs,
-                is_redirector,
             );
             return;
         }
 
-        if let Some(slot) = original {
-            // When intercepting, we must be able to chain through the displaced original. A null current slot has no original to capture,
-            // so we refuse the installation rather than write our hook over a null slot we can't trampoline through.
-            let Some(f) = (unsafe { raw_to_fn_ptr(current_raw) }) else {
-                warn!(
-                    kind = "vtable_patch",
+        // We must be able to chain through the displaced original. A null current slot has no original to capture,
+        // so we refuse the installation rather than write our hook over a null slot we can't trampoline through.
+        let Some(f) = (unsafe { raw_to_fn_ptr(current_raw) }) else {
+            warn!(
+                kind = "vtable_patch",
+                name,
+                offset = format_args!("{offset:#x}"),
+                status = "NULL_SLOT_REFUSED",
+            );
+            return;
+        };
+
+        // When `PatchOutcome::AlreadyOurs` misses because the second visit arrives through a different vtable allocation
+        // for the same logical slot, the visit reads a slot that still holds a real original and we'd panic in `FnSlot::store`.
+        // We skip the store but still patch the slot so calls through this distinct vtable route through us.
+        // In the case of a divergent value (e.g. a shim layered between our two patches), we keep the original capture.
+        // This means the trampoline skips the shim, but at least we don't silently lose intercept coverage of this slot.
+        if let Some(existing_raw) = original.captured_raw() {
+            if existing_raw == current_raw {
+                debug!(
+                    kind = "intercept_recapture_skipped",
                     name,
                     offset = format_args!("{offset:#x}"),
-                    status = "NULL_SLOT_REFUSED",
+                    value = format_args!("{existing_raw:p}"),
                 );
-                return;
-            };
-            // When `PatchOutcome::AlreadyOurs` misses because the COM implementation gives us a distinct vtable allocation
-            // (e.g. Wine's `IDirectInput8A` is not a `.rdata`-shared vtable across `DirectInput8Create` instances the way `IDirect3D9Ex_Vtbl` is),
-            // the second visit reads a slot that still holds the real original and we'd panic in `FnSlot::store`.
-            // We skip the store but still patch the slot so calls through this distinct vtable route through us.
-            // In the case of a divergent value (a shim layered between our two patches), we keep the original capture.
-            // This means the trampoline skips the shim, but at least we don't silently lose intercept coverage of this slot.
-            if let Some(existing_raw) = slot.captured_raw() {
-                if existing_raw == current_raw {
-                    debug!(
-                        kind = "intercept_recapture_skipped",
-                        name,
-                        offset = format_args!("{offset:#x}"),
-                        value = format_args!("{existing_raw:p}"),
-                    );
-                } else {
-                    warn!(
-                        kind = "intercept_recapture_divergent",
-                        name,
-                        offset = format_args!("{offset:#x}"),
-                        kept = format_args!("{existing_raw:p}"),
-                        seen = format_args!("{current_raw:p}"),
-                    );
-                }
             } else {
-                slot.store(f);
+                warn!(
+                    kind = "intercept_recapture_divergent",
+                    name,
+                    offset = format_args!("{offset:#x}"),
+                    kept = format_args!("{existing_raw:p}"),
+                    seen = format_args!("{current_raw:p}"),
+                );
             }
+        } else {
+            original.store(f);
         }
         let hook_raw = unsafe { fn_ptr_to_raw(hook) };
         // Trampolines reading the new slot value must also see the captured `original` via `FnSlot::try_get`.
@@ -391,7 +334,7 @@ impl<V> VtblScope<'_, V> {
         } else {
             PatchOutcome::Mismatch
         };
-        self.log_outcome(name, offset, current_raw, hook_raw, outcome, is_redirector);
+        self.log_outcome(name, offset, current_raw, hook_raw, outcome);
     }
 
     fn log_outcome(
@@ -401,7 +344,6 @@ impl<V> VtblScope<'_, V> {
         original: *mut (),
         new: *mut (),
         outcome: PatchOutcome,
-        is_redirector: bool,
     ) {
         #[allow(clippy::cast_possible_truncation)]
         let original_addr = original.addr() as u32;
@@ -433,7 +375,6 @@ impl<V> VtblScope<'_, V> {
             new = format_args!("{new_addr:#010x}"),
             status,
             chain_through,
-            redirector = is_redirector,
         );
     }
 }

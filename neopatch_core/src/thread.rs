@@ -5,7 +5,7 @@
 //! propagating the "render-thread only" requirement to every call site at the type level.
 //!
 //! [`MAIN_TID`] records the render thread's TID. It is claimed atomically by [`MainToken::claim`] at the game's
-//! first device creation, not at `DllMain`. The thread running `DllMain` and the thread running the render loop
+//! `Direct3DCreate8`/`Direct3DCreate9` call, not at `DllMain`. The thread running `DllMain` and the thread running the render loop
 //! are usually the same, but they diverge when something (e.g. the thprac launcher) injects neopatch via `CreateRemoteThread`
 //! into a `CREATE_SUSPENDED` process before resuming the real initial thread.
 

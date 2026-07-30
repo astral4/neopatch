@@ -21,9 +21,12 @@ use crate::pacer::PACER;
 use crate::patches::PatchSite;
 use crate::replay::policy_change;
 use crate::screenshot::{on_device_creating, on_pre_present, on_pre_reset};
-use crate::session::{device_creating, record_device};
+use crate::session::{
+    device_creating, gate_d3d9, gate_device, is_game_d3d9, is_game_device, record_d3d9,
+    record_device,
+};
 use crate::thread::{MainCell, MainToken};
-use crate::vtable::{capture_slot, install_vtable, vtable_field, vtable_sig, vtable_slot};
+use crate::vtable::{capture_slot, install_vtable, vtable_field, vtable_slot};
 use crate::{fmt_hr, iat_hook, match_named};
 use std::cmp::min;
 use std::ffi::c_void;
@@ -133,8 +136,8 @@ vtable_slot! {
     REAL_GET_ADAPTER_MONITOR / call_real_get_adapter_monitor :
         as fn(this: *mut c_void, adapter: u32) -> HMONITOR;
 }
-vtable_sig! {
-    REDIRECT_CREATE_DEVICE :
+vtable_slot! {
+    REAL_CREATE_DEVICE / call_real_create_device :
         as fn(
             this: *mut c_void,
             adapter: u32,
@@ -265,6 +268,7 @@ const DIRECT_POLICY: PresentPolicy = PresentPolicy {
 /// The `Direct3DCreate9` IAT-hook/call-site-rewrite target.
 unsafe extern "system" fn create_hooked_d3d9(sdk_version: u32) -> *mut c_void {
     unsafe { create_hooked_d3d9_with(sdk_version, DIRECT_POLICY) }
+        .map_or_else(null_mut, NonNull::as_ptr)
 }
 
 /// Creates an `IDirect3D9Ex` with our vtable hooks installed, exactly as if the game had called `Direct3DCreate9`.
@@ -272,7 +276,7 @@ unsafe extern "system" fn create_hooked_d3d9(sdk_version: u32) -> *mut c_void {
 pub(crate) unsafe fn create_hooked_d3d9_with(
     sdk_version: u32,
     policy: PresentPolicy,
-) -> *mut c_void {
+) -> Option<NonNull<c_void>> {
     let first = PRESENT_POLICY.set(policy).is_ok();
     let effective = present_policy();
     log_at!(first => info / warn,
@@ -292,17 +296,28 @@ pub(crate) unsafe fn create_hooked_d3d9_with(
                 sdk_version = format_args!("{sdk_version:#x}"),
                 hr = %fmt_hr!(e.code()),
             );
-            return null_mut();
+            return None;
         }
     };
     // `into_raw` transfers the ref to the game without `Release`.
-    let p_ex = ex.into_raw();
-    let Some(p_ex_nn) = NonNull::new(p_ex) else {
-        return null_mut();
+    let p_ex = NonNull::new(ex.into_raw())?;
+
+    let Some(tok) = MainToken::claim() else {
+        // A claim can only already be held if an earlier create succeeded on another thread, so the shared vtable is already patched
+        // and this object doesn't need further setup to work. Its `CreateDevice` then passes through the gate to the plain (non-Ex)
+        // creation path, which produces a legacy device. This way, we degrade to vanilla-unpatched instead of a broken D3D9Ex device.
+        warn!(
+            kind = "d3d9_create_off_thread",
+            p_ex = format_args!("{p_ex:p}"),
+        );
+        return Some(p_ex);
     };
-    unsafe { install_d3d9_hooks(p_ex_nn) };
+
+    // SAFETY: `p_ex` is the live object created above.
+    unsafe { record_d3d9(&tok, p_ex) };
+    unsafe { install_d3d9_hooks(p_ex) };
     info!(kind = "d3d9_init", p_ex = format_args!("{p_ex:p}"));
-    p_ex
+    Some(p_ex)
 }
 
 unsafe fn install_d3d9_hooks(d3d9_ex: NonNull<c_void>) {
@@ -342,10 +357,10 @@ unsafe fn install_d3d9_hooks(d3d9_ex: NonNull<c_void>) {
 
     let result = unsafe {
         install_vtable(vtbl, |scope| {
-            // `hook_create_device` routes to `CreateDeviceEx` via `REAL_CREATE_DEVICE_EX`
-            // rather than chaining through to the displaced `CreateDevice`.
-            scope.redirect(
-                &REDIRECT_CREATE_DEVICE,
+            // The game's calls route to `CreateDeviceEx` via `REAL_CREATE_DEVICE_EX` rather than chaining through
+            // to the displaced `CreateDevice`, which is captured only to hand foreign objects' calls through unchanged.
+            scope.intercept(
+                &REAL_CREATE_DEVICE,
                 vtable_field!(IDirect3D9Ex_Vtbl, base__.CreateDevice),
                 "IDirect3D9::CreateDevice",
                 hook_create_device,
@@ -924,23 +939,43 @@ unsafe extern "system" fn hook_create_device(
     pp: *mut D3DPRESENT_PARAMETERS,
     returned_device: *mut *mut c_void,
 ) -> HRESULT {
-    // The first creation claims the render thread for the calling thread. A creation arriving from another thread afterwards
-    // can't be served, since everything downstream of here is render-thread state.
-    let Some(tok) = MainToken::claim() else {
+    if this.is_null() {
+        warn!(kind = "d3d9_null_this", call = "IDirect3D9::CreateDevice");
         return D3DERR_INVALIDCALL;
+    }
+    let Some(tok) = gate_d3d9(this) else {
+        // A foreign `IDirect3D9Ex` (e.g. an overlay's) dispatches through the same patched `.rdata` vtable, and the game's own object
+        // could in principle be driven from another thread. In this situation, we pass the call through untouched.
+        if is_game_d3d9(this) {
+            warn!(
+                kind = "session_thread_miss",
+                call = "IDirect3D9::CreateDevice",
+                this = format_args!("{this:p}"),
+            );
+        }
+        return unsafe {
+            call_real_create_device(
+                this,
+                adapter,
+                device_type,
+                focus_window,
+                behavior_flags,
+                pp,
+                returned_device,
+            )
+        };
     };
+
     // The outgoing device's pin is released up front because, in exclusive fullscreen, it holds the display mode and its VRAM,
-    // which can be enough for the replacement to be refused.
+    // which can be enough for the replacement to be refused. However, its identity stays recorded in case the replacement fails.
     device_creating(&tok);
     on_device_creating(&tok);
 
     let behavior_flags_in = behavior_flags;
     let behavior_flags = rewrite_behavior_flags(behavior_flags);
 
-    let Some(adapter) = (unsafe { Adapter::from_hook(&this, adapter) }) else {
-        warn!(kind = "d3d9_null_this", call = "IDirect3D9::CreateDevice");
-        return D3DERR_INVALIDCALL;
-    };
+    let adapter = unsafe { Adapter::from_hook(&this, adapter) }
+        .expect("the gate matched `this` against a non-null recording");
 
     let desktop_before = unsafe { sample_for_degradation_check(adapter, pp) };
 
@@ -1101,6 +1136,21 @@ unsafe extern "system" fn hook_check_device_format(
     rtype: D3DRESOURCETYPE,
     check_format: D3DFORMAT,
 ) -> HRESULT {
+    if !is_game_d3d9(this) {
+        // A foreign object gets the strict D3D9Ex answer it asked for, unsubstituted and unlogged.
+        return unsafe {
+            call_real_check_device_format(
+                this,
+                adapter,
+                device_type,
+                adapter_format,
+                usage,
+                rtype,
+                check_format,
+            )
+        };
+    }
+
     let forwarded_adapter_fmt = if adapter_format == D3DFMT_A8R8G8B8 {
         D3DFMT_X8R8G8B8
     } else {
@@ -1240,9 +1290,8 @@ unsafe extern "system" fn hook_present(
     dirty_region: *const RGNDATA,
 ) -> HRESULT {
     // `install_device_hooks` patches the `IDirect3DDevice9Ex` vtable in place, and every device in the process shares it,
-    // so an injected overlay's own device reaches this hook too. Those calls arrive on their own thread,
-    // so we hand them straight through instead of touching render-thread state on their behalf.
-    let Some(tok) = MainToken::current() else {
+    // so devices other than the game's on its render thread could reach this hook.
+    let Some((tok, dev)) = gate_device(this) else {
         return unsafe {
             call_real_present(this, src_rect, dst_rect, dest_window_override, dirty_region)
         };
@@ -1261,8 +1310,7 @@ unsafe extern "system" fn hook_present(
         pacer.wait(&tok);
     }
 
-    // SAFETY: `this` is the device that `Present` was invoked on, so it is a live `IDirect3DDevice9Ex`.
-    on_pre_present(&tok, unsafe { NonNull::new_unchecked(this) });
+    on_pre_present(&tok, dev);
 
     // We increment before `Present` so `PRESENT_COUNT` uses the in-flight frame.
     // This way, a crash inside `Present` leaves the count at the attempted frame, not the last completed.
@@ -1364,10 +1412,22 @@ impl DeviceParent {
 }
 
 unsafe extern "system" fn hook_reset(this: *mut c_void, pp: *mut D3DPRESENT_PARAMETERS) -> HRESULT {
-    // A `Reset` arriving from another thread isn't ours to rewrite, so it chains through untouched.
-    let Some(tok) = MainToken::current() else {
+    if this.is_null() {
+        warn!(kind = "d3d9_null_this", call = "IDirect3DDevice9::Reset");
+        return D3DERR_INVALIDCALL;
+    }
+
+    let Some((tok, dev)) = gate_device(this) else {
+        if is_game_device(this) {
+            warn!(
+                kind = "session_thread_miss",
+                call = "IDirect3DDevice9::Reset",
+                this = format_args!("{this:p}"),
+            );
+        }
         return unsafe { call_real_reset(this, pp) };
     };
+
     on_pre_reset(&tok);
 
     let parent = unsafe { DeviceParent::new(this) };
@@ -1391,8 +1451,7 @@ unsafe extern "system" fn hook_reset(this: *mut c_void, pp: *mut D3DPRESENT_PARA
     };
 
     if hr.is_ok() {
-        // SAFETY: `this` was already dereferenced by `call_real_reset` / `call_real_reset_ex` above.
-        let dev = unsafe { NonNull::new_unchecked(this) };
+        // `Reset` keeps the same object, so the gate's device is still the one that just came back alive.
         unsafe { post_device_alive(&tok, dev, &prep) };
         if let Some(before) = desktop_before {
             unsafe { warn_if_exclusive_degraded(adapter, before, &prep) };
@@ -1547,6 +1606,23 @@ unsafe extern "system" fn hook_create_texture(
     pp_texture: *mut *mut c_void,
     p_shared_handle: *mut HANDLE,
 ) -> HRESULT {
+    if !is_game_device(this) {
+        // A foreign device may be plain D3D9 where `D3DPOOL_MANAGED` is legitimate, so its requests pass through untranslated.
+        return unsafe {
+            call_real_create_texture(
+                this,
+                width,
+                height,
+                levels,
+                usage,
+                format,
+                pool,
+                pp_texture,
+                p_shared_handle,
+            )
+        };
+    }
+
     let usage_orig = usage;
     let pool_orig = pool;
     translate_managed_pool(&mut pool, &mut usage);
@@ -1591,6 +1667,20 @@ unsafe extern "system" fn hook_create_vertex_buffer(
     pp_vertex_buffer: *mut *mut c_void,
     p_shared_handle: *mut HANDLE,
 ) -> HRESULT {
+    if !is_game_device(this) {
+        return unsafe {
+            call_real_create_vertex_buffer(
+                this,
+                length,
+                usage,
+                fvf,
+                pool,
+                pp_vertex_buffer,
+                p_shared_handle,
+            )
+        };
+    }
+
     let usage_orig = usage;
     let pool_orig = pool;
     translate_managed_pool(&mut pool, &mut usage);

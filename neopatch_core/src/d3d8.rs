@@ -2038,20 +2038,19 @@ unsafe extern "system" fn hook_direct3dcreate8(sdk_version: u32) -> *mut c_void 
         f();
     }
 
-    let d3d9 = unsafe { create_hooked_d3d9_with(D3D_SDK_VERSION, SHIM_POLICY) };
-    if d3d9.is_null() {
+    let Some(d3d9) = (unsafe { create_hooked_d3d9_with(D3D_SDK_VERSION, SHIM_POLICY) }) else {
         warn!(
             kind = "d3d8_init_failed",
             sdk_version = format_args!("{sdk_version:#x}"),
         );
         return null_mut();
-    }
+    };
 
     let wrapper = Box::into_raw(Box::new(D3d8 {
         header: ComHeader {
             vtbl: (&raw const D3D8_VTBL).cast(),
             refs: Cell::new(1),
-            inner: Cell::new(d3d9),
+            inner: Cell::new(d3d9.as_ptr()),
         },
     }));
 
