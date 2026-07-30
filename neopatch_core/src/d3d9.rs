@@ -22,7 +22,7 @@ use crate::patches::PatchSite;
 use crate::replay::policy_change;
 use crate::screenshot::{on_device_creating, on_pre_present, on_pre_reset};
 use crate::session::{device_creating, record_device};
-use crate::thread::{MainCell, MainToken, on_main_thread};
+use crate::thread::{MainCell, MainToken};
 use crate::vtable::{capture_slot, install_vtable, vtable_field, vtable_sig, vtable_slot};
 use crate::{fmt_hr, iat_hook, match_named};
 use std::cmp::min;
@@ -924,7 +924,11 @@ unsafe extern "system" fn hook_create_device(
     pp: *mut D3DPRESENT_PARAMETERS,
     returned_device: *mut *mut c_void,
 ) -> HRESULT {
-    let tok = MainToken::new();
+    // The first creation claims the render thread for the calling thread. A creation arriving from another thread afterwards
+    // can't be served, since everything downstream of here is render-thread state.
+    let Some(tok) = MainToken::claim() else {
+        return D3DERR_INVALIDCALL;
+    };
     // The outgoing device's pin is released up front because, in exclusive fullscreen, it holds the display mode and its VRAM,
     // which can be enough for the replacement to be refused.
     device_creating(&tok);
@@ -1236,15 +1240,13 @@ unsafe extern "system" fn hook_present(
     dirty_region: *const RGNDATA,
 ) -> HRESULT {
     // `install_device_hooks` patches the `IDirect3DDevice9Ex` vtable in place, and every device in the process shares it,
-    // so an injected overlay's own device reaches this hook too. On its own thread, claiming a `MainToken` would abort the process
-    // over something that isn't our bug, so we hand those straight through.
-    if !on_main_thread() {
+    // so an injected overlay's own device reaches this hook too. Those calls arrive on their own thread,
+    // so we hand them straight through instead of touching render-thread state on their behalf.
+    let Some(tok) = MainToken::current() else {
         return unsafe {
             call_real_present(this, src_rect, dst_rect, dest_window_override, dirty_region)
         };
-    }
-
-    let tok = MainToken::new();
+    };
 
     if let Some(pacer) = PACER.get() {
         if let Some((mode, policy)) = policy_change(&tok) {
@@ -1362,7 +1364,10 @@ impl DeviceParent {
 }
 
 unsafe extern "system" fn hook_reset(this: *mut c_void, pp: *mut D3DPRESENT_PARAMETERS) -> HRESULT {
-    let tok = MainToken::new();
+    // A `Reset` arriving from another thread isn't ours to rewrite, so it chains through untouched.
+    let Some(tok) = MainToken::current() else {
+        return unsafe { call_real_reset(this, pp) };
+    };
     on_pre_reset(&tok);
 
     let parent = unsafe { DeviceParent::new(this) };

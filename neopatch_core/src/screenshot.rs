@@ -66,7 +66,13 @@ fn live_save(filename_ptr: *const u8, encoder: ImageEncoder, source: &'static st
     let Some(path) = sanitize_filename(filename_ptr) else {
         return 1;
     };
-    let tok = MainToken::new();
+    // The save trampolines are patched into game code and should run on the render thread.
+    // A miss means something unexpected invoked them, so the save is refused rather than touching render-thread state.
+    let Some(tok) = MainToken::current() else {
+        warn!(kind = "screenshot_off_thread");
+        return 1;
+    };
+
     let bytes = path.as_slice();
     match save_live(&tok, bytes, encoder) {
         Ok((w, h)) => {
@@ -91,7 +97,10 @@ pub unsafe extern "C" fn save_screenshot_deferred_bmp(filename_ptr: *const u8) -
     let Some(path) = sanitize_filename(filename_ptr) else {
         return 1;
     };
-    let tok = MainToken::new();
+    let Some(tok) = MainToken::current() else {
+        warn!(kind = "screenshot_off_thread");
+        return 1;
+    };
     if !set_pending_cached_save(&tok, &path) {
         return 1;
     }
