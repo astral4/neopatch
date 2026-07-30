@@ -27,6 +27,7 @@ pub mod process;
 mod protect;
 pub mod replay;
 pub mod screenshot;
+mod session;
 pub mod thread;
 pub mod timer_period;
 mod untrusted;

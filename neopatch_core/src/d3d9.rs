@@ -20,7 +20,8 @@ use crate::log::log_at;
 use crate::pacer::PACER;
 use crate::patches::PatchSite;
 use crate::replay::policy_change;
-use crate::screenshot::{on_device_creating, on_post_create_device, on_pre_present, on_pre_reset};
+use crate::screenshot::{on_device_creating, on_pre_present, on_pre_reset};
+use crate::session::{device_creating, record_device};
 use crate::thread::{MainCell, MainToken, on_main_thread};
 use crate::vtable::{capture_slot, install_vtable, vtable_field, vtable_sig, vtable_slot};
 use crate::{fmt_hr, iat_hook, match_named};
@@ -924,6 +925,9 @@ unsafe extern "system" fn hook_create_device(
     returned_device: *mut *mut c_void,
 ) -> HRESULT {
     let tok = MainToken::new();
+    // The outgoing device's pin is released up front because, in exclusive fullscreen, it holds the display mode and its VRAM,
+    // which can be enough for the replacement to be refused.
+    device_creating(&tok);
     on_device_creating(&tok);
 
     let behavior_flags_in = behavior_flags;
@@ -1216,10 +1220,11 @@ unsafe fn apply_device_ex_tunables(dev: NonNull<c_void>) {
 }
 
 /// Re-applies the device tunables, since D3D9Ex preserves them across `Reset` but a translation layer might not.
-/// Also refreshes `ACTIVE_DEVICE`. Fires after successful `CreateDeviceEx` and successful `Reset` / `ResetEx`.
+/// Also records (and pins) the device as the session's. Fires after successful `CreateDeviceEx` and successful `Reset` / `ResetEx`.
 unsafe fn post_device_alive(tok: &MainToken, dev: NonNull<c_void>, prep: &PresentParams) {
     unsafe { apply_device_ex_tunables(dev) };
-    on_post_create_device(tok, dev);
+    // SAFETY: `dev` is the live device the successful call just created or reset.
+    unsafe { record_device(tok, dev) };
     record_back_buffer_format(prep);
 }
 

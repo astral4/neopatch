@@ -12,6 +12,7 @@
 //!   We stash the filename, and the next `on_pre_present` captures the live back buffer one frame later.
 
 use crate::fmt_hr;
+use crate::session::pinned_device;
 use crate::thread::{MainCell, MainToken};
 use crate::untrusted::Untrusted;
 use png::{BitDepth, ColorType, Encoder};
@@ -23,7 +24,7 @@ use windows::Win32::Graphics::Direct3D9::{
     D3DBACKBUFFER_TYPE_MONO, D3DFMT_A8R8G8B8, D3DFMT_X8R8G8B8, D3DFORMAT, D3DLOCK_READONLY,
     D3DLOCKED_RECT, D3DPOOL_SYSTEMMEM, IDirect3DDevice9Ex, IDirect3DSurface9,
 };
-use windows::core::{Interface, InterfaceRef};
+use windows::core::InterfaceRef;
 use windows_sys::Win32::Foundation::{
     CloseHandle, GENERIC_WRITE, GetLastError, INVALID_HANDLE_VALUE, MAX_PATH,
 };
@@ -36,55 +37,9 @@ use windows_sys::Win32::Storage::FileSystem::{
 /// where `src` points to `height` rows of `width` 32-bit BGRX/BGRA pixels with `pitch` bytes between rows.
 type ImageEncoder = unsafe fn(u32, u32, i32, *const u8) -> Result<Vec<u8>, String>;
 
-/// An owning cache of the live device, for the capture paths that have no device of their own to work from.
-/// The value is `None` before the first device is created and while a replacement is being made.
-static ACTIVE_DEVICE: MainCell<Option<NonNull<c_void>>> = MainCell::new(None);
-
-/// Points [`ACTIVE_DEVICE`] at `next`, taking a reference on it and returning the one held on the outgoing device.
-///
-/// The refcount is moved through `windows`' own ownership operations rather than by reaching into the vtable:
-/// `InterfaceRef::to_owned` takes a reference from a borrow, `Interface::into_raw` hands it to the cache without giving it back,
-/// and `Interface::from_raw` adopts it back.
-///
-/// # Safety
-/// `next` must be a live `IDirect3DDevice9Ex` pointer.
-unsafe fn set_active_device(tok: &MainToken, next: Option<NonNull<c_void>>) {
-    let prev = ACTIVE_DEVICE.get(tok);
-    if prev == next {
-        return;
-    }
-
-    if let Some(dev) = next {
-        // The `AddRef` (`InterfaceRef::to_owned`) makes a cached pointer safe to dereference. A game that drops its last reference
-        // (e.g. during a shutdown path or a teardown with no replacement) would otherwise leave the pointer pointing to freed COM memory.
-        // In other words, we deliberately leak to have our reference outlive the game's own at shutdown.
-        // The operation here is similar to `Rc::increment_strong_count`; we're manually balancing refcounts.
-        let owned = unsafe { InterfaceRef::<IDirect3DDevice9Ex>::from_raw(dev).to_owned() };
-        let _ = owned.into_raw();
-    }
-
-    ACTIVE_DEVICE.set(tok, next);
-
-    if let Some(dev) = prev {
-        // The operation here is similar to `Rc::decrement_strong_count`;  we're manually balancing refcounts.
-        drop(unsafe { IDirect3DDevice9Ex::from_raw(dev.as_ptr()) });
-    }
-}
-
-/// Releases the cached device and clears the cache before a replacement is requested.
-/// Any pending deferred capture is discarded since it was stashed against the outgoing rendering context.
+/// Discards any pending deferred capture at the start of a device replacement, since it was stashed against the outgoing rendering context.
 pub(crate) fn on_device_creating(tok: &MainToken) {
-    // We drop the reference (i.e. release) here, at the start of a replacement attempt rather than when the replacement succeeds.
-    // Releasing late means both devices are alive across `CreateDeviceEx`, and in exclusive fullscreen the outgoing one still holds
-    // the display mode and its VRAM, which can be enough for the replacement to be refused.
-    unsafe { set_active_device(tok, None) };
     drop_pending(tok, "screenshot_dropped_device_replaced");
-}
-
-/// Caches the device produced by a successful `CreateDevice`/`Reset` call, taking a reference on it.
-pub(crate) fn on_post_create_device(tok: &MainToken, dev: NonNull<c_void>) {
-    // SAFETY: `dev` is the device produced by the call that just succeeded, so it is live.
-    unsafe { set_active_device(tok, Some(dev)) };
 }
 
 /// Synchronously saves a screenshot as BMP. Use this for games whose save function trampoline runs before `Present`.
@@ -172,7 +127,7 @@ fn drop_pending(tok: &MainToken, kind: &'static str) {
 /// Stashes a filename for capture on the next `hook_present`, unless no device exists at all.
 /// Still-pending stashes are overwritten. Returns whether the stash was accepted.
 fn set_pending_cached_save(tok: &MainToken, path: &PendingPath) -> bool {
-    if ACTIVE_DEVICE.get(tok).is_none() {
+    if pinned_device(tok).is_none() {
         warn!(
             kind = "screenshot_dropped_no_device",
             path = %String::from_utf8_lossy(path.as_slice()),
@@ -186,7 +141,7 @@ fn set_pending_cached_save(tok: &MainToken, path: &PendingPath) -> bool {
 
 /// Called from `d3d9::hook_present` before the real `Present`, with the device that call is going through.
 pub(crate) fn on_pre_present(tok: &MainToken, device: NonNull<c_void>) {
-    if ACTIVE_DEVICE.get(tok) != Some(device) {
+    if pinned_device(tok) != Some(device) {
         return;
     }
     let Some(path) = PENDING_CAPTURE.take(tok) else {
@@ -216,7 +171,7 @@ unsafe fn save_pending_cached(device: NonNull<c_void>, path: &[u8]) {
 /// Captures the live back buffer to `path`, encoding it with `encode`. Returns `(width, height)` on success,
 /// or an error string if no `CreateDeviceEx` call has succeeded yet or a Windows API call fails.
 fn save_live(tok: &MainToken, path: &[u8], encode: ImageEncoder) -> Result<(u32, u32), String> {
-    let Some(device) = ACTIVE_DEVICE.get(tok) else {
+    let Some(device) = pinned_device(tok) else {
         return Err("no active device".to_string());
     };
     ensure_parent(path);
