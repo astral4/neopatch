@@ -1384,21 +1384,38 @@ struct DeviceParent {
 }
 
 impl DeviceParent {
+    /// Queries the parent interface and adapter ordinal of a live device. Returns `None` if either query fails.
+    ///
     /// # Safety
-    /// `dev` must be a live `IDirect3DDevice9Ex`.
-    unsafe fn new(dev: *mut c_void) -> Self {
-        let dev = unsafe { IDirect3DDevice9Ex::from_raw_borrowed(&dev) }
-            .expect("hook_reset called on a null device");
-        let d3d9 = unsafe { dev.GetDirect3D() }.expect("GetDirect3D failed on a live device");
+    /// `dev` must be null or a live `IDirect3DDevice9Ex`.
+    unsafe fn new(dev: *mut c_void) -> Option<Self> {
+        let dev = unsafe { IDirect3DDevice9Ex::from_raw_borrowed(&dev) }?;
+        let d3d9 = match unsafe { dev.GetDirect3D() } {
+            Ok(d3d9) => d3d9,
+            Err(e) => {
+                warn!(
+                    kind = "reset_parent_query_failed",
+                    call = "GetDirect3D",
+                    hr = %fmt_hr!(e.code()),
+                );
+                return None;
+            }
+        };
 
         let mut cp = D3DDEVICE_CREATION_PARAMETERS::default();
-        unsafe { dev.GetCreationParameters(&raw mut cp) }
-            .expect("GetCreationParameters failed on a live device");
+        if let Err(e) = unsafe { dev.GetCreationParameters(&raw mut cp) } {
+            warn!(
+                kind = "reset_parent_query_failed",
+                call = "GetCreationParameters",
+                hr = %fmt_hr!(e.code()),
+            );
+            return None;
+        }
 
-        Self {
+        Some(Self {
             d3d9,
             adapter: cp.AdapterOrdinal,
-        }
+        })
     }
 
     /// Borrows the owned interface for the adapter queries. The context must not outlive `self`,
@@ -1430,7 +1447,10 @@ unsafe extern "system" fn hook_reset(this: *mut c_void, pp: *mut D3DPRESENT_PARA
 
     on_pre_reset(&tok);
 
-    let parent = unsafe { DeviceParent::new(this) };
+    let Some(parent) = (unsafe { DeviceParent::new(this) }) else {
+        return unsafe { call_real_reset(this, pp) };
+    };
+
     let adapter = parent.adapter();
     let desktop_before = unsafe { sample_for_degradation_check(adapter, pp) };
     // We reapply refresh rate selection so runtime rate toggles take effect at the next `Reset`.
