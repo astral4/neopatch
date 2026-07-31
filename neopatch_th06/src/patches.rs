@@ -92,17 +92,17 @@ const FRAME_LOOP_PATCHES: &[PatchSite] = &[
         with_exposed_provenance_mut(DRAW_SKIP_TARGET),
         "draw-before-calc skip",
     ),
-    PatchSite::jmp(
-        LIMITER_SKIP_VA,
-        &LIMITER_SKIP_BYTES,
-        with_exposed_provenance_mut(LIMITER_SKIP_TARGET),
-        "software frame limiter skip",
-    ),
     PatchSite::call(
         CALC_CALL_VA,
         &CALC_CALL_BYTES,
         calc_then_draw_hook as *mut (),
         "calc-then-draw reorder",
+    ),
+    PatchSite::jmp(
+        LIMITER_SKIP_VA,
+        &LIMITER_SKIP_BYTES,
+        with_exposed_provenance_mut(LIMITER_SKIP_TARGET),
+        "software frame limiter skip",
     ),
     PatchSite::nop(
         0x0042_09a2,
@@ -229,7 +229,7 @@ unsafe extern "C" fn init_d3d_rendering_hook() -> i32 {
     result
 }
 
-/// Runs the game's `InitD3dRendering` under the pinned cfg overrides,scoping the 32-bit color-depth override to the call
+/// Runs the game's `InitD3dRendering` under the pinned cfg overrides, scoping the 32-bit color-depth override to the call
 /// and re-asserting the pinned display mode.
 unsafe fn init_d3d_rendering() -> i32 {
     let init: InitD3dRenderingFn = unsafe { game_fn(INIT_D3D_RENDERING_FN) };
@@ -313,7 +313,7 @@ fn resolve_color_mode_sentinel() {
     }
 }
 
-/// Replaces the config write-back call in `WinMain`'s exit path.
+/// Replaces the `東方紅魔郷.cfg` write-back call in `WinMain`'s exit path.
 unsafe extern "C" fn cfg_write_hook(path: *const u8, data: *mut c_void, size: u32) -> i32 {
     if let Some(pinned) = PINNED_CFG.get() {
         // We only restore where the game still holds what we forced, so anything it changed since then is preserved.
