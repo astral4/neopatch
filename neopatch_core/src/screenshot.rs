@@ -487,16 +487,17 @@ fn log_failed(path: &[u8], error: &str) {
 mod tests {
     use super::build_png_24bpp;
     use png::{BitDepth, ColorType, Decoder};
+    use std::io::Cursor;
 
     /// Encodes a top-down 32bpp BGRX source and decodes the PNG back into `(width, height, RGB bytes)`.
     fn round_trip(width: u32, height: u32, pitch: i32, src: &[u8]) -> (u32, u32, Vec<u8>) {
         let encoded =
             unsafe { build_png_24bpp(width, height, pitch, src.as_ptr()) }.expect("encode");
 
-        let mut reader = Decoder::new(encoded.as_slice())
+        let mut reader = Decoder::new(Cursor::new(encoded.as_slice()))
             .read_info()
             .expect("read_info");
-        let mut buf = vec![0u8; reader.output_buffer_size()];
+        let mut buf = vec![0u8; reader.output_buffer_size().expect("output_buffer_size")];
         let info = reader.next_frame(&mut buf).expect("next_frame");
 
         assert_eq!(info.color_type, ColorType::Rgb);

@@ -27,7 +27,7 @@ license = "MIT OR Apache-2.0"
 publish = false
 
 [workspace.dependencies]
-png = { version = "0.17", default-features = false }
+png = { version = "0.18", default-features = false }
 tracing = { version = "0.1", default-features = false, features = ["std"] }
 tracing-subscriber = { version = "0.3", default-features = false, features = ["registry"] }
 windows = { version = "0.62", default-features = false, features = [
