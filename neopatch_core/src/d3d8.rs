@@ -242,13 +242,19 @@ fn convert_present_params(pp8: &D3DPresentParameters8) -> D3DPRESENT_PARAMETERS 
     let swap_effect = match pp8.SwapEffect {
         // This mapping drops the "sync to vblank" semantics, but it's fine because we also override `PresentationInterval` itself.
         D3DSWAPEFFECT_COPY_VSYNC8 => D3DSWAPEFFECT_COPY,
-        // D3D9 rejects every swap effect but `DISCARD` once multisampling is on.
-        // In th06, `GameWindow::Present` captures the back buffer after `Present` for pause/retry menu backgrounds, so we can't use `DISCARD`.
-        // NOTE/TODO: If any games use `FLIP` and multisampling, we should probably keep `FLIP` and disable multisampling.
+        // `FLIP` also becomes `COPY`. The games read the back buffer after `Present` (e.g. th06's pause/retry menu backgrounds,
+        // th07's snapshot key), which only `COPY` keeps defined under D3D9Ex. D3D8-era `FLIP` happened to satisfy those reads
+        // by rotating real surfaces, but post-`Present` contents are undefined here, and `FLIP`'s own semantics (vblank-paced flipping)
+        // are neutralized by the interval override anyway. `DISCARD` is ruled out for the same reason.
         e if e == D3DSWAPEFFECT_FLIP.0.cast_unsigned() => {
+            // D3D9 rejects every swap effect but `DISCARD` once multisampling is enabled.
             if pp8.MultiSampleType == D3DMULTISAMPLE_NONE {
-                D3DSWAPEFFECT_FLIP
+                D3DSWAPEFFECT_COPY
             } else {
+                warn!(
+                    kind = "d3d8_flip_msaa_discard",
+                    multi_sample_type = pp8.MultiSampleType.0,
+                );
                 D3DSWAPEFFECT_DISCARD
             }
         }
@@ -2306,10 +2312,10 @@ mod tests {
         pp8.SwapEffect = 4;
         assert_eq!(convert_present_params(&pp8).SwapEffect, D3DSWAPEFFECT_COPY);
 
-        // `FLIP` survives translation so the games can still read the back buffer after `Present`.
+        // `FLIP` becomes `COPY` so the games can still read the back buffer after `Present`, which D3D9Ex leaves undefined under `FLIP`.
         pp8.SwapEffect = D3DSWAPEFFECT_FLIP.0.cast_unsigned();
         pp8.MultiSampleType = D3DMULTISAMPLE_NONE;
-        assert_eq!(convert_present_params(&pp8).SwapEffect, D3DSWAPEFFECT_FLIP);
+        assert_eq!(convert_present_params(&pp8).SwapEffect, D3DSWAPEFFECT_COPY);
 
         // ...except with multisampling, where D3D9 accepts nothing but `DISCARD`.
         pp8.MultiSampleType = D3DMULTISAMPLE_2_SAMPLES;
