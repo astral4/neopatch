@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "neopatch_core",
     "neopatch_th06",
+    "neopatch_th07",
     "neopatch_th10",
     "neopatch_th11",
     "neopatch_th12",

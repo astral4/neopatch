@@ -4,6 +4,10 @@ All notable changes to neopatch will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- Support for Touhou 7 ~ Perfect Cherry Blossom (`th07.exe v1.00b`).
+
 ### Fixed
 
 - Touhou 10 through Touhou 18 now select the game's intended Japanese font and show dialog text without mojibake on non-Japanese system locales.

@@ -9,6 +9,7 @@ neopatch ships as a DLL file. The file should be named `dinput8.dll` and placed 
 neopatch is configured through a `neopatch.ini` file, which should also be placed in the game directory. Please check the per-game example files to see what's possible with neopatch! Here is a list of supported games and versions; support for more games is planned for the near future.
 
 - Touhou 6 (v1.02h): [`neopatch.ini.example`](neopatch_th06/neopatch.ini.example)
+- Touhou 7 (v1.00b): [`neopatch.ini.example`](neopatch_th07/neopatch.ini.example)
 - Touhou 10 (v1.00a): [`neopatch.ini.example`](neopatch_th10/neopatch.ini.example)
 - Touhou 11 (v1.00a): [`neopatch.ini.example`](neopatch_th11/neopatch.ini.example)
 - Touhou 12 (v1.00b): [`neopatch.ini.example`](neopatch_th12/neopatch.ini.example)
