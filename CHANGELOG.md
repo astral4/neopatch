@@ -4,6 +4,8 @@ All notable changes to neopatch will be documented in this file.
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-07-30
+
 ### Added
 
 - Support for Touhou 6 ~ Embodiment of Scarlet Devil (`東方紅魔郷.exe v1.02h`).
