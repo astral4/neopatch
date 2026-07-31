@@ -23,6 +23,9 @@ fmt:
 clean:
     cargo clean
 
+# 1 = run a copy of the game with the PE large-address-aware flag set
+laa := env("NEOPATCH_LAA", "0")
+
 run game:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -30,7 +33,24 @@ run game:
     cd sandbox/games/{{game}}
     exe="{{game}}"
     if [ "${exe}" = "th06" ]; then exe="東方紅魔郷"; fi
-    WINEDLLOVERRIDES="mscoree=,mshtml=,winemenubuilder.exe=d" wine "${exe}.exe"
+    launch="${exe}.exe"
+    if [ "{{laa}}" != "0" ]; then
+        launch="${exe}_laa.exe"
+        rm -f "${launch}"
+        cp "${exe}.exe" "${launch}"
+        # e_lfanew at 0x3c locates the PE signature; IMAGE_FILE_HEADER.Characteristics sits 22 bytes past it,
+        # and bit 0x20 is IMAGE_FILE_LARGE_ADDRESS_AWARE.
+        pe=$(( $(od -An -tu4 -j 60 -N 4 "${launch}") ))
+        if [ "$(od -An -tx1 -j "${pe}" -N 4 "${launch}" | tr -d ' ')" != "50450000" ]; then
+            echo "${exe}.exe: not a PE image" >&2
+            exit 1
+        fi
+        off=$(( pe + 22 ))
+        characteristics=$(( $(od -An -tu2 -j "${off}" -N 2 "${launch}") | 0x20 ))
+        printf "\\x$(printf %02x $(( characteristics & 0xff )))\\x$(printf %02x $(( characteristics >> 8 )))" \
+            | dd of="${launch}" bs=1 seek="${off}" conv=notrunc status=none
+    fi
+    WINEDLLOVERRIDES="mscoree=,mshtml=,winemenubuilder.exe=d" wine "${launch}"
 
 release:
     #!/usr/bin/env bash
