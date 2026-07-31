@@ -7,6 +7,7 @@ All notable changes to neopatch will be documented in this file.
 ### Added
 
 - Support for Touhou 7 ~ Perfect Cherry Blossom (`th07.exe v1.00b`).
+- Support for Touhou 8 ~ Imperishable Night (`th08.exe v1.00d`).
 
 ### Fixed
 
