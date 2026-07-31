@@ -79,7 +79,6 @@ unsafe fn install_hooks() {
     }
 
     crash::install_handlers();
-
     process::apply(&core_cfg.process);
 
     unsafe {

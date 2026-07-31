@@ -77,20 +77,36 @@ iat_hook! {
         as fn(logfont: *const LOGFONTA) -> HFONT;
 }
 
-/// IAT-hooks the ANSI file and font entry points against `host`'s import table,
-/// translating strings through `codepage` (e.g. 932 for Shift-JIS) instead of the system ANSI code page.
+/// IAT-hooks the ANSI font entry points against `host`'s import table and registers `codepage` (e.g. 932 for Shift-JIS)
+/// as the game code page, translating font face names through it instead of the system ANSI code page.
+///
+/// Registering the code page also arms `MessageBoxA` transcoding in [`crate::exit_hooks`] (installed separately).
 ///
 /// # Safety
 /// `host` must be a loaded module handle.
 pub unsafe fn install(host: HMODULE, codepage: NonZero<u32>) {
     CODEPAGE.store(codepage.get(), Ordering::Relaxed);
     unsafe {
-        REAL_CREATE_FILE_A.install(host, hook_create_file_a);
-        REAL_DELETE_FILE_A.install(host, hook_delete_file_a);
         REAL_CREATE_FONT_A.install(host, hook_create_font_a);
         REAL_CREATE_FONT_INDIRECT_A.install(host, hook_create_font_indirect_a);
     }
     info!(kind = "ansi_hooks_installed", codepage = codepage.get());
+}
+
+/// IAT-hooks the ANSI file entry points (`CreateFileA`/`DeleteFileA`), translating filenames through the code page registered by [`install`].
+///
+/// This is only for games whose every ANSI filename is game-authored in the game code page (e.g. th06's Shift-JIS `.cfg`/`.dat` names).
+/// Games that pass OS-derived paths (e.g. `%APPDATA%`, result of `GetModuleFileNameA`) must not install these, since those bytes
+/// are in the system ANSI code page. Reinterpreting them through the game code page can corrupt the path on non-matching locales.
+///
+/// # Safety
+/// `host` must be a loaded module handle.
+pub unsafe fn install_file_hooks(host: HMODULE) {
+    unsafe {
+        REAL_CREATE_FILE_A.install(host, hook_create_file_a);
+        REAL_DELETE_FILE_A.install(host, hook_delete_file_a);
+    }
+    info!(kind = "ansi_file_hooks_installed");
 }
 
 /// Converts `bytes` through `codepage` into a NUL-terminated UTF-16 string. With `strict`, bytes that are invalid in the code page

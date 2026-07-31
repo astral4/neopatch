@@ -47,7 +47,10 @@ unsafe fn install_hooks() {
     // th06's `custom.exe` loads our dinput8 proxy but no D3D8. We still install the ANSI Shift-JIS filename hooks
     // because `custom.exe` reads and rewrites the same Shift-JIS-named `東方紅魔郷.cfg` file that the game does.
     if unsafe { GetModuleHandleW(w!("d3d8.dll")) }.is_null() {
-        unsafe { ansi::install(host_exe, ansi::CP_SHIFT_JIS) };
+        unsafe {
+            ansi::install(host_exe, ansi::CP_SHIFT_JIS);
+            ansi::install_file_hooks(host_exe);
+        }
         return;
     }
 
@@ -63,18 +66,18 @@ unsafe fn install_hooks() {
     let install_dir = exe_dir.map_or_else(|| PathBuf::from("."), Path::to_path_buf);
     log::init(&install_dir, core_cfg, host_exe_path.as_deref(), |_| Ok(()));
 
-    unsafe { ansi::install(host_exe, ansi::CP_SHIFT_JIS) };
-
     let installed = unsafe { install_all(PATCH_GROUPS) };
     if !installed {
         return;
     }
 
     crash::install_handlers();
-
     process::apply(&core_cfg.process);
 
     unsafe {
+        ansi::install(host_exe, ansi::CP_SHIFT_JIS);
+        // th06 authors its own Shift-JIS filenames (e.g. `東方紅魔郷.cfg`) and never passes OS-derived paths, so the file hooks are safe here.
+        ansi::install_file_hooks(host_exe);
         timer_period::install(host_exe);
         gdi_caps::install(host_exe);
         exit_hooks::install(host_exe);
@@ -96,7 +99,6 @@ unsafe fn install_hooks() {
             },
             window::WindowApi::Ansi,
         );
-
         d3d8::install(host_exe);
     }
 

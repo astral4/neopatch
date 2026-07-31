@@ -14,8 +14,8 @@ use neopatch_core::config::{CONFIG, CoreConfig, decode_text, parse_core_only};
 use neopatch_core::pacer::{PACER, Pacer, PacingPolicy};
 use neopatch_core::patches::install_all;
 use neopatch_core::{
-    crash, d3d9, d3dx9, dinput8, dinput8_export, exit_hooks, gdi_caps, input, log, process, replay,
-    timer_period, vtable, window,
+    ansi, crash, d3d9, d3dx9, dinput8, dinput8_export, exit_hooks, gdi_caps, input, log, process,
+    replay, timer_period, vtable, window,
 };
 use std::env::current_exe;
 use std::ffi::c_void;
@@ -62,12 +62,12 @@ unsafe fn install_hooks() {
     }
 
     crash::install_handlers();
+    process::apply(&core_cfg.process);
 
     let host_exe = unsafe { GetModuleHandleW(null()) };
 
-    process::apply(&core_cfg.process);
-
     unsafe {
+        ansi::install(host_exe, ansi::CP_SHIFT_JIS);
         timer_period::install(host_exe);
         gdi_caps::install(host_exe);
         window::install(

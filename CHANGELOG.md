@@ -4,6 +4,10 @@ All notable changes to neopatch will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- Touhou 10 through Touhou 18 now select the game's intended Japanese font and show dialog text without mojibake on non-Japanese system locales.
+
 ## [0.10.0] - 2026-07-30
 
 ### Added
