@@ -39,6 +39,7 @@ const CFG_COLOR_MODE_16BIT_VA: GameAddr<u8> = unsafe { GameAddr::new(G_ENGINE_CF
 const COLOR_MODE_AUTO: u8 = 0xff;
 // 0 = fullscreen; 1 = windowed.
 const CFG_WINDOWED_VA: GameAddr<u8> = unsafe { GameAddr::new(G_ENGINE_CFG + 0x22) };
+const CFG_FRAMESKIP_VA: GameAddr<u8> = unsafe { GameAddr::new(G_ENGINE_CFG + 0x23) };
 const CFG_OPTS_VA: GameAddr<u32> = unsafe { GameAddr::new(G_ENGINE_CFG + 0x34) };
 const GCOS_FORCE_16BIT_COLOR_MODE_MASK: u32 = 1 << 2;
 
@@ -176,6 +177,8 @@ struct PinnedCfg {
     /// Whether the user's original `cfg.opts` had `GCOS_FORCE_16BIT_COLOR_MODE` set.
     /// neopatch always forces the bit clear, so the forced value is implicitly `false`.
     user_force_16bit: bool,
+    /// The user's original `cfg.frameskip`. neopatch always forces 0.
+    user_frameskip: u8,
 }
 
 static PINNED_CFG: OnceLock<PinnedCfg> = OnceLock::new();
@@ -220,6 +223,8 @@ pub(crate) fn apply_display_override() {
     let opts = CFG_OPTS_VA.read();
     let user_force_16bit = opts & GCOS_FORCE_16BIT_COLOR_MODE_MASK != 0;
 
+    let user_frameskip = CFG_FRAMESKIP_VA.read();
+
     let forced_windowed = match CONFIG.get().map(|c| c.display.mode) {
         Some(DisplayMode::Fullscreen) => 0,
         // The default display mode in the neopatch configuration is windowed.
@@ -230,6 +235,7 @@ pub(crate) fn apply_display_override() {
         user_windowed,
         forced_windowed,
         user_force_16bit,
+        user_frameskip,
     });
 
     if user_windowed != forced_windowed {
@@ -244,6 +250,11 @@ pub(crate) fn apply_display_override() {
     if user_force_16bit {
         info!(kind = "force_16bit_opt_cleared");
         CFG_OPTS_VA.write(opts & !GCOS_FORCE_16BIT_COLOR_MODE_MASK);
+    }
+
+    if user_frameskip != 0 {
+        info!(kind = "frameskip_forced_off", user_frameskip);
+        CFG_FRAMESKIP_VA.write(0);
     }
 
     resolve_color_mode_sentinel();
@@ -268,6 +279,10 @@ unsafe extern "fastcall" fn cfg_write_hook(path: *const u8, data: *mut c_void, s
         let opts = CFG_OPTS_VA.read();
         if pinned.user_force_16bit && opts & GCOS_FORCE_16BIT_COLOR_MODE_MASK == 0 {
             CFG_OPTS_VA.write(opts | GCOS_FORCE_16BIT_COLOR_MODE_MASK);
+        }
+
+        if CFG_FRAMESKIP_VA.read() == 0 {
+            CFG_FRAMESKIP_VA.write(pinned.user_frameskip);
         }
     }
 
