@@ -9,6 +9,10 @@ All notable changes to neopatch will be documented in this file.
 - Support for Touhou 7 ~ Perfect Cherry Blossom (`th07.exe v1.00b`).
 - Support for Touhou 8 ~ Imperishable Night (`th08.exe v1.00d`).
 
+### Changed
+
+- The game window is now created directly in its final styled state instead of being restyled after creation.
+
 ### Fixed
 
 - Touhou 10 through Touhou 18 now select the game's intended Japanese font and show dialog text without mojibake on non-Japanese system locales.

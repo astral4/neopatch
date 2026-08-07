@@ -54,9 +54,6 @@ use windows_sys::Win32::Graphics::Gdi::{
     DEVMODEW, ENUM_CURRENT_SETTINGS, EnumDisplaySettingsExW, GetMonitorInfoW, MONITORINFO,
     MONITORINFOEXW,
 };
-use windows_sys::Win32::UI::WindowsAndMessaging::{
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SetWindowPos,
-};
 
 #[allow(clippy::cast_possible_truncation)]
 const D3DDISPLAYMODEEX_SIZE: u32 = size_of::<D3DDISPLAYMODEEX>() as u32;
@@ -1160,18 +1157,7 @@ unsafe extern "system" fn hook_create_device(
             return D3DERR_INVALIDCALL;
         };
 
-        // Apparently D3D9Ex breaks the window style on `CreateDeviceEx`. OILP's `CreateDevice_hook` applies the same `SWP_SHOWWINDOW` fix.
         unsafe {
-            SetWindowPos(
-                focus_window.0,
-                null_mut(),
-                0,
-                0,
-                0,
-                0,
-                SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW,
-            );
-
             install_device_hooks(dev);
             post_device_alive(&tok, dev, attempt.as_ref());
         }

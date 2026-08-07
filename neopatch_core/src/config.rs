@@ -143,13 +143,11 @@ pub enum RefreshRateMode {
 /// Window frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WindowFrame {
-    /// `WS_OVERLAPPED | WS_SYSMENU | WS_VISIBLE | WS_CAPTION | WS_MINIMIZEBOX | WS_MAXIMIZEBOX`.
     /// The "normal" desktop app appearance: title bar with system menu and minimize/maximize/close buttons.
     Framed,
-    /// `WS_OVERLAPPED | WS_SYSMENU | WS_VISIBLE | WS_MINIMIZEBOX | WS_MAXIMIZEBOX`.
     /// No caption or border, but the system menu remains fully functional (Alt+Space for Move/Minimize/Maximize/Close).
     Frameless,
-    /// `WS_POPUP | WS_VISIBLE`. Pure pixel rectangle; no frame or system menu.
+    /// Pure pixel rectangle; no frame or system menu.
     Borderless,
 }
 

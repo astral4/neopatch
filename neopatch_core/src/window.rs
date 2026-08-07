@@ -5,16 +5,13 @@ use crate::iat_hook;
 use crate::untrusted::Untrusted;
 use std::ffi::c_void;
 use std::num::NonZero;
-use std::ptr::null_mut;
 use std::sync::OnceLock;
 use tracing::{info, warn};
 use windows_sys::Win32::Foundation::{HMODULE, HWND, RECT};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    AdjustWindowRectEx, DefWindowProcW, GWL_EXSTYLE, GWL_STYLE, GetWindowLongA, HMENU,
-    HWND_TOPMOST, InternalGetWindowText, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
-    SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_SHOWWINDOW, SetWindowLongA, SetWindowPos, WINDOW_EX_STYLE,
-    WINDOW_STYLE, WM_SETTEXT, WS_CAPTION, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_POPUP,
-    WS_SYSMENU, WS_VISIBLE,
+    AdjustWindowRectEx, DefWindowProcW, GWL_EXSTYLE, GWL_STYLE, GetWindowLongA, GetWindowRect,
+    HMENU, InternalGetWindowText, WINDOW_EX_STYLE, WINDOW_STYLE, WM_SETTEXT, WS_CAPTION,
+    WS_EX_TOPMOST, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_POPUP, WS_SYSMENU, WS_VISIBLE,
 };
 
 static STATE: OnceLock<State> = OnceLock::new();
@@ -96,16 +93,11 @@ impl ResolvedWindowCfg {
 
 /// The resolved form of [`WindowPolicy`].
 enum State {
-    Restyle {
-        framebuffer: (u32, u32),
-        restyle: ResolvedWindowCfg,
-    },
-    DeferToGame {
-        always_on_top: bool,
-    },
+    Restyle { restyle: ResolvedWindowCfg },
+    DeferToGame { always_on_top: bool },
 }
 
-/// Picks the IAT slot [`install`] hooks. th10-th18 use Ansi; th20 uses Wide.
+/// Picks the IAT slot [`install`] hooks. th06-th18 use Ansi; th20 uses Wide.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WindowApi {
     Ansi,
@@ -123,7 +115,6 @@ pub unsafe fn install(host: HMODULE, restyle: &WindowCfg, policy: WindowPolicy, 
             framebuffer,
             display_mode,
         } => State::Restyle {
-            framebuffer,
             restyle: ResolvedWindowCfg::new(restyle, framebuffer, display_mode),
         },
         WindowPolicy::DeferToGame => State::DeferToGame {
@@ -141,134 +132,168 @@ pub unsafe fn install(host: HMODULE, restyle: &WindowCfg, policy: WindowPolicy, 
     }
 }
 
-unsafe extern "system" fn hook_create_window_ex_a(
-    dw_ex_style: u32,
-    lp_class_name: *const u8,
-    lp_window_name: *const u8,
-    dw_style: u32,
+/// Generates a `CreateWindowEx*` hook.
+macro_rules! create_window_hook {
+    ($name:ident, $char:ty, $class:expr, $real:ident, $build_title:path) => {
+        unsafe extern "system" fn $name(
+            dw_ex_style: u32,
+            lp_class_name: *const $char,
+            lp_window_name: *const $char,
+            dw_style: u32,
+            x: i32,
+            y: i32,
+            n_width: i32,
+            n_height: i32,
+            h_wnd_parent: HWND,
+            h_menu: HMENU,
+            h_instance: HMODULE,
+            lp_param: *mut c_void,
+        ) -> HWND {
+            // IME and sound-thread helpers also use this import, but we only want the game's render window.
+            // We match by class name "BASE" to catch both fullscreen (`WS_POPUP`) and windowed (no `WS_POPUP`) branches.
+            let is_main = h_wnd_parent.is_null()
+                && Untrusted::from_raw(lp_class_name).matches_nul_terminated($class);
+            let args = prep_main_window(
+                STATE.get().unwrap(),
+                is_main,
+                CreationArgs {
+                    x,
+                    y,
+                    width: n_width,
+                    height: n_height,
+                    style: dw_style,
+                    ex_style: dw_ex_style,
+                },
+            );
+            let hwnd = unsafe {
+                $real(
+                    args.ex_style,
+                    lp_class_name,
+                    lp_window_name,
+                    args.style,
+                    args.x,
+                    args.y,
+                    args.width,
+                    args.height,
+                    h_wnd_parent,
+                    h_menu,
+                    h_instance,
+                    lp_param,
+                )
+            };
+            finish_main_window(hwnd, is_main, || {
+                $build_title(Untrusted::from_raw(lp_window_name))
+            });
+            hwnd
+        }
+    };
+}
+create_window_hook!(
+    hook_create_window_ex_a,
+    u8,
+    b"BASE",
+    real_create_window_ex_a,
+    build_extended_title_from_sjis
+);
+create_window_hook!(
+    hook_create_window_ex_w,
+    u16,
+    const { &[b'B' as u16, b'A' as u16, b'S' as u16, b'E' as u16] },
+    real_create_window_ex_w,
+    build_extended_title_from_wide
+);
+
+/// The positional and style arguments of a `CreateWindowEx*` call.
+#[derive(Clone, Copy)]
+struct CreationArgs {
     x: i32,
     y: i32,
-    n_width: i32,
-    n_height: i32,
-    h_wnd_parent: HWND,
-    h_menu: HMENU,
-    h_instance: HMODULE,
-    lp_param: *mut c_void,
-) -> HWND {
-    // IME and sound-thread helpers also use this import, but we only want the game's render window.
-    // We match by class name "BASE" to catch both fullscreen (`WS_POPUP`) and windowed (no `WS_POPUP`) branches.
-    let is_main = h_wnd_parent.is_null()
-        && Untrusted::from_raw(lp_class_name).matches_nul_terminated(b"BASE");
-    let (use_w, use_h) = prep_main_window(is_main, dw_ex_style, dw_style, x, y, n_width, n_height);
-    let hwnd = unsafe {
-        real_create_window_ex_a(
-            dw_ex_style,
-            lp_class_name,
-            lp_window_name,
-            dw_style,
-            x,
-            y,
-            use_w,
-            use_h,
-            h_wnd_parent,
-            h_menu,
-            h_instance,
-            lp_param,
-        )
-    };
-    finish_main_window(hwnd, is_main, || {
-        build_extended_title_from_sjis(Untrusted::from_raw(lp_window_name))
-    });
-    hwnd
+    width: i32,
+    height: i32,
+    style: WINDOW_STYLE,
+    ex_style: WINDOW_EX_STYLE,
 }
 
-unsafe extern "system" fn hook_create_window_ex_w(
-    dw_ex_style: u32,
-    lp_class_name: *const u16,
-    lp_window_name: *const u16,
-    dw_style: u32,
-    x: i32,
-    y: i32,
-    n_width: i32,
-    n_height: i32,
-    h_wnd_parent: HWND,
-    h_menu: HMENU,
-    h_instance: HMODULE,
-    lp_param: *mut c_void,
-) -> HWND {
-    const BASE_CLASS_W: [u16; 4] = [b'B' as u16, b'A' as u16, b'S' as u16, b'E' as u16];
-
-    let is_main = h_wnd_parent.is_null()
-        && Untrusted::from_raw(lp_class_name).matches_nul_terminated(&BASE_CLASS_W);
-    let (use_w, use_h) = prep_main_window(is_main, dw_ex_style, dw_style, x, y, n_width, n_height);
-    let hwnd = unsafe {
-        real_create_window_ex_w(
-            dw_ex_style,
-            lp_class_name,
-            lp_window_name,
-            dw_style,
-            x,
-            y,
-            use_w,
-            use_h,
-            h_wnd_parent,
-            h_menu,
-            h_instance,
-            lp_param,
-        )
-    };
-    finish_main_window(hwnd, is_main, || {
-        build_extended_title_from_wide(Untrusted::from_raw(lp_window_name))
-    });
-    hwnd
-}
-
-/// Geometry for the main render window. Returns the `(width, height)` to pass to `CreateWindowEx*`.
-/// This is the framebuffer size under [`State::Restyle`] adjusted for the frame, else the game's requested size.
-fn prep_main_window(
-    is_main: bool,
-    dw_ex_style: u32,
-    dw_style: u32,
-    x: i32,
-    y: i32,
-    n_width: i32,
-    n_height: i32,
-) -> (i32, i32) {
-    let (use_w, use_h) = if let (true, State::Restyle { framebuffer, .. }) =
-        (is_main, STATE.get().unwrap())
-        && (dw_style & WS_POPUP) == 0
-    {
-        let (bw, bh) = *framebuffer;
-        let mut rc = RECT {
-            left: 0,
-            top: 0,
-            right: bw.cast_signed(),
-            bottom: bh.cast_signed(),
-        };
-        unsafe { AdjustWindowRectEx(&raw mut rc, dw_style, 0, dw_ex_style) };
-        (rc.right - rc.left, rc.bottom - rc.top)
-    } else {
-        (n_width, n_height)
-    };
-    if is_main {
-        info!(
-            kind = "create_window_call",
-            dw_style = format_args!("{dw_style:#x}"),
-            dw_ex_style = format_args!("{dw_ex_style:#x}"),
-            x,
-            y,
-            width_in = n_width,
-            height_in = n_height,
-            width_out = use_w,
-            height_out = use_h,
-            recomputed = use_w != n_width || use_h != n_height,
-        );
+fn frame_style(frame: WindowFrame) -> WINDOW_STYLE {
+    // `CreateWindowEx*` force-adds `WS_CAPTION` to any window that is neither a child nor a popup,
+    // so the captionless options must be popup-based.
+    match frame {
+        WindowFrame::Framed => {
+            WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_VISIBLE
+        }
+        WindowFrame::Frameless => {
+            WS_POPUP | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_VISIBLE
+        }
+        WindowFrame::Borderless => WS_POPUP | WS_VISIBLE,
     }
-    (use_w, use_h)
 }
 
-// Post-creation handling for the main render window.
-// This runs on first creation and again on every recreation, with each creation styled independently.
+fn topmost_ex_style(ex_style: u32, always_on_top: bool) -> WINDOW_EX_STYLE {
+    if always_on_top {
+        ex_style | WS_EX_TOPMOST
+    } else {
+        ex_style
+    }
+}
+
+/// Computes the `CreateWindowEx*` arguments for the main render window.
+fn prep_main_window(state: &State, is_main: bool, requested: CreationArgs) -> CreationArgs {
+    if !is_main {
+        return requested;
+    }
+
+    let always_on_top = match state {
+        State::Restyle { restyle } => restyle.always_on_top,
+        State::DeferToGame { always_on_top } => *always_on_top,
+    };
+
+    let args = match state {
+        State::Restyle { restyle } if (requested.style & WS_POPUP) == 0 => {
+            let style = frame_style(restyle.frame);
+            let ex_style = topmost_ex_style(0, always_on_top);
+            let mut rc = RECT {
+                left: 0,
+                top: 0,
+                right: restyle.width.cast_signed(),
+                bottom: restyle.height.cast_signed(),
+            };
+            unsafe { AdjustWindowRectEx(&raw mut rc, style, 0, ex_style) };
+
+            let (x, y) = (restyle.x, restyle.y);
+            CreationArgs {
+                x,
+                y,
+                width: rc.right - rc.left,
+                height: rc.bottom - rc.top,
+                style,
+                ex_style,
+            }
+        }
+        _ => CreationArgs {
+            ex_style: topmost_ex_style(requested.ex_style, always_on_top),
+            ..requested
+        },
+    };
+
+    info!(
+        kind = "create_window_call",
+        dw_style = format_args!("{:#x}", requested.style),
+        dw_ex_style = format_args!("{:#x}", requested.ex_style),
+        x = requested.x,
+        y = requested.y,
+        width_in = requested.width,
+        height_in = requested.height,
+        x_out = args.x,
+        y_out = args.y,
+        width_out = args.width,
+        height_out = args.height,
+        style_out = format_args!("{:#x}", args.style),
+        ex_style_out = format_args!("{:#x}", args.ex_style),
+    );
+    args
+}
+
+// Does post-creation bookkeeping for the main render window. This runs on first creation and again on every recreation.
 fn finish_main_window(hwnd: HWND, is_main: bool, build_title: impl FnOnce() -> Vec<u16>) {
     if !is_main {
         return;
@@ -279,19 +304,37 @@ fn finish_main_window(hwnd: HWND, is_main: bool, build_title: impl FnOnce() -> V
     }
 
     let title = build_title();
-    match STATE.get().unwrap() {
-        State::Restyle { restyle, .. } => {
-            let style = unsafe { GetWindowLongA(hwnd, GWL_STYLE) };
-            if style.cast_unsigned() & WS_POPUP == 0 {
-                apply(hwnd, restyle, &title);
-            } else {
-                unsafe { apply_deferred(hwnd, restyle.always_on_top, &title) };
-            }
-        }
-        State::DeferToGame { always_on_top } => unsafe {
-            apply_deferred(hwnd, *always_on_top, &title);
-        },
-    }
+    unsafe { set_window_text_lossless(hwnd, &title) };
+    log_created_style(hwnd);
+}
+
+/// Logs what `CreateWindowEx*` actually produced.
+fn log_created_style(hwnd: HWND) {
+    let style = unsafe { GetWindowLongA(hwnd, GWL_STYLE) }.cast_unsigned();
+    let ex_style = unsafe { GetWindowLongA(hwnd, GWL_EXSTYLE) }.cast_unsigned();
+    let mut rc = RECT {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    };
+    let rect = if unsafe { GetWindowRect(hwnd, &raw mut rc) } != 0 {
+        format!(
+            "{}x{} at ({},{})",
+            rc.right - rc.left,
+            rc.bottom - rc.top,
+            rc.left,
+            rc.top
+        )
+    } else {
+        String::from("<unavailable>")
+    };
+    info!(
+        kind = "window_created",
+        style = format_args!("{style:#x}"),
+        ex_style = format_args!("{ex_style:#x}"),
+        rect,
+    );
 }
 
 /// Sets the window title losslessly, bypassing the ANSI message thunk.
@@ -318,24 +361,6 @@ unsafe fn set_window_text_lossless(hwnd: HWND, title: &[u16]) {
         kind = "window_title_set",
         title = %String::from_utf16_lossy(&stored[..n.max(0).cast_unsigned() as usize]),
     );
-}
-
-/// [`apply`] without geometry/style modifications.
-unsafe fn apply_deferred(hwnd: HWND, always_on_top: bool, title: &[u16]) {
-    unsafe { set_window_text_lossless(hwnd, title) };
-    if always_on_top {
-        unsafe {
-            SetWindowPos(
-                hwnd,
-                HWND_TOPMOST,
-                0,
-                0,
-                0,
-                0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER,
-            );
-        }
-    }
 }
 
 /// Reads the game's Shift-JIS title bytes, transcodes through `CP_SHIFT_JIS` to UTF-16, and appends a version identifier for this project.
@@ -371,49 +396,129 @@ fn append_suffix(wide: &mut Vec<u16>) {
     wide.push(0);
 }
 
-fn apply(hwnd: HWND, cfg: &ResolvedWindowCfg, title: &[u16]) {
-    // We do this before `SetWindowPos` so the `SWP_FRAMECHANGED`-driven first paint of the title bar gets the new UTF-16 title.
-    unsafe { set_window_text_lossless(hwnd, title) };
-
-    let style: WINDOW_STYLE = match cfg.frame {
-        WindowFrame::Framed => {
-            WS_OVERLAPPED | WS_SYSMENU | WS_VISIBLE | WS_CAPTION | WS_MINIMIZEBOX | WS_MAXIMIZEBOX
-        }
-        WindowFrame::Frameless => {
-            WS_OVERLAPPED | WS_SYSMENU | WS_VISIBLE | WS_MINIMIZEBOX | WS_MAXIMIZEBOX
-        }
-        WindowFrame::Borderless => WS_POPUP | WS_VISIBLE,
+#[cfg(test)]
+mod tests {
+    use super::{
+        CreationArgs, ResolvedWindowCfg, State, frame_style, prep_main_window, topmost_ex_style,
     };
-    let ex_style: WINDOW_EX_STYLE = 0;
-    unsafe {
-        SetWindowLongA(hwnd, GWL_STYLE, style.cast_signed());
-        SetWindowLongA(hwnd, GWL_EXSTYLE, ex_style.cast_signed());
+    use crate::config::{DisplayMode, WindowCfg, WindowFrame};
+    use std::num::NonZero;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        WS_CAPTION, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
+    };
+
+    #[test]
+    fn unmodified_frame_creation_style() {
+        for frame in [
+            WindowFrame::Framed,
+            WindowFrame::Frameless,
+            WindowFrame::Borderless,
+        ] {
+            let style = frame_style(frame);
+            assert_ne!(style & WS_VISIBLE, 0, "{frame:?} must be created visible");
+            let captioned = style & WS_CAPTION == WS_CAPTION;
+            let popup = style & WS_POPUP != 0;
+            assert!(captioned != popup, "{frame:?} must be captioned xor popup");
+        }
     }
 
-    let mut rc = RECT {
-        left: 0,
-        top: 0,
-        right: cfg.width.cast_signed(),
-        bottom: cfg.height.cast_signed(),
-    };
-    unsafe { AdjustWindowRectEx(&raw mut rc, style, 0, ex_style) };
+    #[test]
+    fn ex_style_topmost_modification() {
+        assert_eq!(topmost_ex_style(0, false), 0);
+        assert_eq!(topmost_ex_style(0, true), WS_EX_TOPMOST);
+        assert_eq!(topmost_ex_style(0x40000, true), 0x40000 | WS_EX_TOPMOST);
+        assert_eq!(topmost_ex_style(0x40000, false), 0x40000);
+    }
 
-    let w = rc.right - rc.left;
-    let h = rc.bottom - rc.top;
-    let after = if cfg.always_on_top {
-        HWND_TOPMOST
-    } else {
-        null_mut()
-    };
-    unsafe {
-        SetWindowPos(
-            hwnd,
-            after,
-            cfg.x,
-            cfg.y,
-            w,
-            h,
-            SWP_FRAMECHANGED | SWP_SHOWWINDOW | SWP_NOOWNERZORDER,
-        );
+    fn restyle_state(frame: WindowFrame, always_on_top: bool) -> State {
+        State::Restyle {
+            restyle: ResolvedWindowCfg {
+                x: 100,
+                y: 120,
+                width: 640,
+                height: 480,
+                frame,
+                always_on_top,
+            },
+        }
+    }
+
+    fn requested(style: u32) -> CreationArgs {
+        CreationArgs {
+            x: 11,
+            y: 22,
+            width: 646,
+            height: 512,
+            style,
+            ex_style: 0x40000,
+        }
+    }
+
+    #[test]
+    fn non_main_windows_not_rewritten() {
+        // The game's own request must survive untouched for any window that is not the render window;
+        // the IME and sound helper windows come through the same hook.
+        let state = restyle_state(WindowFrame::Framed, true);
+        let req = requested(0x100a_0000);
+        let got = prep_main_window(&state, false, req);
+        assert_eq!((got.x, got.y), (req.x, req.y));
+        assert_eq!((got.width, got.height), (req.width, req.height));
+        assert_eq!((got.style, got.ex_style), (req.style, req.ex_style));
+    }
+
+    #[test]
+    fn restyle_rewrite_args() {
+        let state = restyle_state(WindowFrame::Framed, false);
+        let got = prep_main_window(&state, true, requested(0x100a_0000));
+        assert_eq!((got.x, got.y), (100, 120));
+        assert_eq!(got.style, frame_style(WindowFrame::Framed));
+        assert_eq!(got.ex_style, 0);
+        assert!(got.width >= 640 && got.height > 480);
+    }
+
+    #[test]
+    fn borderless_outer_size_equals_client_size() {
+        let state = restyle_state(WindowFrame::Borderless, false);
+        let got = prep_main_window(&state, true, requested(0x100a_0000));
+        assert_eq!((got.width, got.height), (640, 480));
+    }
+
+    #[test]
+    fn fullscreen_style() {
+        let req = requested(WS_POPUP | WS_VISIBLE);
+        let state = restyle_state(WindowFrame::Framed, true);
+        let got = prep_main_window(&state, true, req);
+        assert_eq!((got.x, got.y), (req.x, req.y));
+        assert_eq!((got.width, got.height), (req.width, req.height));
+        assert_eq!(got.style, req.style, "the game's style is kept");
+        assert_eq!(got.ex_style, req.ex_style | WS_EX_TOPMOST);
+    }
+
+    #[test]
+    fn defer_to_game_style() {
+        let req = requested(0x1000_0000);
+        for (always_on_top, expected_ex) in
+            [(false, req.ex_style), (true, req.ex_style | WS_EX_TOPMOST)]
+        {
+            let state = State::DeferToGame { always_on_top };
+            let got = prep_main_window(&state, true, req);
+            assert_eq!((got.width, got.height), (req.width, req.height));
+            assert_eq!(got.style, req.style);
+            assert_eq!(got.ex_style, expected_ex);
+        }
+    }
+
+    #[test]
+    fn unset_size_fallback() {
+        let cfg = WindowCfg {
+            x: 0,
+            y: 0,
+            width: None,
+            height: NonZero::new(720),
+            frame: Some(WindowFrame::Borderless),
+            always_on_top: false,
+        };
+        let resolved = ResolvedWindowCfg::new(&cfg, (1280, 960), DisplayMode::Windowed);
+        assert_eq!((resolved.width, resolved.height), (1280, 720));
     }
 }
