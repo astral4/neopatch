@@ -54,9 +54,11 @@ refresh_rate = NativeMultiple
 ; Note: under [display] mode = Borderless, the game controls geometry and style,
 ; so x/y/width/height/frame are ignored, but always_on_top still applies.
 
-; Outer window position in screen coordinates. Default: 0, 0
-x = 0
-y = 0
+; Requested outer window position in screen coordinates.
+; When both are unset, the system and window manager selects the position.
+; When only one is set, the other defaults to 0. Default: unset
+; x = 0
+; y = 0
 
 ; Client-area size. Default: uses the [display] resolution
 ; width  = 1280

@@ -50,8 +50,10 @@ impl Default for DisplayCfg {
 // This configuration only applies to windowed-mode (non-popup) window creations since exclusive-fullscreen is managed by D3D.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct WindowCfg {
-    pub x: i32,
-    pub y: i32,
+    /// `x` and `y` indicate the requested outer window position.
+    /// `None` (both unset) leaves placement to the system and the window manager. Setting only one of the pair treats the other as `0`.
+    pub x: Option<i32>,
+    pub y: Option<i32>,
     pub width: Option<NonZero<u32>>,
     pub height: Option<NonZero<u32>>,
     pub frame: Option<WindowFrame>,
@@ -223,8 +225,8 @@ fn apply_display(cfg: &mut DisplayCfg, k: &str, v: &str) {
 
 fn apply_window(cfg: &mut WindowCfg, k: &str, v: &str) {
     match k.to_ascii_lowercase().as_str() {
-        "x" => cfg.x = parse_i32(v).unwrap_or(0),
-        "y" => cfg.y = parse_i32(v).unwrap_or(0),
+        "x" => cfg.x = parse_i32(v),
+        "y" => cfg.y = parse_i32(v),
         "width" => cfg.width = parse_nonzero_u32(v),
         "height" => cfg.height = parse_nonzero_u32(v),
         "frame" => cfg.frame = parse_window_frame(v),
@@ -482,8 +484,8 @@ pub(crate) fn write_manifest_common<W: Write + ?Sized>(
         "window={}x{} at ({},{}) frame={} always_on_top={}",
         fmt_opt(win.width.as_ref()),
         fmt_opt(win.height.as_ref()),
-        win.x,
-        win.y,
+        fmt_opt(win.x.as_ref()),
+        fmt_opt(win.y.as_ref()),
         fmt_opt(win.frame.as_ref()),
         win.always_on_top,
     )?;
@@ -691,8 +693,8 @@ mod tests {
         let cfg = CoreConfig::default();
         assert_eq!(cfg.display.mode, DisplayMode::Windowed);
         assert_eq!(cfg.display.refresh_rate, RefreshRateMode::NativeMultiple);
-        assert_eq!(cfg.window.x, 0);
-        assert_eq!(cfg.window.y, 0);
+        assert_eq!(cfg.window.x, None);
+        assert_eq!(cfg.window.y, None);
         assert_eq!(cfg.window.width, None);
         assert_eq!(cfg.window.height, None);
         assert_eq!(cfg.window.frame, None);

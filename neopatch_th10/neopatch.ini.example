@@ -41,9 +41,11 @@ refresh_rate = NativeMultiple
 
 
 [window]
-; Outer window position in screen coordinates. Default: 0, 0
-x = 0
-y = 0
+; Requested outer window position in screen coordinates.
+; When both are unset, the system and window manager selects the position.
+; When only one is set, the other defaults to 0. Default: unset
+; x = 0
+; y = 0
 
 ; Client-area size. Default: 640x480
 ; width  = 1280

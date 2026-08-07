@@ -12,6 +12,7 @@ All notable changes to neopatch will be documented in this file.
 ### Changed
 
 - The game window is now created directly in its final styled state instead of being restyled after creation.
+- `x` and `y` under the `[window]` configuration section are now unset by default, which lets the system and window manager place the game window instead of forcing it to the top-left corner.
 
 ### Fixed
 

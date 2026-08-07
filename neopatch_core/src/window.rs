@@ -9,9 +9,10 @@ use std::sync::OnceLock;
 use tracing::{info, warn};
 use windows_sys::Win32::Foundation::{HMODULE, HWND, RECT};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    AdjustWindowRectEx, DefWindowProcW, GWL_EXSTYLE, GWL_STYLE, GetWindowLongA, GetWindowRect,
-    HMENU, InternalGetWindowText, WINDOW_EX_STYLE, WINDOW_STYLE, WM_SETTEXT, WS_CAPTION,
-    WS_EX_TOPMOST, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_POPUP, WS_SYSMENU, WS_VISIBLE,
+    AdjustWindowRectEx, CW_USEDEFAULT, DefWindowProcW, GWL_EXSTYLE, GWL_STYLE, GetWindowLongA,
+    GetWindowRect, HMENU, InternalGetWindowText, WINDOW_EX_STYLE, WINDOW_STYLE, WM_SETTEXT,
+    WS_CAPTION, WS_EX_TOPMOST, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_POPUP, WS_SYSMENU,
+    WS_VISIBLE,
 };
 
 static STATE: OnceLock<State> = OnceLock::new();
@@ -67,8 +68,8 @@ iat_hook! {
 
 /// Installation-time resolution of `WindowCfg`.
 struct ResolvedWindowCfg {
-    x: i32,
-    y: i32,
+    /// The configured outer position, or `None` to leave placement to the system.
+    position: Option<(i32, i32)>,
     width: u32,
     height: u32,
     frame: WindowFrame,
@@ -78,8 +79,11 @@ struct ResolvedWindowCfg {
 impl ResolvedWindowCfg {
     fn new(cfg: &WindowCfg, framebuffer: (u32, u32), mode: DisplayMode) -> Self {
         Self {
-            x: cfg.x,
-            y: cfg.y,
+            // `CreateWindowEx` ignores `y` when `x` is `CW_USEDEFAULT`, so a half-specified position isn't sensible.
+            position: match (cfg.x, cfg.y) {
+                (None, None) => None,
+                (x, y) => Some((x.unwrap_or(0), y.unwrap_or(0))),
+            },
             width: cfg.width.map_or(framebuffer.0, NonZero::get),
             height: cfg.height.map_or(framebuffer.1, NonZero::get),
             frame: cfg.frame.unwrap_or(match mode {
@@ -259,7 +263,7 @@ fn prep_main_window(state: &State, is_main: bool, requested: CreationArgs) -> Cr
             };
             unsafe { AdjustWindowRectEx(&raw mut rc, style, 0, ex_style) };
 
-            let (x, y) = (restyle.x, restyle.y);
+            let (x, y) = restyle.position.unwrap_or((CW_USEDEFAULT, CW_USEDEFAULT));
             CreationArgs {
                 x,
                 y,
@@ -404,7 +408,7 @@ mod tests {
     use crate::config::{DisplayMode, WindowCfg, WindowFrame};
     use std::num::NonZero;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        WS_CAPTION, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
+        CW_USEDEFAULT, WS_CAPTION, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
     };
 
     #[test]
@@ -433,8 +437,7 @@ mod tests {
     fn restyle_state(frame: WindowFrame, always_on_top: bool) -> State {
         State::Restyle {
             restyle: ResolvedWindowCfg {
-                x: 100,
-                y: 120,
+                position: Some((100, 120)),
                 width: 640,
                 height: 480,
                 frame,
@@ -509,10 +512,51 @@ mod tests {
     }
 
     #[test]
+    fn unset_position() {
+        let state = State::Restyle {
+            restyle: ResolvedWindowCfg {
+                position: None,
+                width: 640,
+                height: 480,
+                frame: WindowFrame::Borderless,
+                always_on_top: false,
+            },
+        };
+        let got = prep_main_window(&state, true, requested(0x100a_0000));
+        assert_eq!((got.x, got.y), (CW_USEDEFAULT, CW_USEDEFAULT));
+        assert_eq!((got.width, got.height), (640, 480));
+    }
+
+    #[test]
+    fn position_pair() {
+        let base = WindowCfg {
+            x: None,
+            y: None,
+            width: None,
+            height: None,
+            frame: None,
+            always_on_top: false,
+        };
+        let resolve = |x, y| {
+            ResolvedWindowCfg::new(
+                &WindowCfg { x, y, ..base },
+                (640, 480),
+                DisplayMode::Windowed,
+            )
+            .position
+        };
+        assert_eq!(resolve(None, None), None);
+        assert_eq!(resolve(Some(10), Some(20)), Some((10, 20)));
+        assert_eq!(resolve(Some(10), None), Some((10, 0)));
+        assert_eq!(resolve(None, Some(20)), Some((0, 20)));
+        assert_eq!(resolve(Some(0), Some(0)), Some((0, 0)));
+    }
+
+    #[test]
     fn unset_size_fallback() {
         let cfg = WindowCfg {
-            x: 0,
-            y: 0,
+            x: None,
+            y: None,
             width: None,
             height: NonZero::new(720),
             frame: Some(WindowFrame::Borderless),
