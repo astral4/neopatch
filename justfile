@@ -1,6 +1,6 @@
 ship_toolchain := "nightly-2026-08-07"
 ship_build_std := "-Zbuild-std=std,panic_abort"
-ship_rustflags := "-Zunstable-options -Cpanic=immediate-abort"
+ship_rustflags := "-Zunstable-options -Cpanic=immediate-abort -Clink-arg=-Wl,--enable-stdcall-fixup"
 
 # 1 = run a copy of the game with the PE large-address-aware flag set
 laa := env("NEOPATCH_LAA", "0")

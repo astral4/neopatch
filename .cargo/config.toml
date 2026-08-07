@@ -6,6 +6,7 @@ panic-abort-tests = true
 
 [target.i686-pc-windows-gnu]
 runner = "wine"
+rustflags = ["-Clink-arg=-Wl,--enable-stdcall-fixup"]
 
 # Silence noise from the Wine runner used by `cargo test --target i686-pc-windows-gnu`.
 [env]
