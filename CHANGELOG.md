@@ -4,6 +4,10 @@ All notable changes to neopatch will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- Support for Touhou 9.5 ~ Shoot the Bullet (`th095.exe v1.02a`).
+
 ## [0.11.0] - 2026-08-07
 
 ### Added

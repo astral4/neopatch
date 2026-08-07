@@ -65,7 +65,7 @@ release:
     set -euo pipefail
     out="target/release-packages"
     rm -rf "${out}/neopatch" "${out}/neopatch.zip"
-    for game in th06 th07 th08 th10 th11 th12 th128 th13 th14 th15 th16 th17 th18 th20; do
+    for game in th06 th07 th08 th095 th10 th11 th12 th128 th13 th14 th15 th16 th17 th18 th20; do
         name="neopatch_${game}"
         RUSTFLAGS="{{ship_rustflags}}" cargo +{{ship_toolchain}} build -p "${name}" --release {{ship_build_std}}
         mkdir -p "${out}/neopatch/${game}"

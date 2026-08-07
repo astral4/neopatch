@@ -104,6 +104,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "neopatch_th095"
+version = "0.11.0"
+dependencies = [
+ "neopatch_core",
+ "tracing",
+ "windows-sys",
+]
+
+[[package]]
 name = "neopatch_th10"
 version = "0.11.0"
 dependencies = [
