@@ -1750,6 +1750,12 @@ unsafe extern "system" fn device8_copy_rects(
             kind = "d3d8_copy_rects_format_mismatch",
             src = format_name(sd.Format),
             dst = format_name(dd.Format),
+            src_size = format_args!("{}x{}", sd.Width, sd.Height),
+            dst_size = format_args!("{}x{}", dd.Width, dd.Height),
+            src_pool = sd.Pool.0,
+            dst_pool = dd.Pool.0,
+            src_usage = format_args!("{:#x}", sd.Usage),
+            dst_usage = format_args!("{:#x}", dd.Usage),
         );
         return D3DERR_INVALIDCALL;
     }
