@@ -4,6 +4,7 @@ use crate::config::{DisplayMode, WindowCfg, WindowFrame};
 use crate::iat_hook;
 use crate::untrusted::Untrusted;
 use std::ffi::c_void;
+use std::mem::zeroed;
 use std::num::NonZero;
 use std::ptr::null_mut;
 use std::sync::OnceLock;
@@ -12,9 +13,9 @@ use tracing::{info, warn};
 use windows_sys::Win32::Foundation::{HMODULE, HWND, RECT};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AdjustWindowRectEx, CW_USEDEFAULT, DefWindowProcW, GWL_EXSTYLE, GWL_STYLE, GetWindowLongA,
-    GetWindowRect, HMENU, InternalGetWindowText, WINDOW_EX_STYLE, WINDOW_STYLE, WM_SETTEXT,
-    WS_CAPTION, WS_EX_TOPMOST, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_POPUP, WS_SYSMENU,
-    WS_VISIBLE,
+    GetWindowRect, HMENU, InternalGetWindowText, PM_NOREMOVE, PeekMessageA, WINDOW_EX_STYLE,
+    WINDOW_STYLE, WM_SETTEXT, WS_CAPTION, WS_EX_TOPMOST, WS_MAXIMIZEBOX, WS_MINIMIZEBOX,
+    WS_OVERLAPPED, WS_POPUP, WS_SYSMENU, WS_VISIBLE,
 };
 
 static STATE: OnceLock<State> = OnceLock::new();
@@ -320,6 +321,13 @@ fn finish_main_window(hwnd: HWND, is_main: bool, build_title: impl FnOnce() -> V
     let title = build_title();
     unsafe { set_window_text_lossless(hwnd, &title) };
     log_created_style(hwnd);
+}
+
+/// Lets the window system finish realizing the game's window.
+pub(crate) fn service_pending_events() {
+    let mut msg = unsafe { zeroed() };
+    let pending = unsafe { PeekMessageA(&raw mut msg, null_mut(), 0, 0, PM_NOREMOVE) } != 0;
+    info!(kind = "window_events_serviced", pending);
 }
 
 /// Logs what `CreateWindowEx*` actually produced.

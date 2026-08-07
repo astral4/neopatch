@@ -27,6 +27,7 @@ use crate::session::{
 };
 use crate::thread::{MainCell, MainToken};
 use crate::vtable::{capture_slot, install_vtable, vtable_field, vtable_slot};
+use crate::window::service_pending_events;
 use crate::{fmt_hr, iat_hook, match_named};
 use std::cmp::min;
 use std::ffi::c_void;
@@ -1161,6 +1162,8 @@ unsafe extern "system" fn hook_create_device(
             install_device_hooks(dev);
             post_device_alive(&tok, dev, attempt.as_ref());
         }
+
+        service_pending_events();
 
         if let Some(before) = ctx.snapshot.desktop_mode {
             unsafe { warn_if_exclusive_degraded(adapter, before, attempt.as_ref()) };
