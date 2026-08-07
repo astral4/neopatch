@@ -1,6 +1,6 @@
-//! Rust's precompiled standard library for `i686-pc-windows-gnu` contains the DWARF/SEH unwind symbol `_Unwind_Resume`.
+//! Rust's precompiled standard library for `i686-pc-windows-gnu` references the DWARF/SEH unwind symbol `_Unwind_Resume`.
 //! If your build host's mingw-w64 toolchain uses SJLJ exceptions (e.g. Homebrew mingw on macOS),
-//! specify `NEOPATCH_UNWIND_RESUME_STUB=1` so the build links. Tests should run as `cargo +nightly test -Zpanic-abort-tests`.
+//! specify `NEOPATCH_UNWIND_RESUME_STUB=1` so the build links.
 
 use std::env::var;
 
