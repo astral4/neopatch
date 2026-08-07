@@ -17,6 +17,7 @@ All notable changes to neopatch will be documented in this file.
 ### Fixed
 
 - Touhou 10 through Touhou 18 now select the game's intended Japanese font and show dialog text without mojibake on non-Japanese system locales.
+- Ctrl-C signals are now handled properly and trigger graceful termination instead of writing crash minidumps.
 
 ## [0.10.0] - 2026-07-30
 

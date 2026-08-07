@@ -9,6 +9,7 @@ compile_error!("neopatch is x86-only");
 
 pub mod ansi;
 pub mod config;
+pub mod console;
 pub mod crash;
 pub mod d3d8;
 pub mod d3d9;

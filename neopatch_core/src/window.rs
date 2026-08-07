@@ -5,7 +5,9 @@ use crate::iat_hook;
 use crate::untrusted::Untrusted;
 use std::ffi::c_void;
 use std::num::NonZero;
+use std::ptr::null_mut;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicPtr, Ordering};
 use tracing::{info, warn};
 use windows_sys::Win32::Foundation::{HMODULE, HWND, RECT};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -16,6 +18,12 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 
 static STATE: OnceLock<State> = OnceLock::new();
+static MAIN_HWND: AtomicPtr<c_void> = AtomicPtr::new(null_mut());
+
+/// Returns the game's main render window, or null before the first creation.
+pub(crate) fn main_hwnd() -> HWND {
+    MAIN_HWND.load(Ordering::Acquire)
+}
 
 /// Determines what [`install`] does with the game's render window.
 #[derive(Clone, Copy)]
@@ -306,6 +314,8 @@ fn finish_main_window(hwnd: HWND, is_main: bool, build_title: impl FnOnce() -> V
         warn!(kind = "main_window_create_failed");
         return;
     }
+
+    MAIN_HWND.store(hwnd, Ordering::Release);
 
     let title = build_title();
     unsafe { set_window_text_lossless(hwnd, &title) };
