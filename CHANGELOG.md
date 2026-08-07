@@ -7,6 +7,7 @@ All notable changes to neopatch will be documented in this file.
 ### Added
 
 - Support for Touhou 9.5 ~ Shoot the Bullet (`th095.exe v1.02a`).
+- Support for Touhou 12.5 ~ Double Spoiler (`th125.exe v1.00a`).
 
 ## [0.11.0] - 2026-08-07
 
