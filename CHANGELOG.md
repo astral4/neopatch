@@ -4,6 +4,8 @@ All notable changes to neopatch will be documented in this file.
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-08-07
+
 ### Added
 
 - Support for Touhou 7 ~ Perfect Cherry Blossom (`th07.exe v1.00b`).
