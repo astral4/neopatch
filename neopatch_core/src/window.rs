@@ -1,5 +1,6 @@
 //! Window setup and hooking.
 
+use crate::ansi::{CP_SHIFT_JIS, to_wide};
 use crate::config::{DisplayMode, WindowCfg, WindowFrame};
 use crate::iat_hook;
 use crate::untrusted::Untrusted;
@@ -374,8 +375,7 @@ unsafe fn set_window_text_lossless(hwnd: HWND, title: &[u16]) {
             title.as_ptr().expose_provenance().cast_signed(),
         );
     }
-    // `InternalGetWindowText` reads the internal Unicode buffer directly — the same source the
-    // title bar and taskbar render from — bypassing the lossy `WM_GETTEXT` ANSI thunk.
+    // `InternalGetWindowText` reads the internal Unicode buffer directly, bypassing the lossy `WM_GETTEXT` ANSI thunk.
     let mut stored = [0u16; 128];
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let n = unsafe { InternalGetWindowText(hwnd, stored.as_mut_ptr(), stored.len() as i32) };
@@ -393,11 +393,7 @@ fn build_extended_title_from_sjis(original: Untrusted<u8>) -> Vec<u16> {
 
     let mut buf = [0u8; BUF_LEN];
     let sjis = original.safe_read_until(&mut buf, 0);
-
-    // Lenient conversion, like the system thunk would be: an empty or unconvertible title
-    // degrades to just the suffix.
-    let mut wide = crate::ansi::to_wide(crate::ansi::CP_SHIFT_JIS, sjis, false).unwrap_or_default();
-    // Drop `to_wide`'s NUL terminator; `append_suffix` re-terminates after the suffix.
+    let mut wide = to_wide(CP_SHIFT_JIS, sjis, false).unwrap_or_default();
     wide.pop();
     append_suffix(&mut wide);
     wide
