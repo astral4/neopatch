@@ -17,9 +17,9 @@
 
 use crate::config::{CONFIG, RefreshRateMode};
 use crate::log::log_at;
-use crate::pacer::PACER;
+use crate::pacer::{PACER, Pacer, PacingPolicy};
 use crate::patches::PatchSite;
-use crate::replay::policy_change;
+use crate::replay::{ReplayMode, policy_change};
 use crate::screenshot::{on_device_creating, on_pre_present, on_pre_reset};
 use crate::session::{
     device_creating, gate_d3d9, gate_device, is_game_d3d9, is_game_device, record_d3d9,
@@ -1413,13 +1413,7 @@ unsafe extern "system" fn hook_present(
 
     if let Some(pacer) = PACER.get() {
         if let Some((mode, policy)) = policy_change(&tok) {
-            info!(
-                kind = "replay_mode_change",
-                mode = ?mode,
-                target_fps = policy.target_fps(),
-                frame = PRESENT_COUNT.load(Ordering::Relaxed),
-            );
-            pacer.apply_policy(&tok, policy);
+            apply_policy_change(&tok, pacer, mode, policy);
         }
         pacer.wait(&tok);
     }
@@ -1436,13 +1430,32 @@ unsafe extern "system" fn hook_present(
     hr
 }
 
+/// Logs and applies a replay-mode transition.
+#[cold]
+#[inline(never)]
+fn apply_policy_change(tok: &MainToken, pacer: &Pacer, mode: ReplayMode, policy: PacingPolicy) {
+    info!(
+        kind = "replay_mode_change",
+        mode = ?mode,
+        target_fps = policy.target_fps(),
+        frame = PRESENT_COUNT.load(Ordering::Relaxed),
+    );
+    pacer.apply_policy(tok, policy);
+}
+
 /// Emits a log event whenever the result of `Present` differs from the previous call's result.
 fn log_present_outcome(tok: &MainToken, hr: HRESULT) {
     let prev = LAST_PRESENT.get(tok);
     if hr == prev.hr {
         return;
     }
+    log_present_changed(tok, hr, prev);
+}
 
+/// Records and logs a changed `Present` result.
+#[cold]
+#[inline(never)]
+fn log_present_changed(tok: &MainToken, hr: HRESULT, prev: PresentState) {
     let frame = PRESENT_COUNT.load(Ordering::Relaxed);
 
     log_at!(hr.is_ok() => info / warn,
