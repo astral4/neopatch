@@ -73,16 +73,12 @@ where
 
     _ = START.set(Instant::now());
 
-    let (log_root, decisions) = pick_log_root(install_dir, core_cfg.log.log_dir.as_deref());
-    let Some(log_root) = log_root else {
+    let session_id = make_session_id();
+    let (claimed, decisions) =
+        claim_log_root(install_dir, core_cfg.log.log_dir.as_deref(), &session_id);
+    let Some((log_root, session_dir)) = claimed else {
         return false;
     };
-
-    let session_id = make_session_id();
-    let session_dir = log_root.join(&session_id);
-    if create_dir_all(&session_dir).is_err() {
-        return false;
-    }
 
     apply_retention(&log_root, core_cfg.log.sessions_to_keep, &session_id);
 
@@ -192,41 +188,59 @@ struct LogRootDecision {
     outcome: LogRootOutcome,
 }
 
-/// Picks a writable log root and returns the trace of candidates considered.
-fn pick_log_root(
+/// Selects the log root by claiming `<root>/<session_id>/` at each candidate in turn.
+/// Returns the chosen `(root, session_dir)` and the trace of candidates considered.
+fn claim_log_root(
     install_dir: &Path,
     override_dir: Option<&Path>,
-) -> (Option<PathBuf>, Vec<LogRootDecision>) {
+    session_id: &str,
+) -> (Option<(PathBuf, PathBuf)>, Vec<LogRootDecision>) {
     let mut trace = Vec::new();
-    if let Some(dir) = override_dir {
-        if create_dir_all(dir).is_ok() {
-            trace.push(LogRootDecision {
-                path: dir.to_path_buf(),
-                outcome: LogRootOutcome::ChosenOverride,
-            });
-            return (Some(dir.to_path_buf()), trace);
-        }
-        trace.push(LogRootDecision {
-            path: dir.to_path_buf(),
-            outcome: LogRootOutcome::OverrideCreateFailed,
-        });
-    }
-    for candidate in [
-        install_dir.join("neopatch_logs"),
-        appdata_subdir("LOCALAPPDATA"),
-        appdata_subdir("TEMP"),
-    ] {
+
+    let candidates = override_dir
+        .map(Path::to_path_buf)
+        .into_iter()
+        .map(|p| (p, true))
+        .chain(
+            [
+                install_dir.join("neopatch_logs"),
+                appdata_subdir("LOCALAPPDATA"),
+                appdata_subdir("TEMP"),
+            ]
+            .into_iter()
+            .map(|p| (p, false)),
+        );
+
+    for (root, is_override) in candidates {
         // An empty path means the source env var is unset, so we skip it.
-        if candidate.as_os_str().is_empty() {
+        if root.as_os_str().is_empty() {
             continue;
         }
-        let outcome = try_use_dir(&candidate);
-        trace.push(LogRootDecision {
-            path: candidate.clone(),
-            outcome,
-        });
-        if matches!(outcome, LogRootOutcome::Chosen) {
-            return (Some(candidate), trace);
+
+        match claim_session_dir(&root, session_id) {
+            Ok(session_dir) => {
+                let outcome = if is_override {
+                    LogRootOutcome::ChosenOverride
+                } else {
+                    LogRootOutcome::Chosen
+                };
+                trace.push(LogRootDecision {
+                    path: root.clone(),
+                    outcome,
+                });
+                return (Some((root, session_dir)), trace);
+            }
+            Err(outcome) => {
+                let outcome = if is_override && matches!(outcome, LogRootOutcome::CreateFailed) {
+                    LogRootOutcome::OverrideCreateFailed
+                } else {
+                    outcome
+                };
+                trace.push(LogRootDecision {
+                    path: root,
+                    outcome,
+                });
+            }
         }
     }
     (None, trace)
@@ -237,24 +251,26 @@ fn appdata_subdir(env_var: &str) -> PathBuf {
     var_os(env_var).map_or_else(PathBuf::new, |s| PathBuf::from(s).join("neopatch_logs"))
 }
 
-/// Creates `dir` and verifies it is actually located where the path says.
-fn try_use_dir(dir: &Path) -> LogRootOutcome {
-    if create_dir_all(dir).is_err() {
-        return LogRootOutcome::CreateFailed;
+/// Creates `<root>/<session_id>/` and verifies it is actually located where the path says.
+/// On rejection, the empty session directory is cleaned up, though a root created on the way is left behind.
+fn claim_session_dir(root: &Path, session_id: &str) -> Result<PathBuf, LogRootOutcome> {
+    let session_dir = root.join(session_id);
+    if create_dir_all(&session_dir).is_err() {
+        return Err(LogRootOutcome::CreateFailed);
     }
-    let Ok(canonical) = canonicalize(dir) else {
+    let Ok(canonical) = canonicalize(&session_dir) else {
         // `remove_dir` only removes empty directories, so the cleanup is safe even if another process has already populated the leaf.
-        drop(remove_dir(dir));
-        return LogRootOutcome::CanonicalizeFailed;
+        drop(remove_dir(&session_dir));
+        return Err(LogRootOutcome::CanonicalizeFailed);
     };
     if canonical
         .components()
         .any(|c| c.as_os_str().eq_ignore_ascii_case("VirtualStore"))
     {
-        drop(remove_dir(dir));
-        return LogRootOutcome::VirtualStoreRedirected;
+        drop(remove_dir(&session_dir));
+        return Err(LogRootOutcome::VirtualStoreRedirected);
     }
-    LogRootOutcome::Chosen
+    Ok(session_dir)
 }
 
 fn make_session_id() -> String {
