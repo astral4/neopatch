@@ -34,7 +34,7 @@ use std::ffi::c_void;
 use std::ptr::{NonNull, null, null_mut};
 use std::sync::atomic::{AtomicU32, Ordering};
 use tracing::{error, info, warn};
-use windows::Win32::Foundation::{HANDLE, HWND, RECT};
+use windows::Win32::Foundation::{HANDLE, HWND, RECT, S_OK};
 use windows::Win32::Graphics::Direct3D9::{
     D3DCREATE_MULTITHREADED, D3DDEVICE_CREATION_PARAMETERS, D3DDEVTYPE, D3DDISPLAYMODEEX,
     D3DDISPLAYMODEFILTER, D3DDISPLAYROTATION, D3DFMT_A1R5G5B5, D3DFMT_A2B10G10R10,
@@ -45,11 +45,11 @@ use windows::Win32::Graphics::Direct3D9::{
     D3DFMT_X4R4G4B4, D3DFMT_X8B8G8R8, D3DFMT_X8R8G8B8, D3DFORMAT, D3DPOOL, D3DPOOL_DEFAULT,
     D3DPOOL_MANAGED, D3DPRESENT_INTERVAL_IMMEDIATE, D3DPRESENT_PARAMETERS,
     D3DPRESENTFLAG_LOCKABLE_BACKBUFFER, D3DRESOURCETYPE, D3DSCANLINEORDERING_PROGRESSIVE,
-    D3DUSAGE_DYNAMIC, Direct3DCreate9Ex, IDirect3D9, IDirect3D9Ex_Vtbl, IDirect3DDevice9Ex,
-    IDirect3DDevice9Ex_Vtbl,
+    D3DUSAGE_DYNAMIC, Direct3DCreate9Ex, IDirect3D9, IDirect3D9Ex, IDirect3D9Ex_Vtbl,
+    IDirect3DDevice9Ex, IDirect3DDevice9Ex_Vtbl,
 };
-use windows::Win32::Graphics::Gdi::{HMONITOR, RGNDATA};
-use windows::core::{HRESULT, Interface};
+use windows::Win32::Graphics::Gdi::RGNDATA;
+use windows::core::{HRESULT, Interface, InterfaceRef};
 use windows_sys::Win32::Foundation::HMODULE;
 use windows_sys::Win32::Graphics::Gdi::{
     DEVMODEW, ENUM_CURRENT_SETTINGS, EnumDisplaySettingsExW, GetMonitorInfoW, MONITORINFO,
@@ -112,28 +112,6 @@ vtable_slot! {
         ) -> HRESULT;
 }
 vtable_slot! {
-    REAL_GET_ADAPTER_MODE_COUNT_EX / call_real_get_adapter_mode_count_ex :
-        as fn(
-            this: *mut c_void,
-            adapter: u32,
-            filter: *const D3DDISPLAYMODEFILTER,
-        ) -> u32;
-}
-vtable_slot! {
-    REAL_ENUM_ADAPTER_MODES_EX / call_real_enum_adapter_modes_ex :
-        as fn(
-            this: *mut c_void,
-            adapter: u32,
-            filter: *const D3DDISPLAYMODEFILTER,
-            mode_index: u32,
-            mode: *mut D3DDISPLAYMODEEX,
-        ) -> HRESULT;
-}
-vtable_slot! {
-    REAL_GET_ADAPTER_MONITOR / call_real_get_adapter_monitor :
-        as fn(this: *mut c_void, adapter: u32) -> HMONITOR;
-}
-vtable_slot! {
     REAL_CREATE_DEVICE / call_real_create_device :
         as fn(
             this: *mut c_void,
@@ -164,14 +142,6 @@ vtable_slot! {
             pp: *mut D3DPRESENT_PARAMETERS,
             mode_ex: *mut D3DDISPLAYMODEEX,
         ) -> HRESULT;
-}
-vtable_slot! {
-    REAL_SET_MAX_FRAME_LATENCY / call_real_set_max_frame_latency :
-        as fn(this: *mut c_void, max_latency: u32) -> HRESULT;
-}
-vtable_slot! {
-    REAL_SET_GPU_THREAD_PRIORITY / call_real_set_gpu_thread_priority :
-        as fn(this: *mut c_void, priority: i32) -> HRESULT;
 }
 vtable_slot! {
     REAL_RESET / call_real_reset :
@@ -336,21 +306,6 @@ unsafe fn install_d3d9_hooks(d3d9_ex: NonNull<c_void>) {
             vtbl,
             vtable_field!(IDirect3D9Ex_Vtbl, GetAdapterDisplayModeEx),
             &REAL_GET_ADAPTER_DISPLAY_MODE_EX,
-        );
-        capture_slot(
-            vtbl,
-            vtable_field!(IDirect3D9Ex_Vtbl, GetAdapterModeCountEx),
-            &REAL_GET_ADAPTER_MODE_COUNT_EX,
-        );
-        capture_slot(
-            vtbl,
-            vtable_field!(IDirect3D9Ex_Vtbl, EnumAdapterModesEx),
-            &REAL_ENUM_ADAPTER_MODES_EX,
-        );
-        capture_slot(
-            vtbl,
-            vtable_field!(IDirect3D9Ex_Vtbl, base__.GetAdapterMonitor),
-            &REAL_GET_ADAPTER_MONITOR,
         );
     }
 
@@ -768,10 +723,8 @@ unsafe fn enumerate_supported_rates(
     let mut rates = [0u32; MAX_ENUM_RATES];
     let mut len = 0usize;
 
-    let (Some(count_fn), Some(enum_fn)) = (
-        REAL_GET_ADAPTER_MODE_COUNT_EX.try_get(),
-        REAL_ENUM_ADAPTER_MODES_EX.try_get(),
-    ) else {
+    let this = adapter.raw();
+    let Some(ex) = (unsafe { IDirect3D9Ex::from_raw_borrowed(&this) }) else {
         return (rates, 0);
     };
 
@@ -781,7 +734,7 @@ unsafe fn enumerate_supported_rates(
         ScanLineOrdering: D3DSCANLINEORDERING_PROGRESSIVE,
     };
 
-    let count = unsafe { count_fn(adapter.raw(), adapter.ordinal, &raw const filter) };
+    let count = unsafe { ex.GetAdapterModeCountEx(adapter.ordinal, &raw const filter) };
     if count > MAX_ENUM_SCAN {
         warn!(kind = "mode_enum_truncated", count, max = MAX_ENUM_SCAN);
     }
@@ -794,19 +747,13 @@ unsafe fn enumerate_supported_rates(
             );
             break;
         }
+
         let mut mode = D3DDISPLAYMODEEX {
             Size: D3DDISPLAYMODEEX_SIZE,
             ..D3DDISPLAYMODEEX::default()
         };
-        let hr = unsafe {
-            enum_fn(
-                adapter.raw(),
-                adapter.ordinal,
-                &raw const filter,
-                i,
-                &raw mut mode,
-            )
-        };
+        let hr =
+            unsafe { ex.EnumAdapterModesEx(adapter.ordinal, &raw const filter, i, &raw mut mode) };
         if hr.is_ok()
             && mode.Width == width
             && mode.Height == height
@@ -904,8 +851,7 @@ fn is_same_reported_rate(a: u32, b: u32) -> bool {
 
 /// Resolves the GDI device name of `adapter`'s monitor for Win32 display queries.
 unsafe fn adapter_display_device(adapter: Adapter<'_>) -> Option<[u16; 32]> {
-    let monitor_fn = REAL_GET_ADAPTER_MONITOR.try_get()?;
-    let monitor = unsafe { monitor_fn(adapter.raw(), adapter.ordinal) };
+    let monitor = unsafe { adapter.d3d9.GetAdapterMonitor(adapter.ordinal) };
     if monitor.is_invalid() {
         return None;
     }
@@ -1318,16 +1264,6 @@ unsafe fn install_device_hooks(dev: NonNull<c_void>) {
             vtable_field!(IDirect3DDevice9Ex_Vtbl, ResetEx),
             &REAL_RESET_EX,
         );
-        capture_slot(
-            vtbl,
-            vtable_field!(IDirect3DDevice9Ex_Vtbl, SetMaximumFrameLatency),
-            &REAL_SET_MAX_FRAME_LATENCY,
-        );
-        capture_slot(
-            vtbl,
-            vtable_field!(IDirect3DDevice9Ex_Vtbl, SetGPUThreadPriority),
-            &REAL_SET_GPU_THREAD_PRIORITY,
-        );
     }
 
     let result = unsafe {
@@ -1364,17 +1300,17 @@ unsafe fn install_device_hooks(dev: NonNull<c_void>) {
     );
 }
 
-/// `SetMaximumFrameLatency(1)` caps the GPU input queue at 1 (default 3) so frames spend less time enqueued before display,
-/// shaving up to two frames of end-to-end latency. `SetGPUThreadPriority(7)` raises the device's WDDM GPU-scheduling priority
-/// so its command submissions are preferred over other processes' GPU work.
-unsafe fn apply_device_ex_tunables(dev: NonNull<c_void>) {
-    let latency_hr = unsafe { call_real_set_max_frame_latency(dev.as_ptr(), 1) };
+unsafe fn apply_device_ex_tunables(dev: InterfaceRef<'_, IDirect3DDevice9Ex>) {
+    // Caps the GPU input queue at 1 (default 3) so frames spend less time enqueued before display,
+    // shaving up to two frames of end-to-end latency.
+    let latency_hr = unsafe { dev.SetMaximumFrameLatency(1) }.map_or_else(|e| e.code(), |()| S_OK);
     info!(
         kind = "set_max_frame_latency",
         value = 1,
         hr = %fmt_hr!(latency_hr),
     );
-    let gpu_pri_hr = unsafe { call_real_set_gpu_thread_priority(dev.as_ptr(), 7) };
+    // Raises the device's WDDM GPU-scheduling priority so its command submissions are preferred over other processes' GPU work.
+    let gpu_pri_hr = unsafe { dev.SetGPUThreadPriority(7) }.map_or_else(|e| e.code(), |()| S_OK);
     info!(
         kind = "set_gpu_thread_priority",
         value = 7,
@@ -1383,9 +1319,13 @@ unsafe fn apply_device_ex_tunables(dev: NonNull<c_void>) {
 }
 
 /// Re-applies the device tunables, since D3D9Ex preserves them across `Reset` but a translation layer might not.
-/// Also records (and pins) the device as the session's. Fires after successful `CreateDeviceEx` and successful `Reset` / `ResetEx`.
+/// Also records and pins the device as the session's. Fires after successful `CreateDeviceEx` and successful `Reset` / `ResetEx`.
+///
+/// # Safety
+/// `dev` must be a live `IDirect3DDevice9Ex`.
 unsafe fn post_device_alive(tok: &MainToken, dev: NonNull<c_void>, attempt: Option<&Attempt>) {
-    unsafe { apply_device_ex_tunables(dev) };
+    // SAFETY: The device is live for this call and the borrow does not outlive it.
+    unsafe { apply_device_ex_tunables(InterfaceRef::from_raw(dev)) };
     // SAFETY: `dev` is the live device the successful call just created or reset.
     unsafe { record_device(tok, dev) };
     record_back_buffer_format(attempt);
