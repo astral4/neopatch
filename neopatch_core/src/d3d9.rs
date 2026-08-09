@@ -73,7 +73,8 @@ const D3DERR_DEVICEREMOVED: HRESULT = HRESULT(0x8876_0870_u32.cast_signed());
 const D3DERR_DEVICEHUNG: HRESULT = HRESULT(0x8876_0874_u32.cast_signed());
 const D3DERR_OUTOFVIDEOMEMORY: HRESULT = HRESULT(0x8876_017c_u32.cast_signed());
 
-static PRESENT_COUNT: AtomicU32 = AtomicU32::new(0);
+/// Frames presented this session.
+static PRESENT_COUNT: MainCell<u32> = MainCell::new(0);
 
 /// The most recent `Present` result and the frame at which it began.
 #[derive(Clone, Copy)]
@@ -480,10 +481,10 @@ impl AdapterSnapshot {
             desktop_rate,
             ..Self::empty()
         };
-        let windowed = req.Windowed.0 != 0;
+        // Only fullscreen requests reach this point, since the windowed case returned above.
         let first = format_plan(
             req.BackBufferFormat,
-            windowed,
+            false,
             policy.upgrade_16bit_back_buffer,
         );
         snap.rates[0] = (first.format, unsafe {
@@ -497,7 +498,7 @@ impl AdapterSnapshot {
         snap.rates_len = 1;
 
         if !policy.upgrade_16bit_back_buffer {
-            let escalated = format_plan(req.BackBufferFormat, windowed, true);
+            let escalated = format_plan(req.BackBufferFormat, false, true);
             if escalated.format != first.format {
                 snap.rates[1] = (escalated.format, unsafe {
                     enumerate_supported_rates(
@@ -1357,7 +1358,7 @@ unsafe extern "system" fn hook_present(
 
     // We increment before `Present` so `PRESENT_COUNT` uses the in-flight frame.
     // This way, a crash inside `Present` leaves the count at the attempted frame, not the last completed.
-    PRESENT_COUNT.fetch_add(1, Ordering::Relaxed);
+    PRESENT_COUNT.set(&tok, PRESENT_COUNT.get(&tok).wrapping_add(1));
 
     let hr =
         unsafe { call_real_present(this, src_rect, dst_rect, dest_window_override, dirty_region) };
@@ -1373,7 +1374,7 @@ fn apply_policy_change(tok: &MainToken, pacer: &Pacer, mode: ReplayMode, policy:
         kind = "replay_mode_change",
         mode = ?mode,
         target_fps = policy.target_fps(),
-        frame = PRESENT_COUNT.load(Ordering::Relaxed),
+        frame = PRESENT_COUNT.get(tok),
     );
     pacer.apply_policy(tok, policy);
 }
@@ -1391,7 +1392,7 @@ fn log_present_outcome(tok: &MainToken, hr: HRESULT) {
 #[cold]
 #[inline(never)]
 fn log_present_changed(tok: &MainToken, hr: HRESULT, prev: PresentState) {
-    let frame = PRESENT_COUNT.load(Ordering::Relaxed);
+    let frame = PRESENT_COUNT.get(tok);
 
     log_at!(hr.is_ok() => info / warn,
         kind = "present_result_changed",
