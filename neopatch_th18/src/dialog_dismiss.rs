@@ -1,6 +1,6 @@
 //! Logic for auto-dismissing th18's startup dialog.
 
-use crate::config::CONFIG;
+use crate::CONFIG;
 use neopatch_core::game_addr::GameAddr;
 use neopatch_core::patches::PatchSite;
 use tracing::info;

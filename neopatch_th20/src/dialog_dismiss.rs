@@ -1,7 +1,7 @@
 //! Auto-dismiss th20's startup dialog.
 
+use crate::CONFIG;
 use crate::aslr::{current_slide, rebased_addr};
-use crate::config::CONFIG;
 use neopatch_core::patches::PatchSite;
 use tracing::info;
 

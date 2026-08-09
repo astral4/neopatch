@@ -4,16 +4,14 @@
 compile_error!("neopatch_th20 requires `panic = \"abort\"`");
 
 mod aslr;
-mod config;
 mod dialog_dismiss;
 mod patches;
 mod state;
 
 use crate::aslr::{PREFERRED_IMAGE_BASE, host_slide};
-use crate::config::{CONFIG, Th20Config, Th20DisplayMode, parse_config, write_manifest_extras};
 use crate::dialog_dismiss::sites as dialog_sites;
 use crate::patches::sites;
-use neopatch_core::config::{CONFIG as CORE_CONFIG, CoreConfig, decode_text};
+use neopatch_core::config::{CONFIG as CORE_CONFIG, ResolutionConfigExt, read_ini_text};
 use neopatch_core::pacer::{PACER, Pacer, PacingPolicy};
 use neopatch_core::patches::install_all;
 use neopatch_core::{
@@ -22,15 +20,18 @@ use neopatch_core::{
 };
 use std::env::current_exe;
 use std::ffi::c_void;
-use std::fs::read;
 use std::path::{Path, PathBuf};
 use std::ptr::null;
+use std::sync::OnceLock;
 use tracing::info;
 use windows_sys::Win32::Foundation::{HINSTANCE, HMODULE};
 use windows_sys::Win32::System::LibraryLoader::{DisableThreadLibraryCalls, GetModuleHandleW};
 use windows_sys::Win32::System::SystemServices::DLL_PROCESS_ATTACH;
 
 dinput8_export!();
+
+/// Process-wide handle to the game-specific configuration.
+pub(crate) static CONFIG: OnceLock<ResolutionConfigExt> = OnceLock::new();
 
 #[unsafe(no_mangle)]
 unsafe extern "system" fn DllMain(hinst: HINSTANCE, reason: u32, _reserved: *mut c_void) -> i32 {
@@ -47,20 +48,13 @@ unsafe fn install_hooks() {
     let host_exe_path = current_exe().ok();
     let exe_dir = host_exe_path.as_deref().and_then(Path::parent);
 
-    let (th20_cfg, core_cfg) = exe_dir
-        .and_then(|d| read(d.join("neopatch.ini")).ok())
-        .map_or_else(
-            || (Th20Config::default(), CoreConfig::default()),
-            |b| parse_config(&decode_text(&b)),
-        );
-    drop(CORE_CONFIG.set(core_cfg));
-    drop(CONFIG.set(th20_cfg));
-    let core_cfg = CORE_CONFIG.get().unwrap();
-    let th20_cfg = CONFIG.get().unwrap();
+    let (game_cfg, core_cfg) = ResolutionConfigExt::parse(&read_ini_text(exe_dir));
+    let core_cfg = CORE_CONFIG.get_or_init(|| core_cfg);
+    let game_cfg = CONFIG.get_or_init(|| game_cfg);
 
     let install_dir = exe_dir.map_or_else(|| PathBuf::from("."), Path::to_path_buf);
     log::init(&install_dir, core_cfg, host_exe_path.as_deref(), |w| {
-        write_manifest_extras(w, th20_cfg)
+        game_cfg.write_manifest_extras(w)
     });
 
     let host_exe = unsafe { GetModuleHandleW(null()) };
@@ -87,15 +81,7 @@ unsafe fn install_hooks() {
         window::install(
             host_exe,
             &core_cfg.window,
-            match th20_cfg.display_mode {
-                Th20DisplayMode::Borderless => window::WindowPolicy::DeferToGame,
-                Th20DisplayMode::Windowed | Th20DisplayMode::Fullscreen => {
-                    window::WindowPolicy::Restyle {
-                        framebuffer: th20_cfg.resolution.dimensions(),
-                        display_mode: core_cfg.display.mode,
-                    }
-                }
-            },
+            game_cfg.window_policy(),
             window::WindowApi::Wide,
         );
         exit_hooks::install(host_exe);

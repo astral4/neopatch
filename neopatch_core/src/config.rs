@@ -1,13 +1,11 @@
 //! Shared configuration schema and INI parsing helpers.
-//!
-//! [`CoreConfig`] represents the game-agnostic settings. Each per-game crate defines its own config struct
-//! for game-specific fields (e.g. `Resolution`) and parses it alongside `CoreConfig`.
 
 use std::borrow::Cow;
 use std::fmt::{Display, Formatter, Result as FmtResult};
+use std::fs::read;
 use std::io::{Result as IoResult, Write};
 use std::num::NonZero;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use tracing::level_filters::LevelFilter;
 
@@ -311,10 +309,7 @@ fn parse_level(v: &str) -> Option<LevelFilter> {
 /// Scans `text` (assuming INI format), invoking `f(section, key, value)` for each `key = value` line.
 /// Sections track the most recent `[name]` header (empty before the first), and values are unquoted.
 /// Comments are stripped and malformed lines are silently skipped.
-///
-/// Game-specific parsers compose with [`parse_core_only`] by walking `for_each_setting`
-/// for the game's own keys and calling `parse_core_only` separately for the core sections.
-pub fn for_each_setting(text: &str, mut f: impl FnMut(&str, &str, &str)) {
+fn for_each_setting(text: &str, mut f: impl FnMut(&str, &str, &str)) {
     let mut section = "";
     for raw in text.lines() {
         // A line's kind is decided by its first significant character, before any comment or `=` handling.
@@ -479,22 +474,36 @@ fn decode_utf16(body: &[u8], unit: fn([u8; 2]) -> u16) -> String {
     String::from_utf16_lossy(&units)
 }
 
+/// Reads and decodes the `neopatch.ini` file next to the host executable.
+/// Returns an empty string if the directory is unknown or the file is unreadable.
+#[must_use]
+pub fn read_ini_text(exe_dir: Option<&Path>) -> String {
+    exe_dir
+        .and_then(|d| read(d.join("neopatch.ini")).ok())
+        .map_or_else(String::new, |b| decode_text(&b).into_owned())
+}
+
+/// Applies one setting to the matching core section. Unknown sections and keys are silently ignored.
+fn apply_core_setting(core: &mut CoreConfig, section: &str, k: &str, v: &str) {
+    match section.to_ascii_lowercase().as_str() {
+        "display" => apply_display(&mut core.display, k, v),
+        "window" => apply_window(&mut core.window, k, v),
+        "framerate" => apply_framerate(&mut core.framerate, k, v),
+        "input" => apply_input(&mut core.input, k, v),
+        "process" => apply_process(&mut core.process, k, v),
+        "log" => apply_log(&mut core.log, k, v),
+        _ => {}
+    }
+}
+
 /// Parses INI text into a [`CoreConfig`] using only the shared section dispatcher.
-/// Per-game crates that don't define their own config keys call this directly from `install_hooks`.
-/// Crates with their own sections (e.g. th15's `[display] resolution`) supply their own parse function.
+/// Game crates without game-specific config keys should call this directly from `install_hooks`.
+/// Game crates with such keys should use [`ResolutionConfig::parse`] or [`ResolutionConfigExt::parse`] instead.
 #[must_use]
 pub fn parse_core_only(text: &str) -> CoreConfig {
     let mut core = CoreConfig::default();
     for_each_setting(text, |section, k, v| {
-        match section.to_ascii_lowercase().as_str() {
-            "display" => apply_display(&mut core.display, k, v),
-            "window" => apply_window(&mut core.window, k, v),
-            "framerate" => apply_framerate(&mut core.framerate, k, v),
-            "input" => apply_input(&mut core.input, k, v),
-            "process" => apply_process(&mut core.process, k, v),
-            "log" => apply_log(&mut core.log, k, v),
-            _ => {}
-        }
+        apply_core_setting(&mut core, section, k, v);
     });
     core
 }
@@ -550,21 +559,217 @@ fn fmt_mask(v: Option<NonZero<u32>>) -> Cow<'static, str> {
     )
 }
 
+/// Back buffer size for games with a `[display] resolution` setting.
+/// Games whose own display mode includes borderless ignore it there and size to the desktop.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Resolution {
+    R640x480 = 0,
+    R960x720 = 1,
+    #[default]
+    R1280x960 = 2,
+}
+
+impl Resolution {
+    #[must_use]
+    pub const fn index(self) -> u8 {
+        self as u8
+    }
+
+    /// Returns the index of the resolution radio button for this size and `mode` in the option-dialog layout used by th18 and th20.
+    #[must_use]
+    pub fn radio_index(self, mode: DisplayModeExt) -> u8 {
+        match (mode, self) {
+            (DisplayModeExt::Fullscreen, Self::R640x480) => 0,
+            (DisplayModeExt::Fullscreen, Self::R960x720) => 1,
+            (DisplayModeExt::Fullscreen, Self::R1280x960) => 2,
+            (DisplayModeExt::Windowed, Self::R640x480) => 3,
+            (DisplayModeExt::Windowed, Self::R960x720) => 4,
+            (DisplayModeExt::Windowed, Self::R1280x960) => 5,
+            (DisplayModeExt::Borderless, _) => 8,
+        }
+    }
+
+    /// Returns the index of the render scale for this size and `mode` into the render scale table used by th18 and th20.
+    #[must_use]
+    pub fn scale_index(self, mode: DisplayModeExt) -> u8 {
+        match self.radio_index(mode) {
+            i @ 0..=2 => i,
+            i @ 3..=5 => i - 3,
+            8 => 5,
+            _ => unreachable!("radio_index produces only 0..=5 or 8"),
+        }
+    }
+
+    #[must_use]
+    pub fn dimensions(self) -> (u32, u32) {
+        match self {
+            Self::R640x480 => (640, 480),
+            Self::R960x720 => (960, 720),
+            Self::R1280x960 => (1280, 960),
+        }
+    }
+}
+
+impl Display for Resolution {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        let (w, h) = self.dimensions();
+        write!(f, "{w}x{h}")
+    }
+}
+
+/// [`DisplayMode`] extended with borderless.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DisplayModeExt {
+    #[default]
+    Windowed,
+    Fullscreen,
+    Borderless,
+}
+
+impl DisplayModeExt {
+    #[must_use]
+    pub fn to_core(self) -> DisplayMode {
+        match self {
+            Self::Windowed => DisplayMode::Windowed,
+            Self::Fullscreen | Self::Borderless => DisplayMode::Fullscreen,
+        }
+    }
+}
+
+impl Display for DisplayModeExt {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        f.write_str(match self {
+            Self::Windowed => "Windowed",
+            Self::Fullscreen => "Fullscreen",
+            Self::Borderless => "Borderless",
+        })
+    }
+}
+
+#[must_use]
+fn parse_resolution(v: &str) -> Option<Resolution> {
+    match v.to_ascii_lowercase().as_str() {
+        "640x480" => Some(Resolution::R640x480),
+        "960x720" => Some(Resolution::R960x720),
+        "1280x960" => Some(Resolution::R1280x960),
+        _ => None,
+    }
+}
+
+#[must_use]
+fn parse_display_mode_ext(v: &str) -> Option<DisplayModeExt> {
+    match v.to_ascii_lowercase().as_str() {
+        "windowed" => Some(DisplayModeExt::Windowed),
+        "fullscreen" => Some(DisplayModeExt::Fullscreen),
+        "borderless" => Some(DisplayModeExt::Borderless),
+        _ => None,
+    }
+}
+
+/// Game-specific configuration for the games whose startup dialog exposes only a resolution choice (th14–th17).
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct ResolutionConfig {
+    pub resolution: Resolution,
+}
+
+impl ResolutionConfig {
+    /// Parses INI text into this configuration plus the core configuration, with defaults for any keys/sections the text omits.
+    #[must_use]
+    pub fn parse(text: &str) -> (Self, CoreConfig) {
+        let mut game = Self::default();
+        let mut core = CoreConfig::default();
+        for_each_setting(text, |section, k, v| {
+            if section.eq_ignore_ascii_case("display") && k.eq_ignore_ascii_case("resolution") {
+                if let Some(r) = parse_resolution(v) {
+                    game.resolution = r;
+                }
+            } else {
+                apply_core_setting(&mut core, section, k, v);
+            }
+        });
+        (game, core)
+    }
+
+    /// Writes the game-specific manifest lines that aren't already covered by the core configuration.
+    ///
+    /// # Errors
+    /// Propagates errors from writing to `w`.
+    pub fn write_manifest_extras<W: Write + ?Sized>(&self, w: &mut W) -> IoResult<()> {
+        writeln!(w, "display.resolution={}", self.resolution)
+    }
+}
+
+/// [`ResolutionConfig`] extended with the game's own display mode, for the games whose `[display] mode` includes borderless (th18, th20).
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct ResolutionConfigExt {
+    pub display_mode: DisplayModeExt,
+    pub resolution: Resolution,
+}
+
+impl ResolutionConfigExt {
+    /// Parses INI text into this configuration plus the core configuration, with defaults for any keys/sections the text omits.
+    #[must_use]
+    pub fn parse(text: &str) -> (Self, CoreConfig) {
+        let mut game = Self::default();
+        let mut core = CoreConfig::default();
+        for_each_setting(text, |section, k, v| {
+            if section.eq_ignore_ascii_case("display") && k.eq_ignore_ascii_case("mode") {
+                if let Some(m) = parse_display_mode_ext(v) {
+                    game.display_mode = m;
+                }
+            } else if section.eq_ignore_ascii_case("display")
+                && k.eq_ignore_ascii_case("resolution")
+            {
+                if let Some(r) = parse_resolution(v) {
+                    game.resolution = r;
+                }
+            } else {
+                apply_core_setting(&mut core, section, k, v);
+            }
+        });
+        core.display.mode = game.display_mode.to_core();
+        (game, core)
+    }
+
+    /// Writes the game-specific manifest lines that aren't already covered by the core configuration.
+    ///
+    /// # Errors
+    /// Propagates errors from writing to `w`.
+    pub fn write_manifest_extras<W: Write + ?Sized>(&self, w: &mut W) -> IoResult<()> {
+        if self.display_mode == DisplayModeExt::Borderless {
+            writeln!(w, "display.resolution=auto (Borderless)")
+        } else {
+            writeln!(w, "display.resolution={}", self.resolution)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         CoreConfig, DEFAULT_GAME_FPS, DEFAULT_REPLAY_SKIP_FPS, DEFAULT_REPLAY_SLOW_FPS,
-        DEFAULT_SESSIONS_TO_KEEP, DisplayCfg, DisplayMode, FramerateCfg, InputCfg, LogCfg,
-        PriorityClass, ProcessCfg, RefreshRateMode, WindowCfg, WindowFrame, apply_display,
-        apply_framerate, apply_input, apply_log, apply_process, apply_window, decode_text,
-        for_each_setting, parse_bitmask, parse_bool, parse_core_only, parse_priority_class,
-        parse_refresh_rate, parse_u32, parse_window_frame, unquote,
+        DEFAULT_SESSIONS_TO_KEEP, DisplayCfg, DisplayMode, DisplayModeExt, FramerateCfg, InputCfg,
+        LogCfg, PriorityClass, ProcessCfg, RefreshRateMode, Resolution, ResolutionConfig,
+        ResolutionConfigExt, WindowCfg, WindowFrame, apply_display, apply_framerate, apply_input,
+        apply_log, apply_process, apply_window, decode_text, for_each_setting, parse_bitmask,
+        parse_bool, parse_core_only, parse_display_mode_ext, parse_priority_class,
+        parse_refresh_rate, parse_resolution, parse_u32, parse_window_frame, read_ini_text,
+        unquote,
     };
     use std::num::NonZero;
+    use std::path::Path;
     use tracing::level_filters::LevelFilter;
 
     fn nz(n: u32) -> NonZero<u32> {
         NonZero::new(n).unwrap()
+    }
+
+    #[test]
+    fn read_ini_text_missing_file() {
+        assert_eq!(read_ini_text(None), "");
+        let missing = Path::new("nonexistent_dir_for_test");
+        assert_eq!(read_ini_text(Some(missing)), "");
     }
 
     #[test]
@@ -838,7 +1043,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_core_only_apply_known_keys() {
+    fn core_config_apply_known_keys() {
         let text = "
             [framerate]
             game_fps = 120
@@ -857,6 +1062,112 @@ mod tests {
         assert_eq!(cfg.process.priority, PriorityClass::High);
         assert_eq!(cfg.process.affinity_mask, Some(nz(0xff)));
         assert_eq!(cfg.display.mode, DisplayMode::Fullscreen);
+    }
+
+    #[test]
+    fn parse_resolution_setting() {
+        assert_eq!(parse_resolution("640x480"), Some(Resolution::R640x480));
+        assert_eq!(parse_resolution("960x720"), Some(Resolution::R960x720));
+        assert_eq!(parse_resolution("1280x960"), Some(Resolution::R1280x960));
+        assert_eq!(parse_resolution("1920x1080"), None);
+        assert_eq!(parse_resolution("borderless"), None);
+    }
+
+    #[test]
+    fn parse_display_mode_ext_setting() {
+        assert_eq!(
+            parse_display_mode_ext("windowed"),
+            Some(DisplayModeExt::Windowed)
+        );
+        assert_eq!(
+            parse_display_mode_ext("Fullscreen"),
+            Some(DisplayModeExt::Fullscreen)
+        );
+        assert_eq!(
+            parse_display_mode_ext("BORDERLESS"),
+            Some(DisplayModeExt::Borderless)
+        );
+        assert_eq!(parse_display_mode_ext("idk"), None);
+    }
+
+    #[test]
+    fn dialog_indices_match_startup_dialog() {
+        // Borderless has no resolution buttons of its own, so all three sizes collapse onto one pair.
+        let cases = [
+            (DisplayModeExt::Fullscreen, Resolution::R640x480, 0, 0),
+            (DisplayModeExt::Fullscreen, Resolution::R960x720, 1, 1),
+            (DisplayModeExt::Fullscreen, Resolution::R1280x960, 2, 2),
+            (DisplayModeExt::Windowed, Resolution::R640x480, 3, 0),
+            (DisplayModeExt::Windowed, Resolution::R960x720, 4, 1),
+            (DisplayModeExt::Windowed, Resolution::R1280x960, 5, 2),
+            (DisplayModeExt::Borderless, Resolution::R640x480, 8, 5),
+            (DisplayModeExt::Borderless, Resolution::R960x720, 8, 5),
+            (DisplayModeExt::Borderless, Resolution::R1280x960, 8, 5),
+        ];
+
+        for (mode, res, radio, scale) in cases {
+            assert_eq!(res.radio_index(mode), radio, "{mode:?} {res:?} radio");
+            assert_eq!(res.scale_index(mode), scale, "{mode:?} {res:?} scale");
+        }
+    }
+
+    #[test]
+    fn to_core_borderless() {
+        assert_eq!(DisplayModeExt::Windowed.to_core(), DisplayMode::Windowed);
+        assert_eq!(
+            DisplayModeExt::Fullscreen.to_core(),
+            DisplayMode::Fullscreen
+        );
+        assert_eq!(
+            DisplayModeExt::Borderless.to_core(),
+            DisplayMode::Fullscreen
+        );
+    }
+
+    #[test]
+    fn default_resolution_config_matches_documented_defaults() {
+        let (game, core) = ResolutionConfig::parse("");
+        assert_eq!(game.resolution, Resolution::R1280x960);
+        assert_eq!(core, CoreConfig::default());
+    }
+
+    #[test]
+    fn resolution_config_apply_known_keys() {
+        let text = "
+            [framerate]
+            game_fps = 120
+
+            [display]
+            resolution = 960x720
+        ";
+        let (game, core) = ResolutionConfig::parse(text);
+        assert_eq!(game.resolution, Resolution::R960x720);
+        assert_eq!(core.framerate.game_fps, 120);
+    }
+
+    #[test]
+    fn default_resolution_config_ext_matches_documented_defaults() {
+        let (game, core) = ResolutionConfigExt::parse("");
+        assert_eq!(game.display_mode, DisplayModeExt::Windowed);
+        assert_eq!(game.resolution, Resolution::R1280x960);
+        assert_eq!(core, CoreConfig::default());
+    }
+
+    #[test]
+    fn resolution_config_ext_apply_known_keys() {
+        let text = "
+            [framerate]
+            game_fps = 120
+
+            [display]
+            mode = Borderless
+            resolution = 960x720
+        ";
+        let (game, core) = ResolutionConfigExt::parse(text);
+        assert_eq!(game.display_mode, DisplayModeExt::Borderless);
+        assert_eq!(game.resolution, Resolution::R960x720);
+        assert_eq!(core.display.mode, DisplayMode::Fullscreen);
+        assert_eq!(core.framerate.game_fps, 120);
     }
 
     #[test]

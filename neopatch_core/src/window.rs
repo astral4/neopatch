@@ -1,7 +1,9 @@
 //! Window setup and hooking.
 
 use crate::ansi::{CP_SHIFT_JIS, to_wide};
-use crate::config::{DisplayMode, WindowCfg, WindowFrame};
+use crate::config::{
+    DisplayMode, DisplayModeExt, ResolutionConfig, ResolutionConfigExt, WindowCfg, WindowFrame,
+};
 use crate::iat_hook;
 use crate::untrusted::Untrusted;
 use std::ffi::c_void;
@@ -39,6 +41,35 @@ pub enum WindowPolicy {
     },
     /// Rewrites only title/Z-order.
     DeferToGame,
+}
+
+// The policy derivations for the shared game-config shapes live here rather than in `config`
+// so the configuration module stays free of window types.
+impl ResolutionConfig {
+    /// The window policy for games whose fullscreen toggle is the core two-state `mode`:
+    /// always restyle to the configured resolution.
+    #[must_use]
+    pub fn window_policy(&self, display_mode: DisplayMode) -> WindowPolicy {
+        WindowPolicy::Restyle {
+            framebuffer: self.resolution.dimensions(),
+            display_mode,
+        }
+    }
+}
+
+impl ResolutionConfigExt {
+    /// The window policy implied by the game's own display mode: borderless games manage their
+    /// own window, so the core defers; otherwise restyle to the configured resolution.
+    #[must_use]
+    pub fn window_policy(&self) -> WindowPolicy {
+        match self.display_mode {
+            DisplayModeExt::Borderless => WindowPolicy::DeferToGame,
+            DisplayModeExt::Windowed | DisplayModeExt::Fullscreen => WindowPolicy::Restyle {
+                framebuffer: self.resolution.dimensions(),
+                display_mode: self.display_mode.to_core(),
+            },
+        }
+    }
 }
 
 iat_hook! {
@@ -417,13 +448,57 @@ fn append_suffix(wide: &mut Vec<u16>) {
 #[cfg(test)]
 mod tests {
     use super::{
-        CreationArgs, ResolvedWindowCfg, State, frame_style, prep_main_window, topmost_ex_style,
+        CreationArgs, ResolvedWindowCfg, State, WindowPolicy, frame_style, prep_main_window,
+        topmost_ex_style,
     };
-    use crate::config::{DisplayMode, WindowCfg, WindowFrame};
+    use crate::config::{
+        DisplayMode, DisplayModeExt, Resolution, ResolutionConfig, ResolutionConfigExt, WindowCfg,
+        WindowFrame,
+    };
     use std::num::NonZero;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         CW_USEDEFAULT, WS_CAPTION, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
     };
+
+    #[test]
+    fn window_policy_borderless() {
+        let game = ResolutionConfigExt {
+            display_mode: DisplayModeExt::Borderless,
+            resolution: Resolution::R960x720,
+        };
+        assert!(matches!(game.window_policy(), WindowPolicy::DeferToGame));
+
+        for (mode, core_mode) in [
+            (DisplayModeExt::Windowed, DisplayMode::Windowed),
+            (DisplayModeExt::Fullscreen, DisplayMode::Fullscreen),
+        ] {
+            let game = ResolutionConfigExt {
+                display_mode: mode,
+                resolution: Resolution::R960x720,
+            };
+            assert!(
+                matches!(
+                    game.window_policy(),
+                    WindowPolicy::Restyle {
+                        framebuffer: (960, 720),
+                        display_mode,
+                    } if display_mode == core_mode
+                ),
+                "{mode:?}"
+            );
+        }
+
+        let game = ResolutionConfig {
+            resolution: Resolution::R640x480,
+        };
+        assert!(matches!(
+            game.window_policy(DisplayMode::Fullscreen),
+            WindowPolicy::Restyle {
+                framebuffer: (640, 480),
+                display_mode: DisplayMode::Fullscreen,
+            }
+        ));
+    }
 
     #[test]
     fn unmodified_frame_creation_style() {

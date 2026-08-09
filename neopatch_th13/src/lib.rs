@@ -10,7 +10,7 @@ mod state;
 use crate::dialog_dismiss::DIALOG_PATCHES;
 use crate::patches::PATCHES;
 use crate::state::replay_keys;
-use neopatch_core::config::{CONFIG, CoreConfig, decode_text, parse_core_only};
+use neopatch_core::config::{CONFIG, parse_core_only, read_ini_text};
 use neopatch_core::pacer::{PACER, Pacer, PacingPolicy};
 use neopatch_core::patches::install_all;
 use neopatch_core::{
@@ -19,7 +19,6 @@ use neopatch_core::{
 };
 use std::env::current_exe;
 use std::ffi::c_void;
-use std::fs::read;
 use std::path::{Path, PathBuf};
 use std::ptr::null;
 use windows_sys::Win32::Foundation::{HINSTANCE, HMODULE};
@@ -46,11 +45,7 @@ unsafe fn install_hooks() {
     let host_exe_path = current_exe().ok();
     let exe_dir = host_exe_path.as_deref().and_then(Path::parent);
 
-    let core_cfg = CONFIG.get_or_init(|| {
-        exe_dir
-            .and_then(|d| read(d.join("neopatch.ini")).ok())
-            .map_or_else(CoreConfig::default, |b| parse_core_only(&decode_text(&b)))
-    });
+    let core_cfg = CONFIG.get_or_init(|| parse_core_only(&read_ini_text(exe_dir)));
 
     let install_dir = exe_dir.map_or_else(|| PathBuf::from("."), Path::to_path_buf);
     log::init(&install_dir, core_cfg, host_exe_path.as_deref(), |_| Ok(()));

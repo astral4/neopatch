@@ -1,6 +1,6 @@
 //! Logic for auto-dismissing th16's startup dialog.
 
-use crate::config::CONFIG;
+use crate::CONFIG;
 use neopatch_core::config::{CONFIG as CORE_CONFIG, DisplayMode};
 use neopatch_core::iat_hook;
 use neopatch_core::patches::PatchSite;
