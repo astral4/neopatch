@@ -18,6 +18,7 @@ All notable changes to neopatch will be documented in this file.
 ### Fixed
 
 - A refused timer resolution request no longer suppresses the games' own timer-resolution calls.
+- Crash reports no longer fabricate a zeroed stack readout when the faulting thread's stack is unreadable.
 
 ## [0.11.0] - 2026-08-07
 

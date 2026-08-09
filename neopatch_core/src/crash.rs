@@ -1,7 +1,7 @@
 //! Crash-time capture. Includes a vectored exception handler, unhandled filter, and minidump.
 //!
-//! Vectored runs before the SEH chain and can't be overwritten by a later `SetUnhandledExceptionFilter`.
-//! The unhandled filter is the fallback path.
+//! The vectored filter runs on every exception dispatch, ahead of the SEH chain, and can't be displaced by a later
+//! `SetUnhandledExceptionFilter`. The unhandled filter is a cheap fallback for the case where nothing overwrites it.
 
 use crate::log::{dump_dir, elapsed_ms, flush};
 use crate::match_named;
@@ -12,7 +12,7 @@ use std::os::windows::ffi::OsStrExt;
 use std::path::PathBuf;
 use std::ptr::{null, null_mut};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 use windows_sys::Win32::Foundation::{
     CloseHandle, DBG_CONTROL_BREAK, DBG_CONTROL_C, DBG_PRINTEXCEPTION_C, DBG_PRINTEXCEPTION_WIDE_C,
     EXCEPTION_ACCESS_VIOLATION, EXCEPTION_ARRAY_BOUNDS_EXCEEDED, EXCEPTION_BREAKPOINT,
@@ -201,11 +201,16 @@ unsafe fn log_exception(info: *const EXCEPTION_POINTERS, source: &str) -> bool {
     // The stack peek is last so the register line is already written out if anything below misbehaves.
     let esp = ctx.Esp;
     let mut stack = [0u32; 8];
-    safe_read_stack(esp, &mut stack);
-    info!(
-        "[esp] = {:#010x} (return addr of crashed indirect call)\nstack [esp..esp+32]: {stack:#010x?}",
-        stack[0],
-    );
+    let read = safe_read_stack(esp, &mut stack);
+    let stack = &stack[..read];
+    if let Some(first) = stack.first() {
+        info!(
+            "[esp] = {first:#010x} (return addr of crashed indirect call)\nstack [esp..esp+{}]: {stack:#010x?}",
+            stack.len() * 4,
+        );
+    } else {
+        info!("stack [esp..esp+32]: <unreadable at esp={esp:#010x}>");
+    }
     true
 }
 
@@ -266,9 +271,12 @@ unsafe extern "system" fn unhandled_filter(info: *const EXCEPTION_POINTERS) -> i
 }
 
 pub fn install_handlers() {
-    unsafe {
-        // 1 = call our handler first in the dispatch order.
-        AddVectoredExceptionHandler(1, Some(vectored_handler));
-        SetUnhandledExceptionFilter(Some(unhandled_filter));
+    // 1 = call our handler first in the dispatch order.
+    let veh = unsafe { AddVectoredExceptionHandler(1, Some(vectored_handler)) };
+    if veh.is_null() {
+        warn!(kind = "vectored_handler_install_failed");
+    } else {
+        info!(kind = "vectored_handler_installed");
     }
+    unsafe { SetUnhandledExceptionFilter(Some(unhandled_filter)) };
 }
