@@ -1,12 +1,15 @@
-//! Loaded-module enumeration and address-to-module resolution.
+//! Address-to-module resolution.
 
-use std::ptr::{null, null_mut};
+use std::ptr::{null, null_mut, without_provenance};
 use std::sync::OnceLock;
 use tracing::warn;
 use windows_sys::Win32::Foundation::{HMODULE, MAX_PATH};
-use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows_sys::Win32::System::LibraryLoader::{
+    GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+    GetModuleHandleExW, GetModuleHandleW,
+};
 use windows_sys::Win32::System::ProcessStatus::{
-    EnumProcessModules, GetModuleFileNameExW, GetModuleInformation, MODULEINFO,
+    GetModuleFileNameExW, GetModuleInformation, MODULEINFO,
 };
 use windows_sys::Win32::System::Threading::GetCurrentProcess;
 
@@ -52,12 +55,6 @@ pub(crate) fn in_host_image(addr: usize, len: usize) -> bool {
     host_range().is_some_and(|r| u32::try_from(addr).is_ok_and(|addr| r.contains_span(addr, len)))
 }
 
-/// [`ModuleRange`] plus the leaf filename, for `name+0xoffset` annotations.
-pub(crate) struct Module {
-    pub(crate) range: ModuleRange,
-    pub(crate) name: String,
-}
-
 /// Returns `None` if the handle is null or `GetModuleInformation` fails.
 pub(crate) fn module_info(h: HMODULE) -> Option<ModuleRange> {
     #[allow(clippy::cast_possible_truncation)]
@@ -84,58 +81,47 @@ pub(crate) fn module_info(h: HMODULE) -> Option<ModuleRange> {
     })
 }
 
-/// Enumerates every module loaded into the current process.
-/// Each entry carries `base`, `end`, and leaf filename for resolving an address to its module.
-pub(crate) fn walk_modules() -> Vec<Module> {
-    const HANDLES_CAP: u32 = 512;
-    const HANDLES_LEN: usize = HANDLES_CAP as usize;
-    #[allow(clippy::cast_possible_truncation)]
-    const BUF_BYTES: u32 = HANDLES_CAP * size_of::<HMODULE>() as u32;
-
-    let mut result = Vec::new();
-    let process = unsafe { GetCurrentProcess() };
-    let mut handles = [null_mut(); HANDLES_LEN];
-    let mut needed = 0;
-    if unsafe { EnumProcessModules(process, handles.as_mut_ptr(), BUF_BYTES, &raw mut needed) } == 0
-    {
-        return result;
-    }
-    let count = (needed as usize / size_of::<HMODULE>()).min(handles.len());
-    result.reserve_exact(count);
-    for &module in &handles[..count] {
-        let Some(range) = module_info(module) else {
-            continue;
-        };
-        let mut name_buf = [0u16; MAX_PATH as usize];
-        let name_len =
-            unsafe { GetModuleFileNameExW(process, module, name_buf.as_mut_ptr(), MAX_PATH) };
-        let mut name = if name_len == 0 {
-            String::from("<unknown>")
-        } else {
-            String::from_utf16_lossy(&name_buf[..name_len as usize])
-        };
-        if let Some(slash) = name.rfind('\\') {
-            name.drain(..=slash);
-        }
-        result.push(Module { range, name });
-    }
-    result
+/// Returns the image range of the module containing `addr`, or `None` if there is none.
+pub(crate) fn module_containing(addr: usize) -> Option<ModuleRange> {
+    module_info(module_handle_from_addr(addr)?)
 }
 
-/// Resolves `addr` to a `module+offset` label, or `None` for an address in no known module.
-pub(crate) fn annotate_resolved(addr: u32, modules: &[Module]) -> Option<String> {
+/// Returns the module containing `addr` as a `module+offset` label, or `None` when `addr` is 0 or doesn't belong to a loaded module.
+pub(crate) fn annotate_addr(addr: u32) -> Option<String> {
     if addr == 0 {
         return None;
     }
-    for m in modules {
-        if m.range.contains(addr) {
-            return Some(format!(
-                "{:#010x} ({}+{:#x})",
-                addr,
-                m.name,
-                addr - m.range.base,
-            ));
-        }
+
+    let module = module_handle_from_addr(addr as usize)?;
+    let range = module_info(module)?;
+    let process = unsafe { GetCurrentProcess() };
+    let mut name_buf = [0u16; MAX_PATH as usize];
+    let name_len =
+        unsafe { GetModuleFileNameExW(process, module, name_buf.as_mut_ptr(), MAX_PATH) };
+    let mut name = if name_len == 0 {
+        String::from("<unknown>")
+    } else {
+        String::from_utf16_lossy(&name_buf[..name_len as usize])
+    };
+    if let Some(slash) = name.rfind('\\') {
+        name.drain(..=slash);
     }
-    None
+    Some(format!(
+        "{:#010x} ({}+{:#x})",
+        addr,
+        name,
+        addr - range.base,
+    ))
+}
+
+fn module_handle_from_addr(addr: usize) -> Option<HMODULE> {
+    let mut module = null_mut();
+    let ok = unsafe {
+        GetModuleHandleExW(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            without_provenance(addr),
+            &raw mut module,
+        )
+    };
+    (ok != 0).then_some(module)
 }

@@ -9,7 +9,7 @@
 //! We don't use `FlushInstructionCache` because vtable slots are read as data.
 
 use crate::log::log_at;
-use crate::modules::{Module, ModuleRange, annotate_resolved, module_info, walk_modules};
+use crate::modules::{ModuleRange, annotate_addr, module_containing, module_info};
 use crate::protect::with_writable;
 use std::marker::PhantomData;
 use std::mem::transmute_copy;
@@ -242,14 +242,13 @@ pub(crate) unsafe fn capture_slot<F, V>(
     }
 }
 
-pub(crate) struct VtblScope<'a, V> {
+pub(crate) struct VtblScope<V> {
     vtbl: NonNull<V>,
-    modules: &'a [Module],
     our_range: Option<ModuleRange>,
     expected_range: Option<ModuleRange>,
 }
 
-impl<V> VtblScope<'_, V> {
+impl<V> VtblScope<V> {
     /// Capture the displaced original into `original` and write `hook` at the slot reached by `proj`.
     // TODO: Tighten to `F: FnPtr` if the `fn_ptr_trait` feature stabilizes.
     pub(crate) fn intercept<F>(
@@ -361,7 +360,7 @@ impl<V> VtblScope<'_, V> {
                 .expected_range
                 .is_none_or(|r| !r.contains(original_addr))
         {
-            annotate_resolved(original_addr, self.modules)
+            annotate_addr(original_addr)
         } else {
             None
         };
@@ -397,15 +396,10 @@ enum PatchOutcome {
 #[must_use]
 pub(crate) unsafe fn install_vtable<V, R>(
     vtbl: NonNull<V>,
-    scope: impl FnOnce(&VtblScope<'_, V>) -> R,
+    scope: impl FnOnce(&VtblScope<V>) -> R,
 ) -> Option<R> {
-    let modules = walk_modules();
     let our_range = our_dll_range();
-    #[allow(clippy::cast_possible_truncation)]
-    let expected_range = modules
-        .iter()
-        .find(|m| m.range.contains(vtbl.addr().get() as u32))
-        .map(|m| m.range);
+    let expected_range = module_containing(vtbl.addr().get());
 
     let size = size_of::<V>();
     let region_start = vtbl.as_ptr().cast();
@@ -413,7 +407,6 @@ pub(crate) unsafe fn install_vtable<V, R>(
         with_writable(region_start, size, |_| {
             let s = VtblScope {
                 vtbl,
-                modules: &modules,
                 our_range,
                 expected_range,
             };
