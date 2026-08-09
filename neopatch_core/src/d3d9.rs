@@ -26,7 +26,7 @@ use crate::session::{
     record_device,
 };
 use crate::thread::{MainCell, MainToken};
-use crate::vtable::{capture_slot, install_vtable, vtable_field, vtable_slot};
+use crate::vtable::{install_vtable, vtable_field, vtable_slot};
 use crate::window::service_pending_events;
 use crate::{fmt_hr, iat_hook, match_named};
 use std::cmp::min;
@@ -291,27 +291,22 @@ pub(crate) unsafe fn create_hooked_d3d9_with(
 }
 
 unsafe fn install_d3d9_hooks(d3d9_ex: NonNull<c_void>) {
-    let vtbl = unsafe { *d3d9_ex.as_ptr().cast() };
+    let vtbl: *mut IDirect3D9Ex_Vtbl = unsafe { *d3d9_ex.as_ptr().cast() };
     let Some(vtbl) = NonNull::new(vtbl) else {
         warn!(kind = "d3d9_vtbl_null", p_ex = format_args!("{d3d9_ex:p}"));
         return;
     };
 
     unsafe {
-        capture_slot(
-            vtbl,
-            vtable_field!(IDirect3D9Ex_Vtbl, CreateDeviceEx),
-            &REAL_CREATE_DEVICE_EX,
-        );
-        capture_slot(
-            vtbl,
-            vtable_field!(IDirect3D9Ex_Vtbl, GetAdapterDisplayModeEx),
-            &REAL_GET_ADAPTER_DISPLAY_MODE_EX,
-        );
-    }
-
-    let result = unsafe {
         install_vtable(vtbl, |scope| {
+            scope.capture(
+                vtable_field!(IDirect3D9Ex_Vtbl, CreateDeviceEx),
+                &REAL_CREATE_DEVICE_EX,
+            );
+            scope.capture(
+                vtable_field!(IDirect3D9Ex_Vtbl, GetAdapterDisplayModeEx),
+                &REAL_GET_ADAPTER_DISPLAY_MODE_EX,
+            );
             // The game's calls route to `CreateDeviceEx` via `REAL_CREATE_DEVICE_EX` rather than chaining through
             // to the displaced `CreateDevice`, which is captured only to hand foreign objects' calls through unchanged.
             scope.intercept(
@@ -326,9 +321,8 @@ unsafe fn install_d3d9_hooks(d3d9_ex: NonNull<c_void>) {
                 "IDirect3D9::CheckDeviceFormat",
                 hook_check_device_format,
             );
-        })
-    };
-    info!(kind = "d3d9_hooks_installed", protect_ok = result.is_some());
+        });
+    }
 }
 
 /// The optional overrides active for one device creation/reset attempt.
@@ -1253,22 +1247,18 @@ unsafe extern "system" fn hook_check_device_format(
 }
 
 unsafe fn install_device_hooks(dev: NonNull<c_void>) {
-    let vtbl = unsafe { *dev.as_ptr().cast() };
+    let vtbl: *mut IDirect3DDevice9Ex_Vtbl = unsafe { *dev.as_ptr().cast() };
     let Some(vtbl) = NonNull::new(vtbl) else {
         warn!(kind = "device_vtbl_null", dev = format_args!("{dev:p}"));
         return;
     };
 
     unsafe {
-        capture_slot(
-            vtbl,
-            vtable_field!(IDirect3DDevice9Ex_Vtbl, ResetEx),
-            &REAL_RESET_EX,
-        );
-    }
-
-    let result = unsafe {
         install_vtable(vtbl, |scope| {
+            scope.capture(
+                vtable_field!(IDirect3DDevice9Ex_Vtbl, ResetEx),
+                &REAL_RESET_EX,
+            );
             scope.intercept(
                 &REAL_RESET,
                 vtable_field!(IDirect3DDevice9Ex_Vtbl, base__.Reset),
@@ -1293,12 +1283,8 @@ unsafe fn install_device_hooks(dev: NonNull<c_void>) {
                 "CreateVertexBuffer",
                 hook_create_vertex_buffer,
             );
-        })
-    };
-    info!(
-        kind = "d3d9_device_hooks_installed",
-        protect_ok = result.is_some()
-    );
+        });
+    }
 }
 
 unsafe fn apply_device_ex_tunables(dev: InterfaceRef<'_, IDirect3DDevice9Ex>) {

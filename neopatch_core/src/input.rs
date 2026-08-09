@@ -10,7 +10,7 @@ use crate::vtable::{install_vtable, vtable_field, vtable_slot};
 use std::ffi::c_void;
 use std::mem::offset_of;
 use std::ptr::NonNull;
-use tracing::{info, warn};
+use tracing::warn;
 use windows::Win32::Devices::HumanInterfaceDevice::{
     DIJOYSTATE, DIJOYSTATE2, IDirectInput8A_Vtbl, IDirectInputDevice8A_Vtbl,
 };
@@ -67,7 +67,7 @@ unsafe fn on_directinput_created(di: *mut c_void) {
         warn!(kind = "dinput_vtbl_null", di = format_args!("{di:p}"));
         return;
     };
-    let result = unsafe {
+    unsafe {
         install_vtable(vtbl, |scope| {
             scope.intercept(
                 &REAL_DI_CREATE_DEVICE,
@@ -75,12 +75,8 @@ unsafe fn on_directinput_created(di: *mut c_void) {
                 "IDirectInput8::CreateDevice",
                 hook_di_create_device,
             );
-        })
-    };
-    info!(
-        kind = "dinput_hooks_installed",
-        protect_ok = result.is_some()
-    );
+        });
+    }
 }
 
 unsafe extern "system" fn hook_di_create_device(
@@ -109,7 +105,7 @@ unsafe fn patch_device_vtable(dev: *mut c_void) {
         );
         return;
     };
-    let result = unsafe {
+    unsafe {
         install_vtable(vtbl, |scope| {
             scope.intercept(
                 &REAL_GET_DEVICE_STATE,
@@ -117,12 +113,8 @@ unsafe fn patch_device_vtable(dev: *mut c_void) {
                 "IDirectInputDevice8::GetDeviceState",
                 hook_get_device_state,
             );
-        })
-    };
-    info!(
-        kind = "dinput_device_hooks_installed",
-        protect_ok = result.is_some(),
-    );
+        });
+    }
 }
 
 #[allow(clippy::similar_names)]

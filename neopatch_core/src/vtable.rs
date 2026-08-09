@@ -19,8 +19,8 @@ use std::sync::atomic::{Ordering, fence};
 use tracing::{debug, warn};
 use windows_sys::Win32::Foundation::HMODULE;
 
-/// Declares a typed `static FnSlot<F>` for a vtable slot, plus a typed trampoline calling through it.
-/// Use for intercepts and capture-only slots.
+/// Declares a typed `static FnSlot<F>` for a vtable slot we patch, plus a typed trampoline calling through it.
+/// The trampoline panics on an uncaptured slot.
 macro_rules! vtable_slot {
     (
         $slot:ident / $trampoline:ident :
@@ -198,50 +198,6 @@ impl<V, F> SlotProjection<V, F> {
     }
 }
 
-/// Reads a vtable slot we trampoline through but don't patch and publishes the function pointer into `dst` if the slot is non-null.
-///
-/// This operation is idempotent. A subsequent call with the same slot value does nothing, since re-creation of the COM object
-/// (e.g. recovery from a lost device) reads the same function pointer and there's nothing new to capture. A divergent value
-/// indicates that another shim stacked itself on top of us between calls. If this happens, we keep the originally-captured pointer.
-///
-/// # Safety
-/// `vtbl` must point to a valid `V`. The slot at `proj` is read as a function pointer.
-// TODO: Tighten to `F: FnPtr` if the `fn_ptr_trait` feature stabilizes.
-pub(crate) unsafe fn capture_slot<F, V>(
-    vtbl: NonNull<V>,
-    proj: SlotProjection<V, F>,
-    dst: &FnSlot<F>,
-) where
-    F: Copy + Send + Sync + Unpin + 'static,
-{
-    let slot_ptr = proj.slot_ptr(vtbl.as_ptr()).cast_const();
-    let current_raw = unsafe { read_unaligned(slot_ptr.cast()) };
-
-    if let Some(existing_raw) = dst.captured_raw() {
-        if existing_raw == current_raw {
-            debug!(
-                kind = "capture_slot_skipped",
-                slot = dst.name(),
-                value = format_args!("{existing_raw:p}"),
-            );
-        } else {
-            warn!(
-                kind = "capture_slot_divergent",
-                slot = dst.name(),
-                kept = format_args!("{existing_raw:p}"),
-                seen = format_args!("{current_raw:p}"),
-            );
-        }
-        return;
-    }
-
-    if let Some(f) = unsafe { raw_to_fn_ptr(current_raw) } {
-        dst.store(f);
-    } else {
-        warn!(kind = "capture_slot_null", slot = dst.name());
-    }
-}
-
 pub(crate) struct VtblScope<V> {
     vtbl: NonNull<V>,
     our_range: Option<ModuleRange>,
@@ -336,6 +292,47 @@ impl<V> VtblScope<V> {
         self.log_outcome(name, offset, current_raw, hook_raw, outcome);
     }
 
+    /// Reads a slot we trampoline through but don't patch.
+    /// If the slot is non-null, then the function pointer is published into `dst`. Otherwise, `dst` is left empty.
+    ///
+    /// This operation is idempotent: a revisit with the same slot value does nothing, since re-creation of the COM object
+    /// (e.g. recovery from a lost device) reads the same function pointer and there's nothing new to capture.
+    /// A divergent value means another shim stacked itself on top of us between visits; we keep the originally-captured pointer.
+    // TODO: Tighten to `F: FnPtr` if the `fn_ptr_trait` feature stabilizes.
+    pub(crate) fn capture<F>(&self, proj: SlotProjection<V, F>, dst: &FnSlot<F>)
+    where
+        F: Copy + Send + Sync + Unpin + 'static,
+    {
+        let slot_ptr = proj.slot_ptr(self.vtbl.as_ptr()).cast_const();
+        // SAFETY: The scope's vtable points to a valid `V` due to `install_vtable`'s contract,
+        // and the projection's const assert bounds the slot within `V`.
+        let current_raw = unsafe { read_unaligned(slot_ptr.cast()) };
+
+        if let Some(existing_raw) = dst.captured_raw() {
+            if existing_raw == current_raw {
+                debug!(
+                    kind = "capture_slot_skipped",
+                    slot = dst.name(),
+                    value = format_args!("{existing_raw:p}"),
+                );
+            } else {
+                warn!(
+                    kind = "capture_slot_divergent",
+                    slot = dst.name(),
+                    kept = format_args!("{existing_raw:p}"),
+                    seen = format_args!("{current_raw:p}"),
+                );
+            }
+            return;
+        }
+
+        if let Some(f) = unsafe { raw_to_fn_ptr(current_raw) } {
+            dst.store(f);
+        } else {
+            warn!(kind = "capture_slot_null", slot = dst.name());
+        }
+    }
+
     fn log_outcome(
         &self,
         name: &str,
@@ -386,39 +383,34 @@ enum PatchOutcome {
 }
 
 /// Opens a writable window over `size_of::<V>()` bytes starting at `vtbl`, builds a [`VtblScope<V>`], and runs `scope`.
-/// Returns `None` on `VirtualProtect` failure.
+/// If `VirtualProtect` fails, then `scope` does not run.
 ///
 /// The chained-through annotation uses the loaded-module range that contains `vtbl` as the "canonical implementation" module;
 /// slots whose displaced original points outside that range are annotated.
 ///
 /// # Safety
 /// `vtbl` must point to a valid `V` whose backing memory can be made writable through `VirtualProtect`.
-#[must_use]
-pub(crate) unsafe fn install_vtable<V, R>(
-    vtbl: NonNull<V>,
-    scope: impl FnOnce(&VtblScope<V>) -> R,
-) -> Option<R> {
+pub(crate) unsafe fn install_vtable<V>(vtbl: NonNull<V>, scope: impl FnOnce(&VtblScope<V>)) {
     let our_range = our_dll_range();
     let expected_range = module_containing(vtbl.addr().get());
 
     let size = size_of::<V>();
     let region_start = vtbl.as_ptr().cast();
-    let result = unsafe {
+    let ran = unsafe {
         with_writable(region_start, size, |_| {
             let s = VtblScope {
                 vtbl,
                 our_range,
                 expected_range,
             };
-            scope(&s)
+            scope(&s);
         })
     };
-    if result.is_none() {
+    if ran.is_none() {
         warn!(
             kind = "vtable_protect_failed",
             addr = format_args!("{region_start:p}"),
             span = size,
         );
     }
-    result
 }
