@@ -496,16 +496,18 @@ fn apply_core_setting(core: &mut CoreConfig, section: &str, k: &str, v: &str) {
     }
 }
 
-/// Parses INI text into a [`CoreConfig`] using only the shared section dispatcher.
-/// Game crates without game-specific config keys should call this directly from `install_hooks`.
-/// Game crates with such keys should use [`ResolutionConfig::parse`] or [`ResolutionConfigExt::parse`] instead.
-#[must_use]
-pub fn parse_core_only(text: &str) -> CoreConfig {
-    let mut core = CoreConfig::default();
-    for_each_setting(text, |section, k, v| {
-        apply_core_setting(&mut core, section, k, v);
-    });
-    core
+impl CoreConfig {
+    /// Parses INI text using only the shared section dispatcher.
+    /// Game crates without game-specific config keys should call this directly from `install_hooks`.
+    /// Game crates with such keys should use [`ResolutionConfig::parse`] or [`ResolutionConfigExt::parse`] instead.
+    #[must_use]
+    pub fn parse(text: &str) -> Self {
+        let mut core = Self::default();
+        for_each_setting(text, |section, k, v| {
+            apply_core_setting(&mut core, section, k, v);
+        });
+        core
+    }
 }
 
 /// Writes the game-agnostic manifest lines after the log preamble.
@@ -753,9 +755,8 @@ mod tests {
         LogCfg, PriorityClass, ProcessCfg, RefreshRateMode, Resolution, ResolutionConfig,
         ResolutionConfigExt, WindowCfg, WindowFrame, apply_display, apply_framerate, apply_input,
         apply_log, apply_process, apply_window, decode_text, for_each_setting, parse_bitmask,
-        parse_bool, parse_core_only, parse_display_mode_ext, parse_priority_class,
-        parse_refresh_rate, parse_resolution, parse_u32, parse_window_frame, read_ini_text,
-        unquote,
+        parse_bool, parse_display_mode_ext, parse_priority_class, parse_refresh_rate,
+        parse_resolution, parse_u32, parse_window_frame, read_ini_text, unquote,
     };
     use std::num::NonZero;
     use std::path::Path;
@@ -1023,7 +1024,7 @@ mod tests {
         assert_eq!(cfg.log.level, LevelFilter::INFO);
         assert_eq!(cfg.log.sessions_to_keep, DEFAULT_SESSIONS_TO_KEEP);
         assert_eq!(cfg.log.log_dir, None);
-        assert_eq!(parse_core_only(""), cfg);
+        assert_eq!(CoreConfig::parse(""), cfg);
     }
 
     #[test]
@@ -1056,7 +1057,7 @@ mod tests {
             [display]
             mode = fullscreen
         ";
-        let cfg = parse_core_only(text);
+        let cfg = CoreConfig::parse(text);
         assert_eq!(cfg.framerate.game_fps, 120);
         assert_eq!(cfg.framerate.replay_skip_fps, 480);
         assert_eq!(cfg.process.priority, PriorityClass::High);
@@ -1171,7 +1172,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_core_only_ignore_unknown_sections_and_keys() {
+    fn core_config_ignore_unknown_sections_and_keys() {
         let text = "
             [does_not_exist]
             x = 1
@@ -1184,7 +1185,7 @@ mod tests {
             ; comment line
             # also a comment
         ";
-        let cfg = parse_core_only(text);
+        let cfg = CoreConfig::parse(text);
         assert_eq!(cfg.framerate.game_fps, DEFAULT_GAME_FPS);
     }
 }
