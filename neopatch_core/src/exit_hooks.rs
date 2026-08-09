@@ -8,8 +8,8 @@ use std::ffi::c_void;
 use std::num::NonZero;
 use std::ptr::null;
 use std::slice::from_mut as slice_from_mut;
-use tracing::info;
-use windows_sys::Win32::Foundation::{HANDLE, HMODULE, HWND};
+use tracing::{info, warn};
+use windows_sys::Win32::Foundation::{GetLastError, HANDLE, HMODULE, HWND, SetLastError};
 use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
 use windows_sys::Win32::System::Threading::LPTHREAD_START_ROUTINE;
 use windows_sys::Win32::UI::WindowsAndMessaging::MessageBoxW;
@@ -66,7 +66,8 @@ unsafe extern "system" fn hook_exit_process(exit_code: u32) -> ! {
         kind = "exit_process_intercepted",
         exit_code = format_args!("{exit_code:#010x}"),
     );
-    // We drain the `BufWriter` before the OS tears down the process. Otherwise, the destructor and shutdown tail of the log are lost.
+    // Event lines are already in the OS file cache since `log.rs` writes are unbuffered.
+    // This commits them to disk before the process goes away rather than draining any userspace buffer.
     flush();
     unsafe { real_exit_process(exit_code) }
 }
@@ -198,6 +199,19 @@ unsafe extern "system" fn hook_create_thread(
 ) -> HANDLE {
     let h = unsafe { real_create_thread(sec, stack, start, param, flags, tid_out) };
     let start_va = start.map_or(0, |f| (f as *const ()).addr());
+
+    if h.is_null() {
+        let os_error = unsafe { GetLastError() };
+        warn!(
+            kind = "thread_spawn_failed",
+            start = format_args!("{start_va:#010x}"),
+            param = format_args!("{param:p}"),
+            os_error = format_args!("{os_error:#x}"),
+        );
+        unsafe { SetLastError(os_error) };
+        return h;
+    }
+
     let tid_out = Untrusted::from_raw(tid_out.cast_const());
     let mut tid: u32 = 0;
     if !tid_out.is_null() {

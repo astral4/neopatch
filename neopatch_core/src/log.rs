@@ -408,7 +408,24 @@ impl Visit for FieldVisitor<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::is_session_id;
+    use super::{Level, NeopatchLayer, is_session_id};
+    use tracing::subscriber::with_default as set_default_subscriber;
+    use tracing::warn;
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::registry;
+    use windows_sys::Win32::Foundation::{GetLastError, SetLastError};
+
+    #[test]
+    fn hooks_restore_last_error_after_emitting_event() {
+        let subscriber = registry().with(NeopatchLayer {
+            level: Level::TRACE,
+        });
+        set_default_subscriber(subscriber, || {
+            unsafe { SetLastError(0xC0DE) };
+            warn!(kind = "last_error_probe", detail = "allocates and formats");
+            assert_ne!(unsafe { GetLastError() }, 0xC0DE);
+        });
+    }
 
     #[test]
     fn is_session_id_accepts_real_session_format() {
