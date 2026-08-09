@@ -13,6 +13,10 @@ All notable changes to neopatch will be documented in this file.
 
 - Pressing Ctrl-C while a quit is already in progress now prints a hint to the launching terminal instead of being absorbed silently.
 
+### Fixed
+
+- A refused timer resolution request no longer suppresses the games' own timer-resolution calls.
+
 ## [0.11.0] - 2026-08-07
 
 ### Added

@@ -4,6 +4,7 @@
 //! so we bump it once and stub the game's calls.
 
 use crate::iat_hook;
+use crate::log::log_at;
 use windows_sys::Win32::Foundation::HMODULE;
 use windows_sys::Win32::Media::{MMSYSERR_NOERROR, timeBeginPeriod};
 
@@ -32,8 +33,14 @@ extern "system" fn stub_time_end_period(_period: u32) -> u32 {
 pub unsafe fn install(host: HMODULE) {
     unsafe {
         // We never call `timeEndPeriod`, so the resolution holds.
-        timeBeginPeriod(1);
-        REAL_TIME_BEGIN_PERIOD.install(host, stub_time_begin_period);
-        REAL_TIME_END_PERIOD.install(host, stub_time_end_period);
+        let pin_ok = timeBeginPeriod(1) == MMSYSERR_NOERROR;
+        let begin = pin_ok && REAL_TIME_BEGIN_PERIOD.install(host, stub_time_begin_period);
+        let end = pin_ok && REAL_TIME_END_PERIOD.install(host, stub_time_end_period);
+        log_at!(pin_ok && begin == end => info / warn,
+            kind = "timer_period_stubs",
+            pin_ok,
+            begin_period = begin,
+            end_period = end,
+        );
     }
 }
