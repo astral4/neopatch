@@ -22,7 +22,7 @@ pub struct PatchSite {
     name: &'static str,
 }
 
-/// What [`PatchSite::apply`] writes over the expected bytes.
+/// What [`PatchSite::apply_write`] writes over the expected bytes.
 enum PatchAction {
     /// A static byte replacement of the same length as the expected bytes.
     Replace(&'static [u8]),
@@ -108,19 +108,20 @@ impl PatchSite {
         self
     }
 
-    /// Applies the patch unconditionally, reporting whether the write landed.
+    /// Writes the patch bytes and reads them back.
     ///
     /// # Safety
     /// `self.addr` must be a valid, committed, readable code address with protection that `VirtualProtect` can modify.
-    #[must_use]
-    unsafe fn apply(&self) -> bool {
+    unsafe fn apply_write(&self) -> Result<(), PatchFailure> {
         let mut buf = [0u8; MAX_PATCH_LEN];
         let written = self.written_bytes(&mut buf);
         if !unsafe { patch_bytes(self.addr, written) } {
-            return false;
+            Err(PatchFailure::Protect)
+        } else if unsafe { self.verify(written) } {
+            Ok(())
+        } else {
+            Err(PatchFailure::Verify)
         }
-        unsafe { self.verify(written) };
-        true
     }
 
     /// Reports whether the expected bytes currently hold at the site.
@@ -155,7 +156,7 @@ impl PatchSite {
         }
     }
 
-    /// Writes into `buf` the exact bytes that [`Self::apply`] would write at the site, returning them truncated to the site's length.
+    /// Writes into `buf` the exact bytes that [`Self::apply_write`] would write at the site, returning them truncated to the site's length.
     fn written_bytes<'a>(&self, buf: &'a mut [u8; MAX_PATCH_LEN]) -> &'a [u8] {
         let len = self.expected.len();
         *buf = [0x90u8; MAX_PATCH_LEN];
@@ -175,11 +176,12 @@ impl PatchSite {
         &buf[..len]
     }
 
-    /// Logs whether the site contains exactly `written`.
+    /// Returns and logs whether the site contains exactly `written`.
     ///
     /// # Safety
     /// `self.addr` must be readable for `written.len()` bytes.
-    unsafe fn verify(&self, written: &[u8]) {
+    #[must_use]
+    unsafe fn verify(&self, written: &[u8]) -> bool {
         let addr = self.addr;
         let mut buf = [0u8; MAX_PATCH_LEN];
 
@@ -217,6 +219,7 @@ impl PatchSite {
                 );
             }
         }
+        ok
     }
 }
 
@@ -255,18 +258,36 @@ unsafe fn sites_hold(groups: &[&[PatchSite]]) -> bool {
     }
 }
 
-fn abort_on_partial_patch(addr: usize, name: &'static str) -> ! {
+/// Why a site cannot be patched.
+#[derive(Clone, Copy)]
+enum PatchFailure {
+    /// The protect window did not open, so nothing was written at this site.
+    Protect,
+    /// The write ran but the site does not hold our bytes, so another writer is involved.
+    Verify,
+}
+
+impl PatchFailure {
+    fn detail(self) -> &'static str {
+        match self {
+            Self::Protect => "protection change between precheck and write",
+            Self::Verify => "post-write verify mismatch",
+        }
+    }
+}
+
+fn abort_on_partial_patch(addr: usize, name: &'static str, detail: &'static str) -> ! {
     error!(
         kind = "patch_write_refused",
         addr = format_args!("{addr:#010x}"),
         name,
-        detail = "protection changed between precheck and write; process is partially patched",
+        detail,
     );
     flush();
     abort();
 }
 
-/// Verifies every patch site in `groups`, then applies all of them. Returns `false` and writes nothing if any site is a mismatch.
+/// Prechecks each site in `groups`, then writes and verifies them. Returns `false` and writes nothing if any site is a pre-mismatch.
 ///
 /// This should be called before installing anything else, since a `false` result means the host binary or environment is unexpected.
 ///
@@ -277,12 +298,12 @@ pub unsafe fn install_all(groups: &[&[PatchSite]]) -> bool {
     if !unsafe { sites_hold(groups) } {
         return false;
     }
-    for (written, site) in groups.iter().copied().flatten().enumerate() {
-        if !unsafe { site.apply() } {
-            if written > 0 {
-                abort_on_partial_patch(site.addr, site.name);
-            }
-            return false;
+    for (index, site) in groups.iter().copied().flatten().enumerate() {
+        match unsafe { site.apply_write() } {
+            Ok(()) => {}
+            // Nothing has been written anywhere yet, so we can still safely degrade to vanilla.
+            Err(PatchFailure::Protect) if index == 0 => return false,
+            Err(failure) => abort_on_partial_patch(site.addr, site.name, failure.detail()),
         }
     }
     true

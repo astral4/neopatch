@@ -12,6 +12,7 @@ All notable changes to neopatch will be documented in this file.
 ### Changed
 
 - Pressing Ctrl-C while a quit is already in progress now prints a hint to the launching terminal instead of being absorbed silently.
+- A patch write that fails read-back verification now terminates the game immediately with a logged error instead of continuing partially patched.
 
 ### Fixed
 
