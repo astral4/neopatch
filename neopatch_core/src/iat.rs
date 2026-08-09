@@ -238,7 +238,7 @@ unsafe fn find_iat_slot(module: HMODULE, import_name: &str) -> SlotOutcome {
                     .cast(),
             )
         };
-        if oft == 0 {
+        if oft == 0 || ft == 0 {
             descriptors += 1;
             desc_offset += size_of::<IMAGE_IMPORT_DESCRIPTOR>();
             continue;
