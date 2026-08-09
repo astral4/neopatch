@@ -1630,7 +1630,7 @@ unsafe fn copy_one_rect(
         if hr.is_ok() {
             return hr;
         }
-        info!(kind = "d3d8_copy_rects_fallback", hr = %fmt_hr!(hr));
+        debug!(kind = "d3d8_copy_rects_fallback", hr = %fmt_hr!(hr));
     }
     unsafe { copy_locked(src9, dst9, sd.Format, r, pt) }
 }
