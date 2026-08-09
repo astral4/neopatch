@@ -552,14 +552,23 @@ fn fmt_mask(v: Option<NonZero<u32>>) -> Cow<'static, str> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{
+        CoreConfig, DEFAULT_GAME_FPS, DEFAULT_REPLAY_SKIP_FPS, DEFAULT_REPLAY_SLOW_FPS,
+        DEFAULT_SESSIONS_TO_KEEP, DisplayCfg, DisplayMode, FramerateCfg, InputCfg, LogCfg,
+        PriorityClass, ProcessCfg, RefreshRateMode, WindowCfg, WindowFrame, apply_display,
+        apply_framerate, apply_input, apply_log, apply_process, apply_window, decode_text,
+        for_each_setting, parse_bitmask, parse_bool, parse_core_only, parse_priority_class,
+        parse_refresh_rate, parse_u32, parse_window_frame, unquote,
+    };
+    use std::num::NonZero;
+    use tracing::level_filters::LevelFilter;
 
     fn nz(n: u32) -> NonZero<u32> {
         NonZero::new(n).unwrap()
     }
 
     #[test]
-    fn decode_text_strips_bom() {
+    fn decode_text_strip_bom() {
         assert_eq!(decode_text(b"\xef\xbb\xbfhello"), "hello");
         assert_eq!(decode_text(b"hello"), "hello");
         // Only one BOM is stripped.
@@ -639,7 +648,7 @@ mod tests {
     }
 
     #[test]
-    fn unquote_strips_matching_pairs() {
+    fn unquote_strip_matching_pairs() {
         assert_eq!(unquote("\"hi\""), "hi");
         assert_eq!(unquote("'hi'"), "hi");
         assert_eq!(unquote("hi"), "hi");
@@ -652,7 +661,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_bool_recognises_aliases() {
+    fn parse_bool_aliases() {
         assert_eq!(parse_bool("true"), Some(true));
         assert_eq!(parse_bool("YES"), Some(true));
         assert_eq!(parse_bool("on"), Some(true));
@@ -674,7 +683,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_bitmask_handles_radix_prefixes() {
+    fn parse_bitmask_radix_prefixes() {
         assert_eq!(parse_bitmask("42"), Some(42));
         assert_eq!(parse_bitmask("0xff"), Some(0xff));
         assert_eq!(parse_bitmask("0xFF"), Some(0xff));
@@ -698,7 +707,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_refresh_rate_falls_back_to_fixed() {
+    fn parse_refresh_rate_fallback() {
         assert_eq!(parse_refresh_rate("native"), Some(RefreshRateMode::Native));
         assert_eq!(
             parse_refresh_rate("nativemultiple"),
@@ -716,7 +725,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_window_frame_accepts_each_variant() {
+    fn parse_window_frame_variants() {
         assert_eq!(parse_window_frame("framed"), Some(WindowFrame::Framed));
         assert_eq!(
             parse_window_frame("FRAMELESS"),
@@ -730,7 +739,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_log_sets_known_keys() {
+    fn apply_log_set_known_keys() {
         let mut cfg = LogCfg::default();
         apply_log(&mut cfg, "level", "off");
         // Zero sessions would delete the session being written, so it falls back to the default.
@@ -742,7 +751,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_display_ignores_unknown_keys() {
+    fn apply_display_ignore_unknown_keys() {
         // Game-specific keys should be silently skipped by `apply_display` here.
         let mut cfg = DisplayCfg::default();
         let baseline_mode = cfg.mode;
@@ -753,7 +762,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_framerate_sets_known_keys_and_clamps_defaults() {
+    fn apply_framerate_set_known_keys() {
         let mut cfg = FramerateCfg::default();
         apply_framerate(&mut cfg, "game_fps", "120");
         apply_framerate(&mut cfg, "replay_skip_fps", "480");
@@ -809,10 +818,11 @@ mod tests {
         assert_eq!(cfg.log.level, LevelFilter::INFO);
         assert_eq!(cfg.log.sessions_to_keep, DEFAULT_SESSIONS_TO_KEEP);
         assert_eq!(cfg.log.log_dir, None);
+        assert_eq!(parse_core_only(""), cfg);
     }
 
     #[test]
-    fn apply_input_toggles_dpad() {
+    fn apply_input_dpad_toggle() {
         let mut cfg = InputCfg::default();
         assert!(cfg.dpad);
         apply_input(&mut cfg, "dpad", "off");
@@ -828,12 +838,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_core_only_empty_matches_defaults() {
-        assert_eq!(parse_core_only(""), CoreConfig::default());
-    }
-
-    #[test]
-    fn parse_core_only_applies_known_keys_across_sections() {
+    fn parse_core_only_apply_known_keys() {
         let text = "
             [framerate]
             game_fps = 120
@@ -855,7 +860,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_core_only_silently_ignores_unknown_sections_and_keys() {
+    fn parse_core_only_ignore_unknown_sections_and_keys() {
         let text = "
             [does_not_exist]
             x = 1

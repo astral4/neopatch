@@ -494,13 +494,6 @@ mod tests {
     }
 
     #[test]
-    fn borderless_outer_size_equals_client_size() {
-        let state = restyle_state(WindowFrame::Borderless, false);
-        let got = prep_main_window(&state, true, requested(0x100a_0000));
-        assert_eq!((got.width, got.height), (640, 480));
-    }
-
-    #[test]
     fn fullscreen_style() {
         let req = requested(WS_POPUP | WS_VISIBLE);
         let state = restyle_state(WindowFrame::Framed, true);
@@ -526,7 +519,7 @@ mod tests {
     }
 
     #[test]
-    fn unset_position() {
+    fn unset_position_and_borderless_outer_size() {
         let state = State::Restyle {
             restyle: ResolvedWindowCfg {
                 position: None,

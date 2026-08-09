@@ -2258,6 +2258,7 @@ mod tests {
         caps_9_to_8, convert_present_params, copy_rect_valid, device8_release, device8_set_texture,
         resource8_release, surface_desc_9_to_8, unwrap8, unwrap8_arg, wrap_add_ref, wrap_created,
     };
+    use crate::fmt_hr;
     use std::cell::Cell;
     use std::ffi::c_void;
     use std::ptr::{NonNull, null, null_mut};
@@ -2411,41 +2412,30 @@ mod tests {
     };
 
     #[test]
-    fn wrap_created_reject_success_with_null_interface() {
-        let mut out = (&raw const MOCK_COM_VTBL).cast_mut().cast();
-        let hr = unsafe {
-            wrap_created(
-                "test",
-                D3D_OK,
-                null_mut(),
-                (&raw const SURFACE8_VTBL).cast(),
-                null_mut(),
-                false,
-                &raw mut out,
-            )
-        };
-        assert_eq!(hr, D3DERR_INVALIDCALL);
-        assert!(out.is_null());
-    }
-
-    #[test]
-    fn wrap_created_forward_original_failure() {
+    fn wrap_created_null_out_slot() {
         const D3DERR_OUTOFVIDEOMEMORY: HRESULT = HRESULT(0x8876_017c_u32.cast_signed());
 
-        let mut out = (&raw const MOCK_COM_VTBL).cast_mut().cast();
-        let hr = unsafe {
-            wrap_created(
-                "test",
-                D3DERR_OUTOFVIDEOMEMORY,
-                null_mut(),
-                (&raw const SURFACE8_VTBL).cast(),
-                null_mut(),
-                false,
-                &raw mut out,
-            )
-        };
-        assert_eq!(hr, D3DERR_OUTOFVIDEOMEMORY, "original error must survive");
-        assert!(out.is_null());
+        // (HRESULT the D3D9 call returned, HRESULT the game must see)
+        for (returned, expected) in [
+            (D3D_OK, D3DERR_INVALIDCALL),
+            (D3DERR_OUTOFVIDEOMEMORY, D3DERR_OUTOFVIDEOMEMORY),
+        ] {
+            // We pre-seed with a non-null value to prove the out-slot gets cleared.
+            let mut out = (&raw const MOCK_COM_VTBL).cast_mut().cast();
+            let hr = unsafe {
+                wrap_created(
+                    "test",
+                    returned,
+                    null_mut(),
+                    (&raw const SURFACE8_VTBL).cast(),
+                    null_mut(),
+                    false,
+                    &raw mut out,
+                )
+            };
+            assert_eq!(hr, expected, "returned {}", fmt_hr!(returned));
+            assert!(out.is_null(), "returned {}", fmt_hr!(returned));
+        }
     }
 
     #[test]
@@ -2568,7 +2558,7 @@ mod tests {
     }
 
     #[test]
-    fn dead_wrapper_calls_are_refused() {
+    fn dead_wrapper_calls_refused() {
         // A surface wrapper released to death refuses methods without touching the released D3D9 object.
         let surf = MockCom::new();
         let mut out = null_mut();

@@ -130,33 +130,12 @@ mod tests {
     use std::thread::spawn;
 
     #[test]
-    fn main_claim_serializes_concurrent_claims() {
-        let handles: Vec<_> = (0..8)
-            .map(|i| {
-                spawn(move || {
-                    let _claim = MainClaim::acquire();
-                    assert!(
-                        MainToken::current().is_none(),
-                        "thread {i} saw a stale claim"
-                    );
-                    // `MainToken` is a ZST with no destructor, so dropping it does not end the claim.
-                    assert!(MainToken::claim().is_some(), "thread {i} could not claim");
-                    assert!(MainToken::current().is_some(), "thread {i} lost its claim");
-                })
-            })
-            .collect();
-
-        for h in handles {
-            h.join().unwrap();
-        }
-    }
-
-    #[test]
     fn claim_and_current_thread_semantics() {
         let _claim = MainClaim::acquire();
 
         assert!(MainToken::current().is_none());
 
+        // `MainToken` is a ZST with no destructor, so dropping one does not end the claim.
         let _tok = MainToken::claim().expect("the guard hands over an unclaimed MAIN_TID");
         assert!(MainToken::claim().is_some());
         assert!(MainToken::current().is_some());

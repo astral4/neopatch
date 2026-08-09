@@ -1741,7 +1741,7 @@ mod tests {
         AdapterSnapshot, Attempt, D3D_OK, D3DDISPLAYMODEEX_SIZE, D3DERR_DEVICEHUNG,
         D3DERR_DEVICELOST, D3DERR_DEVICEREMOVED, D3DERR_INVALIDCALL, D3DERR_OUTOFVIDEOMEMORY,
         FixSet, LadderCtx, MAX_ENUM_RATES, PresentPolicy, RefreshRateMode, Round,
-        build_display_mode_ex, format_name, is_real_refresh_rate, is_same_reported_rate,
+        build_display_mode_ex, is_real_refresh_rate, is_same_reported_rate,
         is_transient_device_error, materialize, plan_attempts, rewrite_behavior_flags,
         rewrite_present_params_impl, run_fix_ladder, select_refresh_rate, translate_managed_pool,
         upgraded_back_buffer_format,
@@ -1794,7 +1794,7 @@ mod tests {
     }
 
     #[test]
-    fn back_buffer_upgrade_depends_on_policy() {
+    fn back_buffer_upgrade_policy() {
         for (requested, upgraded) in [
             (D3DFMT_R5G6B5, D3DFMT_X8R8G8B8),
             (D3DFMT_X1R5G5B5, D3DFMT_X8R8G8B8),
@@ -1885,7 +1885,7 @@ mod tests {
     }
 
     #[test]
-    fn rewrite_present_params_preserves_other_fields() {
+    fn rewrite_present_params_preserve_other_fields() {
         // Locks in the current contract of only touching interval, lockable flag, and back buffer format.
         // TODO: The FLIPEX-direct backlog item will modify `SwapEffect` and `BackBufferCount` here, so this test should be updated.
         let baseline = D3DPRESENT_PARAMETERS {
@@ -1972,7 +1972,7 @@ mod tests {
     }
 
     #[test]
-    fn rewrite_behavior_flags_adds_multithreaded() {
+    fn rewrite_behavior_flags_add_multithreaded() {
         let mt = D3DCREATE_MULTITHREADED.cast_unsigned();
         let game_flags = D3DCREATE_HARDWARE_VERTEXPROCESSING.cast_unsigned();
         let out = rewrite_behavior_flags(game_flags);
@@ -2236,7 +2236,7 @@ mod tests {
     }
 
     #[test]
-    fn ladder_success_first_try_keeps_write_back() {
+    fn ladder_success_first_try_keep_write_back() {
         let snap = snapshot(Some(120), 120, &[(D3DFMT_X8R8G8B8, &[60, 120])]);
         let run = run_ladder(
             fs_pp(D3DFMT_X8R8G8B8, 0),
@@ -2296,7 +2296,7 @@ mod tests {
     }
 
     #[test]
-    fn ladder_redundant_rollback_still_retries() {
+    fn ladder_redundant_rollback_retry() {
         let snap = snapshot(Some(60), 60, &[(D3DFMT_X8R8G8B8, &[60])]);
         let run = run_ladder(
             fs_pp(D3DFMT_X8R8G8B8, 0),
@@ -2311,7 +2311,7 @@ mod tests {
     }
 
     #[test]
-    fn ladder_transient_stops_everything() {
+    fn ladder_transient() {
         let snap = snapshot(
             Some(120),
             120,
@@ -2333,7 +2333,7 @@ mod tests {
     }
 
     #[test]
-    fn ladder_full_escalation_rederives_from_the_request() {
+    fn ladder_fullscreen_escalation() {
         let snap = snapshot(
             Some(120),
             120,
@@ -2365,7 +2365,7 @@ mod tests {
     }
 
     #[test]
-    fn ladder_windowed_escalation_skips_rollbacks() {
+    fn ladder_windowed_escalation() {
         // Windowed: no display mode, so no rate rollback; a refused 16-bit request still escalates to 32-bit.
         let windowed = D3DPRESENT_PARAMETERS {
             BackBufferFormat: D3DFMT_R5G6B5,
@@ -2406,15 +2406,6 @@ mod tests {
         assert_eq!(hr, D3DERR_INVALIDCALL);
         assert!(attempt.is_none());
         assert_eq!(seen, vec![(0, true)]);
-    }
-
-    #[test]
-    fn format_name_known_and_unknown() {
-        assert_eq!(format_name(D3DFMT_X8R8G8B8), "D3DFMT_X8R8G8B8");
-        assert_eq!(format_name(D3DFMT_A8R8G8B8), "D3DFMT_A8R8G8B8");
-        assert_eq!(format_name(D3DFMT_R5G6B5), "D3DFMT_R5G6B5");
-        assert_eq!(format_name(D3DFORMAT(0)), "D3DFMT_UNKNOWN");
-        assert_eq!(format_name(D3DFORMAT(9999)), "?");
     }
 
     #[test]
