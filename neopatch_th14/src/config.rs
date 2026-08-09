@@ -89,7 +89,7 @@ pub(crate) fn write_manifest_extras<W: Write + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::{Resolution, parse_config, parse_resolution};
-    use neopatch_core::config::{CoreConfig, DisplayMode};
+    use neopatch_core::config::CoreConfig;
 
     #[test]
     fn parse_resolution_rejects_unsupported() {
@@ -118,14 +118,5 @@ mod tests {
         let (th14, core) = parse_config(text);
         assert_eq!(th14.resolution, Resolution::R960x720);
         assert_eq!(core.framerate.game_fps, 120);
-    }
-
-    #[test]
-    fn parse_handles_quoted_values_and_comments() {
-        let (th14, core) = parse_config(
-            "[display]\nmode = \"fullscreen\" ; trailing comment\nresolution = '960x720'",
-        );
-        assert_eq!(core.display.mode, DisplayMode::Fullscreen);
-        assert_eq!(th14.resolution, Resolution::R960x720);
     }
 }

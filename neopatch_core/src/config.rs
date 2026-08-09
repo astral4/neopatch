@@ -16,6 +16,9 @@ const DEFAULT_REPLAY_SKIP_FPS: u32 = 240;
 const DEFAULT_REPLAY_SLOW_FPS: u32 = 30;
 const DEFAULT_SESSIONS_TO_KEEP: NonZero<u32> = NonZero::new(10).unwrap();
 
+/// The characters that open a comment.
+const COMMENT: [char; 2] = [';', '#'];
+
 /// Process-wide handle to the active core configuration. Set by the game crate at install time, before any hook that reads it.
 pub static CONFIG: OnceLock<CoreConfig> = OnceLock::new();
 
@@ -314,36 +317,48 @@ fn parse_level(v: &str) -> Option<LevelFilter> {
 pub fn for_each_setting(text: &str, mut f: impl FnMut(&str, &str, &str)) {
     let mut section = "";
     for raw in text.lines() {
-        let line = strip_comment(raw).trim();
-        if line.is_empty() {
+        // A line's kind is decided by its first significant character, before any comment or `=` handling.
+        // `[` opens a section header, and anything else is a `key = value` candidate.
+        if let Some(body) = raw.trim_start().strip_prefix('[') {
+            if let Some(name) = strip_comment(body).trim_end().strip_suffix(']') {
+                section = name.trim();
+            }
             continue;
         }
-        if let Some(name) = line.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
-            section = name.trim();
-            continue;
-        }
-        let Some((k, v)) = line.split_once('=') else {
+        let Some((head, tail)) = raw.split_once('=') else {
             continue;
         };
-        f(section, k.trim(), unquote(v.trim()));
+        if head.contains(COMMENT) {
+            continue;
+        }
+        let key = head.trim();
+        if key.is_empty() {
+            continue;
+        }
+        f(section, key, unquote(value_before_comment(tail.trim())));
     }
 }
 
-/// Outside quotes, `;` and `#` mark the start of a comment and are stripped.
+/// Strips a comment from the input line.
 #[must_use]
 fn strip_comment(line: &str) -> &str {
-    // Instances of `;` and `#` inside a `"..."` or `'...'` value are preserved, so a path like `log_dir = "C:\foo;bar"` parses intact.
-    let mut in_double = false;
-    let mut in_single = false;
-    for (i, c) in line.char_indices() {
-        match c {
-            '"' if !in_single => in_double = !in_double,
-            '\'' if !in_double => in_single = !in_single,
-            ';' | '#' if !in_double && !in_single => return &line[..i],
-            _ => {}
-        }
+    match line.find(COMMENT) {
+        Some(i) => &line[..i],
+        None => line,
     }
-    line
+}
+
+/// Returns `v` up to the start of any trailing comment.
+#[must_use]
+fn value_before_comment(v: &str) -> &str {
+    let opener = v.chars().next().filter(|&c| c == '"' || c == '\'');
+    if let Some(q) = opener
+        && let Some(rel_end) = v[q.len_utf8()..].find(q)
+    {
+        // We keep both quotation marks here since `unquote` will strip the pair.
+        return &v[..q.len_utf8() + rel_end + q.len_utf8()];
+    }
+    strip_comment(v).trim_end()
 }
 
 /// Strips one matching `"..."` or `'...'` pair so quoted INI values like `mode = "fullscreen"` parse the same as unquoted ones.
@@ -567,6 +582,60 @@ mod tests {
 
         le.push(0x41);
         assert_eq!(decode_text(&le), "[a]\nk = 1");
+    }
+
+    type Setting = (String, String, String);
+
+    fn settings(text: &str) -> Vec<Setting> {
+        let mut out = Vec::new();
+        for_each_setting(text, |s, k, v| {
+            out.push((s.to_string(), k.to_string(), v.to_string()));
+        });
+        out
+    }
+
+    fn one(section: &str, key: &str, value: &str) -> Vec<Setting> {
+        vec![(section.into(), key.into(), value.into())]
+    }
+
+    #[test]
+    fn parse_comments_quotes_headers() {
+        let cases = &[
+            ("[a]\nk = v ; note", one("a", "k", "v")),
+            ("[a]\nk = 120;faster", one("a", "k", "120")),
+            ("[a]\nk = 1#gamepad", one("a", "k", "1")),
+            (
+                "[a]\nk = D:\\Marisa's Logs   ; keep",
+                one("a", "k", "D:\\Marisa's Logs"),
+            ),
+            (
+                "[a]\nk = 'D:\\Touhou #2\\logs'",
+                one("a", "k", "D:\\Touhou #2\\logs"),
+            ),
+            ("[a]\nk = \"C:\\foo;bar\"", one("a", "k", "C:\\foo;bar")),
+            ("[a]\nk = \"a ; b\" ; c", one("a", "k", "a ; b")),
+            (
+                "[a]\nk = 'unterminated ; note",
+                one("a", "k", "'unterminated"),
+            ),
+            ("[a]\nk = 'D:\\Marisa's Logs'", one("a", "k", "D:\\Marisa")),
+            (
+                "[a]\nk = \"D:\\Marisa's Logs\"",
+                one("a", "k", "D:\\Marisa's Logs"),
+            ),
+            ("[a]\n; k = v", vec![]),
+            ("[a]\n# k = v", vec![]),
+            ("[a] ; note\nk = v", one("a", "k", "v")),
+            ("[input]\ndpad ; turn this off = false", vec![]),
+            ("[input]\nNOTE # see dpad = 0 to disable", vec![]),
+            ("[input]\ndpad = 1 ; 0 = off", one("input", "dpad", "1")),
+            ("[a] ; note = x\nk = v", one("a", "k", "v")),
+            ("[a] # note = x\nk = v", one("a", "k", "v")),
+            ("[a junk = 1\nk = v", one("", "k", "v")),
+        ];
+        for (text, expected) in cases {
+            assert_eq!(&settings(text), expected, "{text:?}");
+        }
     }
 
     #[test]
@@ -801,11 +870,5 @@ mod tests {
         ";
         let cfg = parse_core_only(text);
         assert_eq!(cfg.framerate.game_fps, DEFAULT_GAME_FPS);
-    }
-
-    #[test]
-    fn parse_core_only_handles_quoted_values_and_trailing_comments() {
-        let cfg = parse_core_only("[display]\nmode = \"fullscreen\" ; trailing comment");
-        assert_eq!(cfg.display.mode, DisplayMode::Fullscreen);
     }
 }

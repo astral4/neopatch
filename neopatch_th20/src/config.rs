@@ -244,14 +244,4 @@ mod tests {
         assert_eq!(core.display.mode, CoreDisplayMode::Fullscreen);
         assert_eq!(core.framerate.game_fps, 120);
     }
-
-    #[test]
-    fn parse_handles_quoted_values_and_comments() {
-        let (th20, core) = parse_config(
-            "[display]\nmode = \"borderless\" ; trailing comment\nresolution = '960x720'",
-        );
-        assert_eq!(th20.display_mode, Th20DisplayMode::Borderless);
-        assert_eq!(core.display.mode, CoreDisplayMode::Fullscreen);
-        assert_eq!(th20.resolution, Resolution::R960x720);
-    }
 }
