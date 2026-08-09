@@ -28,7 +28,7 @@ use windows_sys::Win32::Foundation::{
 use windows_sys::Win32::Storage::FileSystem::{CREATE_ALWAYS, CreateFileW, FILE_ATTRIBUTE_NORMAL};
 use windows_sys::Win32::System::Diagnostics::Debug::{
     AddVectoredExceptionHandler, EXCEPTION_CONTINUE_SEARCH, EXCEPTION_POINTERS,
-    MINIDUMP_EXCEPTION_INFORMATION, MINIDUMP_TYPE, MiniDumpNormal, MiniDumpWithDataSegs,
+    MINIDUMP_EXCEPTION_INFORMATION, MiniDumpNormal, MiniDumpWithDataSegs,
     MiniDumpWithFullMemoryInfo, MiniDumpWithHandleData, MiniDumpWithProcessThreadData,
     MiniDumpWithThreadInfo, MiniDumpWithUnloadedModules, MiniDumpWriteDump,
     SetUnhandledExceptionFilter,
@@ -40,9 +40,6 @@ use windows_sys::Win32::System::Threading::{
     GetCurrentProcess, GetCurrentProcessId, GetCurrentThreadId,
 };
 
-/// Cap dumps per session in case of repeated crashes.
-const DUMP_LIMIT: u32 = 8;
-
 // VC++ runtime conventions.
 const MS_VC_THREAD_NAME: NTSTATUS = 0x406d_1388_u32.cast_signed();
 const MS_VC_CXX_EH: NTSTATUS = 0xe06d_7363_u32.cast_signed();
@@ -52,6 +49,7 @@ const MS_VC_CXX_EH: NTSTATUS = 0xe06d_7363_u32.cast_signed();
 /// the last-chance path leaves it set for good.
 static IN_FILTER: AtomicBool = AtomicBool::new(false);
 
+/// Distinguishes dump filenames within a session.
 static DUMP_SEQ: AtomicU32 = AtomicU32::new(0);
 
 /// Returns the dump path on success; `None` on any failure.
@@ -60,9 +58,6 @@ static DUMP_SEQ: AtomicU32 = AtomicU32::new(0);
 /// The included sections should be enough for windbg to identify the faulting frame.
 unsafe fn write_minidump(info: *const EXCEPTION_POINTERS, label: &str) -> Option<PathBuf> {
     let n = DUMP_SEQ.fetch_add(1, Ordering::Relaxed);
-    if n >= DUMP_LIMIT {
-        return None;
-    }
     let dir = dump_dir()?;
 
     let tid = unsafe { GetCurrentThreadId() };
@@ -93,7 +88,7 @@ unsafe fn write_minidump(info: *const EXCEPTION_POINTERS, label: &str) -> Option
         ExceptionPointers: info.cast_mut(),
         ClientPointers: 0,
     };
-    let dump_type: MINIDUMP_TYPE = MiniDumpNormal
+    let dump_type = MiniDumpNormal
         | MiniDumpWithDataSegs
         | MiniDumpWithHandleData
         | MiniDumpWithUnloadedModules
