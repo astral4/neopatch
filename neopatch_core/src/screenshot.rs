@@ -19,6 +19,7 @@ use png::{BitDepth, ColorType, Encoder};
 use std::ffi::c_void;
 use std::mem::zeroed;
 use std::ptr::{NonNull, null, null_mut};
+use std::slice::from_raw_parts;
 use tracing::{info, warn};
 use windows::Win32::Graphics::Direct3D9::{
     D3DBACKBUFFER_TYPE_MONO, D3DFMT_A8R8G8B8, D3DFMT_X8R8G8B8, D3DFORMAT, D3DLOCK_READONLY,
@@ -315,17 +316,14 @@ unsafe fn build_bmp_24bpp(
     buf.extend_from_slice(&0u32.to_le_bytes()); // important colors
 
     let pad_zeros = [0u8; 3];
-    // We write rows bottom-up. Rows start `pitch` bytes apart (signed; always positive for our `CreateOffscreenPlainSurface`
-    // sysmem surface). Each pixel is 4 bytes BGRX/BGRA. We copy BGR and discard X/A components.
+    // We write rows bottom-up. Each pixel is 4 bytes BGRX/BGRA and BMP's 24bpp channel order is BGR, so we just drop the X/A byte.
+    let row_pixels = usize::try_from(width).map_err(|e| e.to_string())?;
+    let pitch = isize::try_from(pitch).map_err(|e| e.to_string())?;
     for y in (0..height).rev() {
-        let row_off = isize::try_from(y).map_err(|e| e.to_string())?
-            * isize::try_from(pitch).map_err(|e| e.to_string())?;
-        let row_ptr = unsafe { src.offset(row_off) };
-        for x in 0..width {
-            let p = unsafe { row_ptr.add((x * 4) as usize) };
-            buf.push(unsafe { *p });
-            buf.push(unsafe { *p.add(1) });
-            buf.push(unsafe { *p.add(2) });
+        // SAFETY: The caller guarantees `height` rows of `width` 4-byte pixels `pitch` bytes apart.
+        let row = unsafe { surface_row(src, y, pitch, row_pixels)? };
+        for px in row.chunks_exact(4) {
+            buf.extend_from_slice(&px[..3]);
         }
         if pad > 0 {
             buf.extend_from_slice(&pad_zeros[..pad as usize]);
@@ -347,15 +345,13 @@ unsafe fn build_png_24bpp(
     let pixels = width.checked_mul(height).ok_or("image too large")?;
     let rgb_len = pixels.checked_mul(3).ok_or("image too large")?;
     let mut rgb = Vec::with_capacity(rgb_len.try_into().unwrap_or(0));
+    let row_pixels = usize::try_from(width).map_err(|e| e.to_string())?;
+    let pitch = isize::try_from(pitch).map_err(|e| e.to_string())?;
     for y in 0..height {
-        let row_off = isize::try_from(y).map_err(|e| e.to_string())?
-            * isize::try_from(pitch).map_err(|e| e.to_string())?;
-        let row_ptr = unsafe { src.offset(row_off) };
-        for x in 0..width {
-            let p = unsafe { row_ptr.add((x * 4) as usize) };
-            rgb.push(unsafe { *p.add(2) });
-            rgb.push(unsafe { *p.add(1) });
-            rgb.push(unsafe { *p });
+        // SAFETY: The caller guarantees `height` rows of `width` 4-byte pixels `pitch` bytes apart.
+        let row = unsafe { surface_row(src, y, pitch, row_pixels)? };
+        for px in row.chunks_exact(4) {
+            rgb.extend_from_slice(&[px[2], px[1], px[0]]);
         }
     }
 
@@ -371,6 +367,21 @@ unsafe fn build_png_24bpp(
         .map_err(|e| format!("png write_image_data: {e}"))?;
     writer.finish().map_err(|e| format!("png finish: {e}"))?;
     Ok(out)
+}
+
+/// Borrows row `y` of a locked surface. On success, returns `row_pixels` 4-byte pixels starting `y * pitch` bytes into the surface.
+///
+/// # Safety
+/// `src` must point to at least `y + 1` rows of `row_pixels` 32-bit pixels, `pitch` bytes apart, readable for the returned slice's lifetime.
+unsafe fn surface_row<'a>(
+    src: *const u8,
+    y: u32,
+    pitch: isize,
+    row_pixels: usize,
+) -> Result<&'a [u8], String> {
+    let row_off = isize::try_from(y).map_err(|e| e.to_string())? * pitch;
+    // SAFETY: Row `y` exists and rows are `pitch` bytes apart.
+    Ok(unsafe { from_raw_parts(src.offset(row_off), row_pixels * 4) })
 }
 
 /// Writes `data` to `tmp` via `CreateFileA + WriteFile`, then renames `tmp` to `dst` using `MoveFileExA(MOVEFILE_REPLACE_EXISTING)`.
@@ -485,9 +496,32 @@ fn log_failed(path: &[u8], error: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::build_png_24bpp;
+    use super::{build_bmp_24bpp, build_png_24bpp};
     use png::{BitDepth, ColorType, Decoder};
     use std::io::Cursor;
+
+    #[test]
+    fn build_bmp_24bpp_layout() {
+        // 3x2 source, pitch = 16 bytes/row. The 0xAA row tail padding must be skipped by the stride math.
+        #[rustfmt::skip]
+        let src = [
+            0x01, 0x02, 0x03, 0xff,    0x04, 0x05, 0x06, 0xff,    0x07, 0x08, 0x09, 0xff,    0xaa, 0xaa, 0xaa, 0xaa,
+            0x11, 0x12, 0x13, 0xff,    0x14, 0x15, 0x16, 0xff,    0x17, 0x18, 0x19, 0xff,    0xaa, 0xaa, 0xaa, 0xaa,
+        ];
+        let out = unsafe { build_bmp_24bpp(3, 2, 16, src.as_ptr()) }.expect("encode");
+        assert_eq!(&out[..2], b"BM");
+        assert_eq!(out.len(), 54 + 12 * 2);
+        assert_eq!(u32::from_le_bytes(out[2..6].try_into().unwrap()), 78);
+        assert_eq!(u32::from_le_bytes(out[10..14].try_into().unwrap()), 54);
+        assert_eq!(u16::from_le_bytes(out[28..30].try_into().unwrap()), 24);
+
+        #[rustfmt::skip]
+        let expected_pixels: [u8; 24] = [
+            0x11, 0x12, 0x13,    0x14, 0x15, 0x16,    0x17, 0x18, 0x19,    0, 0, 0,
+            0x01, 0x02, 0x03,    0x04, 0x05, 0x06,    0x07, 0x08, 0x09,    0, 0, 0,
+        ];
+        assert_eq!(&out[54..], &expected_pixels);
+    }
 
     /// Encodes a top-down 32bpp BGRX source and decodes the PNG back into `(width, height, RGB bytes)`.
     fn round_trip(width: u32, height: u32, pitch: i32, src: &[u8]) -> (u32, u32, Vec<u8>) {
@@ -518,7 +552,7 @@ mod tests {
 
         // 2x2 source, pitch = 8 bytes/row. There is no row tail to skip.
         #[rustfmt::skip]
-        let tight: [u8; 16] = [
+        let tight = [
             0xff, 0x00, 0x00, 0x00,    0x00, 0xff, 0x00, 0x00, // blue, green
             0x00, 0x00, 0xff, 0x00,    0xff, 0xff, 0xff, 0x00, // red, white
         ];
@@ -528,9 +562,8 @@ mod tests {
         );
 
         // 2x3 source, pitch = 12 bytes/row. The 0xAA row tail padding must be skipped by the stride math.
-        // If it leaked into the output, then the decoded pixels would be wrong.
         #[rustfmt::skip]
-        let padded: [u8; 36] = [
+        let padded = [
             0xff, 0x00, 0x00, 0x00,    0x00, 0xff, 0x00, 0x00,    0xaa, 0xaa, 0xaa, 0xaa, // blue, green
             0x00, 0x00, 0xff, 0x00,    0xff, 0xff, 0xff, 0x00,    0xaa, 0xaa, 0xaa, 0xaa, // red, white
             0x00, 0xff, 0xff, 0x00,    0xff, 0x00, 0xff, 0x00,    0xaa, 0xaa, 0xaa, 0xaa, // yellow, magenta
