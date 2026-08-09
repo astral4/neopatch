@@ -2,9 +2,14 @@
 
 use crate::log::flush;
 use crate::window::main_hwnd;
+use std::ptr::null_mut;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::{info, warn};
-use windows_sys::Win32::System::Console::{CTRL_BREAK_EVENT, CTRL_C_EVENT, SetConsoleCtrlHandler};
+use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+use windows_sys::Win32::Storage::FileSystem::{FILE_TYPE_CHAR, GetFileType, WriteFile};
+use windows_sys::Win32::System::Console::{
+    CTRL_BREAK_EVENT, CTRL_C_EVENT, GetStdHandle, STD_ERROR_HANDLE, SetConsoleCtrlHandler,
+};
 use windows_sys::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_CLOSE};
 use windows_sys::core::BOOL;
 
@@ -20,6 +25,9 @@ unsafe extern "system" fn handler(ctrl_type: u32) -> BOOL {
 
     if QUIT_REQUESTED.load(Ordering::Relaxed) {
         info!(kind = "console_ctrl_quit_already_requested", ctrl_type);
+        console_hint(
+            b"neopatch: quit already requested; close this console window to force-kill\n",
+        );
         return HANDLED;
     }
 
@@ -39,6 +47,22 @@ unsafe extern "system" fn handler(ctrl_type: u32) -> BOOL {
     QUIT_REQUESTED.store(true, Ordering::Relaxed);
     info!(kind = "console_ctrl_close_posted", ctrl_type);
     HANDLED
+}
+
+/// Sends a best-effort note to the terminal the game was launched from.
+fn console_hint(msg: &[u8]) {
+    let h = unsafe { GetStdHandle(STD_ERROR_HANDLE) };
+    if h.is_null() || h == INVALID_HANDLE_VALUE {
+        return;
+    }
+    if unsafe { GetFileType(h) } != FILE_TYPE_CHAR {
+        return;
+    }
+    let Ok(len) = u32::try_from(msg.len()) else {
+        return;
+    };
+    let mut written = 0u32;
+    unsafe { WriteFile(h, msg.as_ptr(), len, &raw mut written, null_mut()) };
 }
 
 /// Installs the console control handler. This should be called after logging is initialized.

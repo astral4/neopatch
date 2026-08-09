@@ -9,6 +9,10 @@ All notable changes to neopatch will be documented in this file.
 - Support for Touhou 9.5 ~ Shoot the Bullet (`th095.exe v1.02a`).
 - Support for Touhou 12.5 ~ Double Spoiler (`th125.exe v1.00a`).
 
+### Changed
+
+- Pressing Ctrl-C while a quit is already in progress now prints a hint to the launching terminal instead of being absorbed silently.
+
 ## [0.11.0] - 2026-08-07
 
 ### Added
