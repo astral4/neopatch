@@ -50,11 +50,11 @@ unsafe fn install_hooks() {
     let host_exe_path = current_exe().ok();
     let exe_dir = host_exe_path.as_deref().and_then(Path::parent);
 
-    let core_cfg = exe_dir
-        .and_then(|d| read(d.join("neopatch.ini")).ok())
-        .map_or_else(CoreConfig::default, |b| parse_core_only(&decode_text(&b)));
-    drop(CONFIG.set(core_cfg));
-    let core_cfg = CONFIG.get().unwrap();
+    let core_cfg = CONFIG.get_or_init(|| {
+        exe_dir
+            .and_then(|d| read(d.join("neopatch.ini")).ok())
+            .map_or_else(CoreConfig::default, |b| parse_core_only(&decode_text(&b)))
+    });
 
     let install_dir = exe_dir.map_or_else(|| PathBuf::from("."), Path::to_path_buf);
     log::init(&install_dir, core_cfg, host_exe_path.as_deref(), |_| Ok(()));
