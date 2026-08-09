@@ -132,29 +132,40 @@ impl Pacer {
         self.deadline_qpc.set(tok, deadline + period);
     }
 
+    /// Waits out the bulk of the interval, then spins to the exact deadline.
     fn sleep_until(&self, tok: &MainToken, deadline: i64, now: i64) {
         let remaining_qpc = deadline - now;
-        let h = self.timer.get(tok);
-        if h.is_null() {
+        if !self.timer_wait(tok, remaining_qpc) {
             let ms = qpc_to_ms(remaining_qpc, self.qpc_freq);
             if ms > 1 {
                 unsafe { Sleep(ms - 1) };
             }
-            spin_until(deadline);
-            return;
-        }
-        // By `SetWaitableTimer` convention, a negative `due_time` indicates a relative interval in 100ns units.
-        // We shave a safety margin and spin to the exact deadline.
-        let hundred_ns = qpc_to_100ns(remaining_qpc, self.qpc_freq);
-        if hundred_ns > SAFETY_MARGIN_100NS {
-            let due = -(hundred_ns - SAFETY_MARGIN_100NS);
-            unsafe {
-                if SetWaitableTimer(h, &raw const due, 0, None, null(), 0) != 0 {
-                    WaitForSingleObject(h, INFINITE);
-                }
-            }
         }
         spin_until(deadline);
+    }
+
+    /// Waits on the high-resolution timer, shaving a safety margin off the interval so the caller's spin lands on the deadline exactly.
+    /// Returns whether the wait was performed.
+    fn timer_wait(&self, tok: &MainToken, remaining_qpc: i64) -> bool {
+        let h = self.timer.get(tok);
+        if h.is_null() {
+            return false;
+        }
+
+        // By `SetWaitableTimer` convention, a negative `due_time` indicates a relative interval in 100ns units.
+        let hundred_ns = qpc_to_100ns(remaining_qpc, self.qpc_freq);
+        if hundred_ns <= SAFETY_MARGIN_100NS {
+            return true;
+        }
+
+        let due = -(hundred_ns - SAFETY_MARGIN_100NS);
+        unsafe {
+            if SetWaitableTimer(h, &raw const due, 0, None, null(), 0) == 0 {
+                return false;
+            }
+            WaitForSingleObject(h, INFINITE);
+        }
+        true
     }
 }
 
