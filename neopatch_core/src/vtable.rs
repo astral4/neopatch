@@ -13,9 +13,10 @@ use crate::modules::{ModuleRange, annotate_addr, module_containing, module_info}
 use crate::protect::with_writable;
 use std::marker::PhantomData;
 use std::mem::transmute_copy;
+use std::num::NonZero;
 use std::ptr::{NonNull, read_unaligned, write_unaligned};
 use std::sync::OnceLock;
-use std::sync::atomic::{Ordering, fence};
+use std::sync::atomic::{AtomicUsize, Ordering, fence};
 use tracing::{debug, warn};
 use windows_sys::Win32::Foundation::HMODULE;
 
@@ -107,6 +108,101 @@ impl<F: Copy + Send + Sync + Unpin + 'static> FnSlot<F> {
             "slot `{}`: already captured",
             self.name,
         );
+    }
+}
+
+/// Builds the `hooks` array for an instance of [`IndexedFnSlots<F, 8>`].
+macro_rules! hook_array8 {
+    ($hook:ident) => {
+        [
+            $hook::<0>, $hook::<1>, $hook::<2>, $hook::<3>, $hook::<4>, $hook::<5>, $hook::<6>,
+            $hook::<7>,
+        ]
+    };
+}
+pub(crate) use hook_array8;
+
+/// One entry of [`IndexedFnSlots`].
+struct IndexedEntry<F> {
+    /// The claiming vtable's address; `0` = unclaimed.
+    key: AtomicUsize,
+    original: OnceLock<F>,
+}
+
+/// A pool of displaced originals for one logical slot patched in more than one vtable. Each entry is bound to its own hook instance,
+/// so installing `hooks[i]` into a vtable routes every call arriving through that vtable to entry `i`'s original.
+///
+/// Entries are never evicted. `N` is the maximum number of distinct vtables that can ever be patched for this slot.
+pub(crate) struct IndexedFnSlots<F, const N: usize> {
+    /// The table's identifier for panic and diagnostic messages.
+    name: &'static str,
+    /// `hooks[i]` is the instance whose body forwards through entry `i`.
+    hooks: [F; N],
+    entries: [IndexedEntry<F>; N],
+    /// The next unclaimed entry.
+    next: AtomicUsize,
+}
+
+// TODO: Tighten to `F: FnPtr` if the `fn_ptr_trait` feature stabilizes.
+impl<F: Copy + Send + Sync + Unpin + 'static, const N: usize> IndexedFnSlots<F, N> {
+    #[must_use]
+    pub(crate) const fn new(name: &'static str, hooks: [F; N]) -> Self {
+        Self {
+            name,
+            hooks,
+            entries: [const {
+                IndexedEntry {
+                    key: AtomicUsize::new(0),
+                    original: OnceLock::new(),
+                }
+            }; N],
+            next: AtomicUsize::new(0),
+        }
+    }
+
+    /// Returns the original bound to entry `idx`.
+    ///
+    /// # Panics
+    /// Panics if the entry was never claimed.
+    pub(crate) fn get(&self, idx: usize) -> F {
+        *self.entries[idx]
+            .original
+            .get()
+            .unwrap_or_else(|| panic!("indexed slot `{}[{idx}]` not claimed", self.name))
+    }
+
+    /// Returns the hook instance bound to entry `idx`.
+    pub(crate) fn hook(&self, idx: usize) -> F {
+        self.hooks[idx]
+    }
+
+    /// Returns the entry `key` was claimed under, or `None` for a vtable that has never been seen before.
+    fn lookup(&self, key: NonZero<usize>) -> Option<usize> {
+        self.entries
+            .iter()
+            .position(|e| e.key.load(Ordering::Acquire) == key.get())
+    }
+
+    /// Claims an entry holding `original` for `key` (the vtable it was displaced from) and returns the index to install.
+    /// If `key` was already claimed, then the existing index is returned. Returns `None` when the pool is already full/exhausted.
+    pub(crate) fn claim(&self, key: NonZero<usize>, original: F) -> Option<usize> {
+        if let Some(idx) = self.lookup(key) {
+            return Some(idx);
+        }
+
+        let idx = self
+            .next
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                (n < N).then_some(n + 1)
+            })
+            .ok()?;
+        // A fresh index is claimed exactly once, so its entry is necessarily empty.
+        // We publish the original before the key, so a lookup that finds the key also finds the original.
+        let entry = &self.entries[idx];
+        let stored = entry.original.set(original).is_ok();
+        debug_assert!(stored, "indexed slot `{}[{idx}]` claimed twice", self.name);
+        entry.key.store(key.get(), Ordering::Release);
+        Some(idx)
     }
 }
 
@@ -204,16 +300,42 @@ pub(crate) struct VtblScope<V> {
     expected_range: Option<ModuleRange>,
 }
 
+/// Logs a revisit to a slot whose original was already captured.
+fn log_recapture(name: &str, offset: usize, kept_raw: *mut (), current_raw: *mut ()) {
+    if kept_raw == current_raw {
+        debug!(
+            kind = "intercept_recapture_skipped",
+            name,
+            offset = format_args!("{offset:#x}"),
+            value = format_args!("{kept_raw:p}"),
+        );
+    } else {
+        // A divergent values means a shim was layered between our two patches.
+        // In this situation, we keep the first capture so the reinstalled hook skips the shim.
+        warn!(
+            kind = "intercept_recapture_divergent",
+            name,
+            offset = format_args!("{offset:#x}"),
+            kept = format_args!("{kept_raw:p}"),
+            seen = format_args!("{current_raw:p}"),
+        );
+    }
+}
+
+/// A slot resolved for interception.
+struct ResolvedSlot<F> {
+    slot_raw: *mut *mut (),
+    current_raw: *mut (),
+    offset: usize,
+    original: F,
+}
+
 impl<V> VtblScope<V> {
-    /// Capture the displaced original into `original` and write `hook` at the slot reached by `proj`.
+    /// Reads the slot at `proj`, short-circuiting when it already holds our hook (idempotent re-entry) or is null
+    /// (no original to chain through, so we refuse rather than overwrite it). Returns the slot address and the displaced original on success.
     // TODO: Tighten to `F: FnPtr` if the `fn_ptr_trait` feature stabilizes.
-    pub(crate) fn intercept<F>(
-        &self,
-        original: &FnSlot<F>,
-        proj: SlotProjection<V, F>,
-        name: &str,
-        hook: F,
-    ) where
+    fn resolve_slot<F>(&self, proj: SlotProjection<V, F>, name: &str) -> Option<ResolvedSlot<F>>
+    where
         F: Copy + Send + Sync + Unpin + 'static,
     {
         let slot_ptr = proj.slot_ptr(self.vtbl.as_ptr());
@@ -234,62 +356,119 @@ impl<V> VtblScope<V> {
                 current_raw,
                 PatchOutcome::AlreadyOurs,
             );
-            return;
+            return None;
         }
 
         // We must be able to chain through the displaced original. A null current slot has no original to capture,
         // so we refuse the installation rather than write our hook over a null slot we can't trampoline through.
-        let Some(f) = (unsafe { raw_to_fn_ptr(current_raw) }) else {
+        if let Some(original) = unsafe { raw_to_fn_ptr(current_raw) } {
+            Some(ResolvedSlot {
+                slot_raw,
+                current_raw,
+                offset,
+                original,
+            })
+        } else {
             warn!(
                 kind = "vtable_patch",
                 name,
                 offset = format_args!("{offset:#x}"),
                 status = "NULL_SLOT_REFUSED",
             );
+            None
+        }
+    }
+
+    /// Writes `hook` into the resolved slot and logs the patch outcome.
+    fn write_hook<F>(&self, resolved: &ResolvedSlot<F>, name: &str, hook: F)
+    where
+        F: Copy + Send + Sync + Unpin + 'static,
+    {
+        let hook_raw = unsafe { fn_ptr_to_raw(hook) };
+        // Trampolines reading the new slot value must also see the captured original.
+        // The vtable write below is a plain store, so the release fence formally only acts as a compiler barrier.
+        // Cross-thread ordering rests on x86 TSO and the hardware atomicity of an aligned 4-byte store.
+        fence(Ordering::Release);
+        // SAFETY: The writable window is open for the scope, and the projection's const assert bounds the slot within the protected range.
+        unsafe { write_unaligned(resolved.slot_raw, hook_raw) };
+        // SAFETY: See above.
+        let verify = unsafe { read_unaligned(resolved.slot_raw) };
+        let outcome = if verify == hook_raw {
+            PatchOutcome::Applied
+        } else {
+            PatchOutcome::Mismatch
+        };
+        self.log_outcome(
+            name,
+            resolved.offset,
+            resolved.current_raw,
+            hook_raw,
+            outcome,
+        );
+    }
+
+    /// Captures the displaced original into `original` and writes `hook` at the slot reached by `proj`.
+    // TODO: Tighten to `F: FnPtr` if the `fn_ptr_trait` feature stabilizes.
+    pub(crate) fn intercept<F>(
+        &self,
+        original: &FnSlot<F>,
+        proj: SlotProjection<V, F>,
+        name: &str,
+        hook: F,
+    ) where
+        F: Copy + Send + Sync + Unpin + 'static,
+    {
+        let Some(resolved) = self.resolve_slot(proj, name) else {
             return;
         };
 
         // When `PatchOutcome::AlreadyOurs` misses because the second visit arrives through a different vtable allocation
         // for the same logical slot, the visit reads a slot that still holds a real original and we'd panic in `FnSlot::store`.
         // We skip the store but still patch the slot so calls through this distinct vtable route through us.
-        // In the case of a divergent value (e.g. a shim layered between our two patches), we keep the original capture.
-        // This means the trampoline skips the shim, but at least we don't silently lose intercept coverage of this slot.
+        // A slot patched across genuinely distinct vtables should use `intercept_indexed` instead,
+        // which forwards each vtable's calls through its own original rather than the first-captured one.
         if let Some(existing_raw) = original.captured_raw() {
-            if existing_raw == current_raw {
-                debug!(
-                    kind = "intercept_recapture_skipped",
-                    name,
-                    offset = format_args!("{offset:#x}"),
-                    value = format_args!("{existing_raw:p}"),
-                );
-            } else {
-                warn!(
-                    kind = "intercept_recapture_divergent",
-                    name,
-                    offset = format_args!("{offset:#x}"),
-                    kept = format_args!("{existing_raw:p}"),
-                    seen = format_args!("{current_raw:p}"),
-                );
-            }
+            log_recapture(name, resolved.offset, existing_raw, resolved.current_raw);
         } else {
-            original.store(f);
+            original.store(resolved.original);
         }
-        let hook_raw = unsafe { fn_ptr_to_raw(hook) };
-        // Trampolines reading the new slot value must also see the captured `original` via `FnSlot::try_get`.
-        // The vtable write below is a plain store, so the release fence formally only acts as a compiler barrier.
-        // Cross-thread ordering rests on x86 TSO and the hardware atomicity of an aligned 4-byte store.
-        fence(Ordering::Release);
-        // SAFETY: see above.
-        unsafe { write_unaligned(slot_raw, hook_raw) };
+        self.write_hook(&resolved, name, hook);
+    }
 
-        // SAFETY: see above.
-        let verify = unsafe { read_unaligned(slot_raw) };
-        let outcome = if verify == hook_raw {
-            PatchOutcome::Applied
-        } else {
-            PatchOutcome::Mismatch
+    /// Like [`VtblScope::intercept`], but for a slot patched across several genuinely distinct vtables.
+    // TODO: Tighten to `F: FnPtr` if the `fn_ptr_trait` feature stabilizes.
+    pub(crate) fn intercept_indexed<F, const N: usize>(
+        &self,
+        originals: &IndexedFnSlots<F, N>,
+        proj: SlotProjection<V, F>,
+        name: &str,
+    ) where
+        F: Copy + Send + Sync + Unpin + 'static,
+    {
+        let Some(resolved) = self.resolve_slot(proj, name) else {
+            return;
         };
-        self.log_outcome(name, offset, current_raw, hook_raw, outcome);
+
+        let key = self.vtbl.addr();
+        if let Some(idx) = originals.lookup(key) {
+            let kept_raw = unsafe { fn_ptr_to_raw(originals.get(idx)) };
+            log_recapture(name, resolved.offset, kept_raw, resolved.current_raw);
+            self.write_hook(&resolved, name, originals.hook(idx));
+            return;
+        }
+
+        let Some(idx) = originals.claim(key, resolved.original) else {
+            warn!(
+                kind = "vtable_patch",
+                name,
+                offset = format_args!("{:#x}", resolved.offset),
+                key = format_args!("{key:#x}"),
+                status = "INDEX_POOL_FULL",
+            );
+            return;
+        };
+
+        self.write_hook(&resolved, name, originals.hook(idx));
     }
 
     /// Reads a slot we trampoline through but don't patch.
@@ -412,5 +591,59 @@ pub(crate) unsafe fn install_vtable<V>(vtbl: NonNull<V>, scope: impl FnOnce(&Vtb
             addr = format_args!("{region_start:p}"),
             span = size,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::IndexedFnSlots;
+    use std::num::NonZero;
+
+    fn one() -> u32 {
+        1
+    }
+    fn two() -> u32 {
+        2
+    }
+
+    fn nz(addr: usize) -> NonZero<usize> {
+        NonZero::new(addr).unwrap()
+    }
+
+    #[test]
+    fn claim_bind_keys_to_originals() {
+        static SLOTS: IndexedFnSlots<fn() -> u32, 2> = IndexedFnSlots::new("TEST", [one, one]);
+        let a = SLOTS.claim(nz(0x1000), one).unwrap();
+        let b = SLOTS.claim(nz(0x2000), two).unwrap();
+        assert_ne!(a, b);
+        assert_eq!((SLOTS.get(a))(), 1);
+        assert_eq!((SLOTS.get(b))(), 2);
+    }
+
+    #[test]
+    fn claim_keep_first_capture_per_key() {
+        static SLOTS: IndexedFnSlots<fn() -> u32, 2> = IndexedFnSlots::new("TEST", [one, one]);
+        let first = SLOTS.claim(nz(0x1000), one).unwrap();
+        let second = SLOTS.claim(nz(0x1000), two).unwrap();
+        assert_eq!(first, second);
+        assert_eq!((SLOTS.get(first))(), 1);
+    }
+
+    #[test]
+    fn claim_refuse_when_full() {
+        static SLOTS: IndexedFnSlots<fn() -> u32, 1> = IndexedFnSlots::new("TEST", [one]);
+        assert_eq!(SLOTS.claim(nz(0x1000), one), Some(0));
+        assert_eq!(SLOTS.claim(nz(0x2000), two), None);
+        assert_eq!(SLOTS.lookup(nz(0x1000)), Some(0));
+        assert_eq!((SLOTS.get(0))(), 1);
+    }
+
+    #[test]
+    fn lookup_miss_unclaimed_keys() {
+        static SLOTS: IndexedFnSlots<fn() -> u32, 2> = IndexedFnSlots::new("TEST", [one, one]);
+        assert!(SLOTS.lookup(nz(0x1000)).is_none());
+        assert_eq!(SLOTS.claim(nz(0x1000), one), Some(0));
+        assert_eq!(SLOTS.lookup(nz(0x1000)), Some(0));
+        assert!(SLOTS.lookup(nz(0x2000)).is_none());
     }
 }
