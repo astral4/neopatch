@@ -1,9 +1,9 @@
 //! Generic `dinput8.dll` proxy that loads the real System32 export and forwards calls.
 //!
-//! Every game crate that ships as `dinput8.dll` should use this to keep the proxy export working even if hook installation fails:
-//! call [`init`] once from `DllMain` and re-export `DirectInput8Create` via the [`crate::dinput8_export!`] macro.
+//! Game-specific crates that ship as `dinput8.dll` should re-export `DirectInput8Create` via the [`crate::dinput8_export!`] macro
+//! to keep the proxy export working even if hook installation fails. The real DLL is resolved on the first forwarded call.
 
-use crate::vtable::{FnSlot, raw_to_fn_ptr};
+use crate::vtable::raw_to_fn_ptr;
 use std::ffi::c_void;
 use std::mem::offset_of;
 use std::sync::OnceLock;
@@ -38,7 +38,8 @@ type DirectInput8CreateFn = unsafe extern "system" fn(
     *mut c_void,
 ) -> HRESULT;
 
-static REAL: FnSlot<DirectInput8CreateFn> = FnSlot::new("REAL_DIRECT_INPUT_8_CREATE");
+/// System32's `DirectInput8Create`, resolved once on first use.
+static REAL: OnceLock<Option<DirectInput8CreateFn>> = OnceLock::new();
 
 /// Optional callback run with the new `IDirectInput8` after each successful `DirectInput8Create`.
 /// Set by [`set_on_created`]; first caller wins.
@@ -50,9 +51,9 @@ pub(crate) fn set_on_created(f: unsafe fn(*mut c_void)) {
     let _ = ON_CREATED.set(f);
 }
 
-/// Loads System32's `dinput8.dll` by full path so the bare name doesn't resolve back to us via the same DLL search order
-/// that put us here, and caches the real `DirectInput8Create`. Idempotent; subsequent calls are no-ops.
-pub fn init() {
+/// Loads System32's `dinput8.dll` by full path so the bare name doesn't resolve back to us
+/// via the same DLL search order that put us here, and returns the real `DirectInput8Create`.
+fn load_system_dinput8() -> Option<DirectInput8CreateFn> {
     const SUFFIX: [u16; 13] = {
         let s = b"\\dinput8.dll";
         let mut out = [0u16; 13];
@@ -67,23 +68,20 @@ pub fn init() {
     let mut buf = [0u16; MAX_PATH as usize];
     let len = unsafe { GetSystemDirectoryW(buf.as_mut_ptr(), MAX_PATH) };
     if len == 0 || (len as usize) + SUFFIX.len() > buf.len() {
-        return;
+        return None;
     }
     let path_end = len as usize;
     buf[path_end..path_end + SUFFIX.len()].copy_from_slice(&SUFFIX);
     let dll = unsafe { LoadLibraryW(buf.as_ptr()) };
     if dll.is_null() {
-        return;
+        return None;
     }
-    if let Some(f) = unsafe { GetProcAddress(dll, c"DirectInput8Create".as_ptr().cast()) }
-        && let Some(real) = unsafe { raw_to_fn_ptr(f as *mut ()) }
-    {
-        REAL.store(real);
-    }
+    let proc = unsafe { GetProcAddress(dll, c"DirectInput8Create".as_ptr().cast()) }?;
+    unsafe { raw_to_fn_ptr(proc as *mut ()) }
 }
 
-/// Forwards to the cached real `DirectInput8Create`. Returns `E_FAIL` if [`init`] hasn't run
-/// or System32's `dinput8.dll` cannot be resolved. On success, hands the returned `IDirectInput8` to any callback
+/// Forwards to the real `DirectInput8Create`, resolving System32's `dinput8.dll` on the first call.
+/// Returns `E_FAIL` if it cannot be resolved. On success, hands the returned `IDirectInput8` to any callback
 /// registered via [`set_on_created`]. If no callback is registered, the call simply passes through.
 ///
 /// # Safety
@@ -95,7 +93,7 @@ pub unsafe fn forward(
     ppv_out: *mut *mut c_void,
     punk_outer: *mut c_void,
 ) -> HRESULT {
-    let Some(real) = REAL.try_get() else {
+    let Some(real) = *REAL.get_or_init(load_system_dinput8) else {
         return E_FAIL;
     };
     let hr = unsafe { real(hinst, dw_version, riidltf, ppv_out, punk_outer) };

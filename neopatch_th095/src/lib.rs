@@ -11,7 +11,7 @@ use neopatch_core::config::{CONFIG, CoreConfig, decode_text, parse_core_only};
 use neopatch_core::pacer::{PACER, Pacer, PacingPolicy};
 use neopatch_core::patches::install_all;
 use neopatch_core::{
-    ansi, console, crash, d3d8, dinput8, dinput8_export, exit_hooks, gdi_caps, input, log, process,
+    ansi, console, crash, d3d8, dinput8_export, exit_hooks, gdi_caps, input, log, process,
     timer_period, vtable, window,
 };
 use std::env::current_exe;
@@ -36,7 +36,6 @@ unsafe extern "system" fn DllMain(hinst: HINSTANCE, reason: u32, _reserved: *mut
     }
     unsafe { DisableThreadLibraryCalls(hinst as HMODULE) };
     vtable::set_our_dll_handle(hinst as HMODULE);
-    dinput8::init();
     unsafe { install_hooks() };
     1
 }
