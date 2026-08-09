@@ -22,6 +22,7 @@ All notable changes to neopatch will be documented in this file.
 - Log-session retention now deletes only directories containing a manifest or event log.
 - Configuration files saved as UTF-16 are now decoded correctly instead of having every setting silently fall back to defaults.
 - Unquoted configuration values containing an apostrophe are now parsed more robustly.
+- Fullscreen refresh rate selection no longer rejects NTSC-skewed values under the `Native` and `Fixed` refresh rate modes.
 - A failed `CreateThread` call observed by the game now reports the operating system's error code instead of one overwritten by neopatch's own logging.
 - A refused timer resolution request no longer suppresses the games' own timer-resolution calls.
 - Crash reports no longer fabricate a zeroed stack readout when the faulting thread's stack is unreadable.

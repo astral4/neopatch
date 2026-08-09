@@ -823,23 +823,21 @@ unsafe fn enumerate_supported_rates(
 /// Chooses the fullscreen refresh rate for `mode`. Rates are validated against `supported`, the rates the adapter advertises
 /// at the target resolution and format; see [`AdapterSnapshot`]. `desktop_rate` is the resolved desktop rate.
 fn pick_refresh_rate(mode: RefreshRateMode, supported: &[u32], desktop_rate: u32) -> u32 {
+    let chosen = select_refresh_rate(mode, supported, desktop_rate);
     if let RefreshRateMode::Fixed(target) = mode {
-        let target = target.get();
         if supported.is_empty() {
-            info!(kind = "refresh_rate_fixed_unvalidated", target_hz = target);
-        } else if !supported
-            .iter()
-            .any(|&r| r == target || normalize_reported_rate(r) == target)
-        {
+            info!(
+                kind = "refresh_rate_fixed_unvalidated",
+                target_hz = target.get()
+            );
+        } else if !supported.contains(&chosen) {
             error!(
                 kind = "refresh_rate_fixed_unsupported",
-                target_hz = target,
+                target_hz = target.get(),
                 supported = ?supported,
             );
         }
     }
-
-    let chosen = select_refresh_rate(mode, supported, desktop_rate);
     info!(
         kind = "refresh_rate_decision",
         desktop_rate_hz = desktop_rate,
@@ -851,11 +849,14 @@ fn pick_refresh_rate(mode: RefreshRateMode, supported: &[u32], desktop_rate: u32
 
 /// Applies the refresh-rate policy against the adapter's `supported` rates at the target resolution.
 /// `desktop_rate` is the raw reported rate.
+///
+/// NTSC-derived (1000/1001) modes report one less than their nominal rate (e.g. 59 for 60; 119 for 120),
+/// so comparisons against a nominal reference allow a +1 skew on the reported side.
 /// - `Native`: see [`native_rate`].
-/// - `NativeMultiple`: the highest supported multiple of 60 not above the desktop rate,
+/// - `NativeMultiple`: the highest supported multiple of 60 (counting NTSC variants) not above the desktop rate,
 ///   or the `Native` value if no multiple of 60 is available.
-/// - `Fixed`: the supported rate equal to the target, else one that normalizes to it
-///   (e.g. 119 for a `Fixed(120)`), else the target unchanged.
+/// - `Fixed`: the supported rate equal to the target, else the target's NTSC variant (e.g. 119 for a `Fixed(120)`),
+///   else the target unchanged.
 fn select_refresh_rate(mode: RefreshRateMode, supported: &[u32], desktop_rate: u32) -> u32 {
     match mode {
         RefreshRateMode::Native => native_rate(supported, desktop_rate),
@@ -863,37 +864,30 @@ fn select_refresh_rate(mode: RefreshRateMode, supported: &[u32], desktop_rate: u
             .iter()
             .copied()
             .filter(|&r| {
-                let hz = normalize_reported_rate(r);
-                hz.is_multiple_of(60) && hz <= normalize_reported_rate(desktop_rate)
+                (r.is_multiple_of(60) || (r + 1).is_multiple_of(60))
+                    && r <= desktop_rate.saturating_add(1)
             })
             .max()
             .unwrap_or_else(|| native_rate(supported, desktop_rate)),
-
         RefreshRateMode::Fixed(target) => {
             let target = target.get();
             supported
                 .iter()
                 .copied()
                 .find(|&r| r == target)
-                .or_else(|| {
-                    supported
-                        .iter()
-                        .copied()
-                        .find(|&r| normalize_reported_rate(r) == target)
-                })
+                .or_else(|| supported.iter().copied().find(|&r| r + 1 == target))
                 .unwrap_or(target)
         }
     }
 }
 
-/// The highest supported rate at or below the desktop rate (after NTSC-derived normalization),
+/// Returns the highest supported rate at or below the desktop rate (with the +1 NTSC reporting skew),
 /// else the lowest supported rate, else the raw desktop rate when the adapter advertises nothing.
 fn native_rate(supported: &[u32], desktop_rate: u32) -> u32 {
-    let ceiling = normalize_reported_rate(desktop_rate);
     supported
         .iter()
         .copied()
-        .filter(|&r| normalize_reported_rate(r) <= ceiling)
+        .filter(|&r| r <= desktop_rate.saturating_add(1))
         .max()
         .or_else(|| supported.iter().copied().min())
         .unwrap_or(desktop_rate)
@@ -904,9 +898,8 @@ fn is_real_refresh_rate(rate: u32) -> bool {
     rate > 1
 }
 
-/// Rounds up NTSC-derived (1000/1001) refresh rates like 59.94, 119.88, 143.86, 239.76, etc.
-fn normalize_reported_rate(rate: u32) -> u32 {
-    if rate % 12 == 11 { rate + 1 } else { rate }
+fn is_same_reported_rate(a: u32, b: u32) -> bool {
+    a.abs_diff(b) <= 1
 }
 
 /// Resolves the GDI device name of `adapter`'s monitor for Win32 display queries.
@@ -1213,8 +1206,7 @@ unsafe fn warn_if_exclusive_degraded(
     let req_hz = after_pp.FullScreen_RefreshRateInHz;
     let requested_matches_desktop = req_w == before.Width
         && req_h == before.Height
-        && (req_hz == 0
-            || normalize_reported_rate(req_hz) == normalize_reported_rate(before.RefreshRate));
+        && (req_hz == 0 || is_same_reported_rate(req_hz, before.RefreshRate));
     if requested_matches_desktop {
         return;
     }
@@ -1822,8 +1814,8 @@ mod tests {
         AdapterSnapshot, Attempt, D3D_OK, D3DDISPLAYMODEEX_SIZE, D3DERR_DEVICEHUNG,
         D3DERR_DEVICELOST, D3DERR_DEVICEREMOVED, D3DERR_INVALIDCALL, D3DERR_OUTOFVIDEOMEMORY,
         FixSet, LadderCtx, MAX_ENUM_RATES, PresentPolicy, RefreshRateMode, Round,
-        build_display_mode_ex, format_name, is_real_refresh_rate, is_transient_device_error,
-        materialize, normalize_reported_rate, plan_attempts, rewrite_behavior_flags,
+        build_display_mode_ex, format_name, is_real_refresh_rate, is_same_reported_rate,
+        is_transient_device_error, materialize, plan_attempts, rewrite_behavior_flags,
         rewrite_present_params_impl, run_fix_ladder, select_refresh_rate, translate_managed_pool,
         upgraded_back_buffer_format,
     };
@@ -2499,41 +2491,25 @@ mod tests {
     }
 
     #[test]
-    fn is_real_refresh_rate_rejects_magic_values() {
-        assert!(!is_real_refresh_rate(0));
-        assert!(!is_real_refresh_rate(1));
-        assert!(is_real_refresh_rate(2));
-        assert!(is_real_refresh_rate(60));
-        assert!(is_real_refresh_rate(144));
-    }
-
-    #[test]
-    fn select_refresh_rate_without_advertised_modes() {
-        for rate in [0u32, 30, 59, 60, 100, 144, 240] {
-            assert_eq!(
-                select_refresh_rate(RefreshRateMode::Native, &[], rate),
-                rate
-            );
-            assert_eq!(
-                select_refresh_rate(RefreshRateMode::NativeMultiple, &[], rate),
-                rate,
-            );
-        }
-
-        assert_eq!(
-            select_refresh_rate(RefreshRateMode::Fixed(nz(144)), &[], 60),
-            144,
-        );
-        assert_eq!(
-            select_refresh_rate(RefreshRateMode::Fixed(nz(60)), &[], 999_999),
-            60,
-        );
-    }
-
-    #[test]
-    fn select_refresh_rate_picks_from_advertised_modes() {
+    fn select_refresh_rate_picks() {
         // (mode, advertised rates, desktop rate, expected pick)
-        let cases: &[(RefreshRateMode, &[u32], u32, u32)] = &[
+        let cases: &[(_, &[u32], _, _)] = &[
+            (RefreshRateMode::Native, &[], 0, 0),
+            (RefreshRateMode::Native, &[], 30, 30),
+            (RefreshRateMode::Native, &[], 59, 59),
+            (RefreshRateMode::Native, &[], 60, 60),
+            (RefreshRateMode::Native, &[], 100, 100),
+            (RefreshRateMode::Native, &[], 144, 144),
+            (RefreshRateMode::Native, &[], 240, 240),
+            (RefreshRateMode::NativeMultiple, &[], 0, 0),
+            (RefreshRateMode::NativeMultiple, &[], 30, 30),
+            (RefreshRateMode::NativeMultiple, &[], 59, 59),
+            (RefreshRateMode::NativeMultiple, &[], 60, 60),
+            (RefreshRateMode::NativeMultiple, &[], 100, 100),
+            (RefreshRateMode::NativeMultiple, &[], 144, 144),
+            (RefreshRateMode::NativeMultiple, &[], 240, 240),
+            (RefreshRateMode::Fixed(nz(144)), &[], 60, 144),
+            (RefreshRateMode::Fixed(nz(60)), &[], 999_999, 60),
             (RefreshRateMode::Native, &[60, 120, 144], 144, 144),
             (RefreshRateMode::Native, &[60, 100], 144, 100),
             (RefreshRateMode::Native, &[144, 60, 120], 120, 120),
@@ -2553,6 +2529,11 @@ mod tests {
             (RefreshRateMode::Fixed(nz(120)), &[119, 120], 120, 120),
             (RefreshRateMode::Fixed(nz(120)), &[119], 119, 119),
             (RefreshRateMode::Fixed(nz(240)), &[60, 120], 120, 240),
+            (RefreshRateMode::Fixed(nz(75)), &[74], 74, 74),
+            (RefreshRateMode::Fixed(nz(165)), &[60, 164], 164, 164),
+            (RefreshRateMode::Fixed(nz(200)), &[199], 199, 199),
+            (RefreshRateMode::NativeMultiple, &[59], 59, 59),
+            (RefreshRateMode::Native, &[60], 59, 60),
         ];
 
         for &(mode, supported, desktop, expected) in cases {
@@ -2565,17 +2546,18 @@ mod tests {
     }
 
     #[test]
-    fn normalize_reported_rate_rounding() {
-        assert_eq!(normalize_reported_rate(59), 60);
-        assert_eq!(normalize_reported_rate(119), 120);
-        assert_eq!(normalize_reported_rate(143), 144);
-        assert_eq!(normalize_reported_rate(179), 180);
-        assert_eq!(normalize_reported_rate(239), 240);
-        assert_eq!(normalize_reported_rate(299), 300);
-        assert_eq!(normalize_reported_rate(359), 360);
-        for rate in [0u32, 1, 30, 50, 60, 75, 100, 120, 144, 240] {
-            assert_eq!(normalize_reported_rate(rate), rate);
-        }
+    fn refresh_rate_predicates() {
+        assert!(!is_real_refresh_rate(0));
+        assert!(!is_real_refresh_rate(1));
+        assert!(is_real_refresh_rate(2));
+        assert!(is_real_refresh_rate(60));
+        assert!(is_real_refresh_rate(144));
+        assert!(is_same_reported_rate(59, 60));
+        assert!(is_same_reported_rate(60, 59));
+        assert!(is_same_reported_rate(120, 120));
+        assert!(is_same_reported_rate(164, 165));
+        assert!(!is_same_reported_rate(60, 120));
+        assert!(!is_same_reported_rate(58, 60));
     }
 
     #[test]
