@@ -442,12 +442,26 @@ fn parse_bitmask(v: &str) -> Option<u32> {
     u32::from_str_radix(rest, radix).ok()
 }
 
-/// Strips a UTF-8 BOM if present and lossily decodes the input as UTF-8,
-/// replacing any invalid UTF-8 sequences with `U+FFFD REPLACEMENT CHARACTER`.
+/// Strips a BOM if present and lossily decodes the input as UTF-8.
 #[must_use]
 pub fn decode_text(bytes: &[u8]) -> Cow<'_, str> {
+    if let Some(body) = bytes.strip_prefix(b"\xff\xfe") {
+        return Cow::Owned(decode_utf16(body, u16::from_le_bytes));
+    }
+    if let Some(body) = bytes.strip_prefix(b"\xfe\xff") {
+        return Cow::Owned(decode_utf16(body, u16::from_be_bytes));
+    }
     let body = bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(bytes);
     String::from_utf8_lossy(body)
+}
+
+/// Lossily decodes `body`, assumed to be UTF-16.
+fn decode_utf16(body: &[u8], unit: fn([u8; 2]) -> u16) -> String {
+    let units: Vec<u16> = body
+        .chunks_exact(2)
+        .map(|pair| unit([pair[0], pair[1]]))
+        .collect();
+    String::from_utf16_lossy(&units)
 }
 
 /// Parses INI text into a [`CoreConfig`] using only the shared section dispatcher.
@@ -535,6 +549,24 @@ mod tests {
         assert_eq!(decode_text(b"hello"), "hello");
         // Only one BOM is stripped.
         assert_eq!(decode_text(b"\xef\xbb\xbf\xef\xbb\xbfx"), "\u{feff}x",);
+    }
+
+    #[test]
+    fn decode_text_utf16_boms() {
+        let mut le = vec![0xff, 0xfe];
+        for u in "[a]\nk = 1".encode_utf16() {
+            le.extend_from_slice(&u.to_le_bytes());
+        }
+        assert_eq!(decode_text(&le), "[a]\nk = 1");
+
+        let mut be = vec![0xfe, 0xff];
+        for u in "x = y".encode_utf16() {
+            be.extend_from_slice(&u.to_be_bytes());
+        }
+        assert_eq!(decode_text(&be), "x = y");
+
+        le.push(0x41);
+        assert_eq!(decode_text(&le), "[a]\nk = 1");
     }
 
     #[test]
