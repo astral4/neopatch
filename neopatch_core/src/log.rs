@@ -296,6 +296,7 @@ fn apply_retention(log_root: &Path, keep: NonZero<u32>, current: &str) {
                 .and_then(|n| n.to_str())
                 .is_some_and(|n| n != current && is_session_id(n))
                 && p.is_dir()
+                && (p.join("manifest.txt").exists() || p.join("events.log").exists())
         })
         .collect();
     // Session IDs sort lexicographically by timestamp; ties are broken by PID.
