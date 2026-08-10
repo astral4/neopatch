@@ -18,6 +18,7 @@ All notable changes to neopatch will be documented in this file.
 
 ### Fixed
 
+- A nonzero frameskip value (描画間隔) set in `custom.exe` no longer causes Touhou 10 onward to run at 2× or 3× speed. The setting is now forced to zero in memory for the session.
 - A `log_dir` path that cannot actually be claimed no longer silently disables logging and crash dumps.
 - Log-session retention now deletes only directories containing a manifest or event log.
 - Configuration files saved as UTF-16 are now decoded correctly instead of having every setting silently fall back to defaults.

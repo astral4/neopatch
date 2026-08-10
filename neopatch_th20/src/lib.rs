@@ -10,7 +10,8 @@ mod state;
 
 use crate::aslr::{PREFERRED_IMAGE_BASE, host_slide};
 use crate::dialog_dismiss::sites as dialog_sites;
-use crate::patches::sites;
+use crate::patches::{CFG_FILE, sites};
+use neopatch_core::cfg_pin;
 use neopatch_core::config::{CONFIG as CORE_CONFIG, ResolutionConfigExt, read_ini_text};
 use neopatch_core::pacer::{PACER, Pacer, PacingPolicy};
 use neopatch_core::patches::install_all;
@@ -77,6 +78,7 @@ unsafe fn install_hooks() {
 
     unsafe {
         timer_period::install(host_exe);
+        cfg_pin::install(host_exe, CFG_FILE);
         gdi_caps::install(host_exe);
         window::install(
             host_exe,

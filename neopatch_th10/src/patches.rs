@@ -1,9 +1,28 @@
 //! Patches and hooks for th10.exe v1.00a.
 
+use neopatch_core::cfg_pin::{ByteField, CfgCheck, CfgFile};
 use neopatch_core::d3d9::call_site_rewrite;
 use neopatch_core::patches::PatchSite;
 use neopatch_core::screenshot::save_screenshot_deferred_bmp;
 use std::arch::naked_asm;
+
+pub(crate) const CFG_FILE: CfgFile = CfgFile {
+    file_name: "th10.cfg",
+    magic: 0x0010_0003,
+    size: 0x34,
+    frameskip: ByteField {
+        offset: 0x1e,
+        bound: 3,
+    },
+    other_checks: &[
+        CfgCheck::byte_max(0x1a, 2),
+        CfgCheck::byte_max(0x1b, 3),
+        CfgCheck::byte_max(0x1c, 2),
+        CfgCheck::byte_max(0x1d, 2),
+        CfgCheck::byte_max(0x1f, 3),
+    ],
+};
+const _: () = CFG_FILE.validate();
 
 const DIRECT3DCREATE9_CALL_VA: usize = 0x0043_8bc3;
 const DIRECT3DCREATE9_CALL_BYTES: [u8; 5] = [0xe8, 0xae, 0x95, 0x01, 0x00];

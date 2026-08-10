@@ -1,10 +1,29 @@
 //! Patches and hooks for th15.exe v1.00b.
 
+use neopatch_core::cfg_pin::{ByteField, CfgCheck, CfgFile};
 use neopatch_core::d3d9::call_site_rewrite;
 use neopatch_core::patches::PatchSite;
 use neopatch_core::screenshot::save_screenshot_live_bmp;
 use std::arch::naked_asm;
 use std::ffi::c_char;
+
+pub(crate) const CFG_FILE: CfgFile = CfgFile {
+    file_name: "th15.cfg",
+    magic: 0x0015_0002,
+    size: 0x6c,
+    frameskip: ByteField {
+        offset: 0x20,
+        bound: 3,
+    },
+    other_checks: &[
+        CfgCheck::byte_max(0x1c, 2),
+        CfgCheck::byte_max(0x1d, 3),
+        CfgCheck::byte_max(0x1e, 2),
+        CfgCheck::byte_max(0x1f, 6),
+        CfgCheck::byte_max(0x21, 3),
+    ],
+};
+const _: () = CFG_FILE.validate();
 
 const DIRECT3DCREATE9_CALL_VA: usize = 0x0047_158c;
 const DIRECT3DCREATE9_CALL_BYTES: [u8; 6] = [0xff, 0x15, 0xb0, 0xe2, 0x4b, 0x00];

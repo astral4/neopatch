@@ -1,10 +1,31 @@
 //! Patches and hooks for th20.exe v1.00a.
 
+use neopatch_core::cfg_pin::{ByteField, CfgCheck, CfgFile};
 use neopatch_core::d3d9::call_site_rewrite;
 use neopatch_core::patches::PatchSite;
 use neopatch_core::screenshot::save_screenshot_live_png;
 use std::arch::naked_asm;
 use std::ffi::c_char;
+
+const CFG_SIZE: u32 = 0xb0;
+pub(crate) const CFG_FILE: CfgFile = CfgFile {
+    file_name: "th20.cfg",
+    magic: 0x0020_0002,
+    size: CFG_SIZE,
+    frameskip: ByteField {
+        offset: 0x7c,
+        bound: 3,
+    },
+    other_checks: &[
+        CfgCheck::dword_eq(0x4, CFG_SIZE),
+        CfgCheck::byte_max(0x74, 2),
+        CfgCheck::byte_max(0x75, 3),
+        CfgCheck::byte_max(0x76, 2),
+        CfgCheck::sdword_max(0x78, 10),
+        CfgCheck::byte_max(0x7d, 3),
+    ],
+};
+const _: () = CFG_FILE.validate();
 
 const DIRECT3DCREATE9_CALL_VA: usize = 0x0041_c335;
 const DIRECT3DCREATE9_CALL_BYTES: [u8; 5] = [0xe8, 0x32, 0x43, 0x12, 0x00];

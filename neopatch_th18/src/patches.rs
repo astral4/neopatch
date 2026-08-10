@@ -1,10 +1,29 @@
 //! Patches and hooks for th18.exe v1.00a.
 
+use neopatch_core::cfg_pin::{ByteField, CfgCheck, CfgFile};
 use neopatch_core::d3d9::call_site_rewrite;
 use neopatch_core::patches::PatchSite;
 use neopatch_core::screenshot::save_screenshot_live_bmp;
 use std::arch::naked_asm;
 use std::ffi::c_char;
+
+pub(crate) const CFG_FILE: CfgFile = CfgFile {
+    file_name: "th18.cfg",
+    magic: 0x0018_0002,
+    size: 0x88,
+    frameskip: ByteField {
+        offset: 0x48,
+        bound: 3,
+    },
+    other_checks: &[
+        CfgCheck::byte_max(0x44, 2),
+        CfgCheck::byte_max(0x45, 3),
+        CfgCheck::byte_max(0x46, 2),
+        CfgCheck::byte_max(0x47, 10),
+        CfgCheck::byte_max(0x49, 3),
+    ],
+};
+const _: () = CFG_FILE.validate();
 
 const DIRECT3DCREATE9_CALL_VA: usize = 0x0047_1634;
 const DIRECT3DCREATE9_CALL_BYTES: [u8; 6] = [0xff, 0x15, 0x88, 0xd2, 0x4a, 0x00];

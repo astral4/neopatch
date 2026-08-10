@@ -8,7 +8,8 @@ mod patches;
 mod state;
 
 use crate::dialog_dismiss::DIALOG_PATCHES;
-use crate::patches::PATCHES;
+use crate::patches::{CFG_FILE, PATCHES};
+use neopatch_core::cfg_pin;
 use neopatch_core::config::{CONFIG as CORE_CONFIG, ResolutionConfigExt, read_ini_text};
 use neopatch_core::pacer::{PACER, Pacer, PacingPolicy};
 use neopatch_core::patches::install_all;
@@ -68,6 +69,7 @@ unsafe fn install_hooks() {
     unsafe {
         ansi::install(host_exe, ansi::CP_SHIFT_JIS);
         timer_period::install(host_exe);
+        cfg_pin::install(host_exe, CFG_FILE);
         gdi_caps::install(host_exe);
         state::install(host_exe);
         window::install(

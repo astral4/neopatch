@@ -8,6 +8,7 @@
 compile_error!("neopatch is x86-only");
 
 pub mod ansi;
+pub mod cfg_pin;
 pub mod config;
 pub mod console;
 pub mod crash;
