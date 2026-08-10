@@ -4,6 +4,7 @@
 //! the freshest input by a frame, and pacing is split between a `timeGetTime` software limiter (windowed / "force 60 fps") and vsync (fullscreen).
 //! The patches here restructure it into calc -> draw -> `Present` with our pacer as the only timing source.
 
+use crate::FRAMEBUFFER_SIZE;
 use crate::state::{record_input, replay_keys};
 use neopatch_core::config::{CONFIG, DisplayMode};
 use neopatch_core::d3d8::{
@@ -152,8 +153,8 @@ unsafe fn draw_frame() {
         let full = D3DViewport8 {
             X: 0,
             Y: 0,
-            Width: crate::FRAMEBUFFER_SIZE.0,
-            Height: crate::FRAMEBUFFER_SIZE.1,
+            Width: FRAMEBUFFER_SIZE.0,
+            Height: FRAMEBUFFER_SIZE.1,
             MinZ: 0.,
             MaxZ: 1.,
         };
