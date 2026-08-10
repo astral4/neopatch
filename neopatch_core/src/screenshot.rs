@@ -50,7 +50,7 @@ pub(crate) fn on_device_creating(tok: &MainToken) {
 /// `filename_ptr` must be valid.
 #[must_use]
 pub unsafe extern "C" fn save_screenshot_live_bmp(filename_ptr: *const u8) -> u32 {
-    live_save(filename_ptr, build_bmp_24bpp, "live")
+    live_save(filename_ptr, build_bmp_24bpp, "live_bmp")
 }
 
 /// Synchronously saves a screenshot as PNG. Use this for games whose save function trampoline runs before `Present`.
