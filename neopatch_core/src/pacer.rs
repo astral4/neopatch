@@ -1,29 +1,26 @@
 //! Frame pacer.
 //!
 //! We drive frame timing in software so the game's render cadence is independent of the display's refresh rate.
-//! The deadline is tracked in QPC ticks and advanced by exactly one period per frame, so transient hitches
-//! don't smear into permanent drift. Within a constant-rate window, the long-run frame rate locks to the truncated tick period
-//! `qpc_freq / target_fps` regardless of OS scheduler jitter. Across mode transitions, `apply_policy()` resets the deadline
-//! so the next `wait()` resyncs. `wait()` also resets the deadline after a long hitch.
-//! This is intentional but means the locked rate is technically per-window, not per-session.
+//! The deadline is tracked in QPC ticks and advanced by exactly one period per frame, so transient hitches don't smear into permanent drift.
+//! Within a constant-rate window, the long-run frame rate locks to the truncated tick period `qpc_freq / target_fps`
+//! regardless of OS scheduler jitter. Across mode transitions, `apply_policy()` resets the deadline so the next `wait()` resyncs.
+//! `wait()` also resets the deadline after a long hitch. This is intentional but means the locked rate is technically per-window, not per-session.
 //!
-//! Lead-time is fixed at `period / 2`. The wait fires that much earlier than the stored deadline, so the next game tick
-//! (which reads input) starts that much earlier in wall-clock time. The deadline itself is unaffected,
-//! so the long-run cadence still locks to `target_fps`. Whether the shift applies is encoded in [`PacingPolicy`]:
-//! `LiveInput` enables it since that's when input timing matters; `InternalCadence` disables it
-//! since replay-skip/slow drive the schedule from inside the game and shaving real-time latency is meaningless there.
+//! Lead-time is fixed at `period / 2`. The wait fires that much earlier than the stored deadline, so the next game tick (which reads input)
+//! starts that much earlier in wall-clock time. The deadline itself is unaffected, so the long-run cadence still locks to `target_fps`.
+//! Whether the shift applies is encoded in [`PacingPolicy`]: `LiveInput` enables it since that's when input timing matters;
+//! `InternalCadence` disables it since replay-skip/slow drive the schedule from inside the game and shaving real-time latency is meaningless there.
 //!
-//! `period / 2` isn't a hard ceiling: any `L < period` works since the only correctness constraint is that per-frame work
-//! must fit in one period. It's the largest `L` for which the lead snaps into place within one frame of a resync,
-//! since immediate convergence needs `work < period - L`. We assume computers running neopatch will comfortably finish
-//! per-frame work in under `period / 2`. The choice of `L` also rests on the prior that an earlier `Present` submission
-//! plausibly leaves more slack against jitter or misalignment in the `Present`-to-display chain. We can't actually verify
-//! whether that slack helps from within the pacer itself. We pick `period / 2` because it is the largest `L`
-//! that captures this prior at no transient cost. Larger `L` also captures this prior but causes longer post-resync transients.
+//! `period / 2` isn't a hard ceiling: any `L < period` works since the only correctness constraint is that per-frame work must fit in one period.
+//! However, it's the largest `L` for which the lead snaps into place within one frame of a resync, since immediate convergence needs
+//! `work < period - L`. We assume computers running neopatch will comfortably finish per-frame work in under `period / 2`.
+//! The choice of `L` also rests on the prior that an earlier `Present` submission plausibly leaves more slack against jitter or misalignment
+//! in the `Present`-to-display chain. (We can't actually verify whether that slack helps from within the pacer itself.)
+//! We pick `period / 2` because it is the largest `L` that captures this prior at no transient cost.
+//! Larger `L` also captures this but causes longer post-resync transients.
 //!
-//! For waiting, we use `CreateWaitableTimerExW` with the Windows 10 1803+ `HIGH_RESOLUTION` flag,
-//! closed by a short QPC spin to the exact deadline. Older OS versions reject that flag and get a plain waitable timer instead.
-//! Sleep + spin is the last resort if timer creation fails.
+//! For waiting, we use `CreateWaitableTimerExW` with the Windows 10 1803+ `HIGH_RESOLUTION` flag, closed by a short QPC spin to the exact deadline.
+//! Older OS versions reject that flag and get a plain waitable timer instead. Sleep + spin is the last resort if timer creation fails.
 
 use crate::thread::{MainCell, MainToken};
 use std::hint::spin_loop;
