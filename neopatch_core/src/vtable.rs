@@ -217,6 +217,8 @@ where
     F: Copy + Send + Sync + Unpin + 'static,
 {
     const { assert!(size_of::<F>() == size_of::<*mut ()>()) };
+    const { assert!(size_of::<Option<F>>() == size_of::<F>()) };
+
     if raw.is_null() {
         return None;
     }
@@ -235,6 +237,8 @@ where
     F: Copy + Send + Sync + Unpin + 'static,
 {
     const { assert!(size_of::<F>() == size_of::<*mut ()>()) };
+    const { assert!(size_of::<Option<F>>() == size_of::<F>()) };
+
     // SAFETY: `F` is asserted pointer-sized and is a function-pointer type per the contract above.
     unsafe { transmute_copy(&f) }
 }
