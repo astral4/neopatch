@@ -29,7 +29,7 @@ use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::{Layer, registry as default_registry};
 use windows_sys::Win32::Foundation::SYSTEMTIME;
 use windows_sys::Win32::Storage::FileSystem::FlushFileBuffers;
-use windows_sys::Win32::System::SystemInformation::GetLocalTime;
+use windows_sys::Win32::System::SystemInformation::{GetLocalTime, GetSystemTime};
 use windows_sys::Win32::System::Threading::{GetCurrentProcessId, GetCurrentThreadId};
 
 /// Emits one `tracing` event at `$yes` level when `$cond` holds and at `$no` level otherwise.
@@ -273,13 +273,24 @@ fn claim_session_dir(root: &Path, session_id: &str) -> Result<PathBuf, LogRootOu
     Ok(session_dir)
 }
 
+/// Builds the session's directory name. The format is `YYYYMMDD_HHMMSS_pPID` in UTC.
 fn make_session_id() -> String {
     let mut st: SYSTEMTIME = unsafe { zeroed() };
-    unsafe { GetLocalTime(&raw mut st) };
+    unsafe { GetSystemTime(&raw mut st) };
     // PID disambiguates concurrent same-second launches that would otherwise share a directory and clobber each other's logs.
     let pid = unsafe { GetCurrentProcessId() };
     format!(
         "{:04}{:02}{:02}_{:02}{:02}{:02}_p{pid}",
+        st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond,
+    )
+}
+
+/// Returns the current local time as a formatted string.
+fn local_time_string() -> String {
+    let mut st: SYSTEMTIME = unsafe { zeroed() };
+    unsafe { GetLocalTime(&raw mut st) };
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
         st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond,
     )
 }
@@ -352,6 +363,7 @@ where
         }
     )?;
     writeln!(f, "log_root={}", log_root.display())?;
+    writeln!(f, "started_local={}", local_time_string())?;
     writeln!(f, "log.level={}", core_cfg.log.level)?;
     writeln!(f, "log.sessions_to_keep={}", core_cfg.log.sessions_to_keep)?;
     write_manifest_common(&mut f, core_cfg)?;
