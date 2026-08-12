@@ -483,6 +483,13 @@ macro_rules! claim_out {
             None => return D3DERR_INVALIDCALL,
         }
     };
+    ($($p:ident),+ ; $method:literal) => {{
+        $(let $p = unsafe { OutSlot::claim($p, concat!($method, "(", stringify!($p), ")")) };)+
+        let ($(Some($p),)+) = ($($p,)+) else {
+            return D3DERR_INVALIDCALL;
+        };
+        ($($p,)+)
+    }};
 }
 
 macro_rules! claim_opaque {
@@ -1104,6 +1111,23 @@ pub unsafe fn call_set_texture(dev8: *mut c_void, stage: u32, texture8: *mut c_v
     unsafe { (dev8_vt(dev8).set_texture)(dev8, stage, texture8).0 }
 }
 
+/// The bound index-buffer wrapper and the base vertex index arguments for `SetIndices`.
+#[derive(Clone, Copy)]
+struct IndicesBinding {
+    /// The wrapper bound by the last accepted `SetIndices`; null means unbound. The D3D9-side binding keeps the underlying buffer alive,
+    /// and dead wrapper allocations are retained (see [`resource8_release`]), so the pointer is always safe to inspect.
+    ib8: *mut c_void,
+    base_vertex_index: u32,
+}
+
+impl IndicesBinding {
+    /// The device-default pair with nothing bound and base zero.
+    const UNBOUND: Self = Self {
+        ib8: null_mut(),
+        base_vertex_index: 0,
+    };
+}
+
 #[repr(C)]
 struct Device8 {
     // `header.inner` is the wrapped `IDirect3DDevice9Ex`.
@@ -1112,6 +1136,8 @@ struct Device8 {
     parent: *mut D3d8,
     /// Wrapper for the swap chain's back buffer.
     back_buffer: Resource8,
+    /// The pair from the game's last accepted `SetIndices` call.
+    indices: Cell<IndicesBinding>,
 }
 
 impl Device8 {
@@ -1402,11 +1428,23 @@ unsafe extern "system" fn device8_reset(
         return D3DERR_INVALIDCALL;
     };
     info!(kind = "d3d8_reset", pp8 = ?pp8);
-    let p = require_live!(unsafe { dev9(this) }, "device8_reset");
+    let d = unsafe { device8(this) };
+    let p = require_live!(d.inner(), "device8_reset");
     let mut pp9 = convert_present_params(pp8);
     let hr = unsafe { (dev9_vt(p).base__.Reset)(p, &raw mut pp9) };
     if hr.is_ok() {
         sync_present_params_back(pp8, &pp9);
+        // Real D3D8 `Reset` returns device state to defaults, but here the D3D9 call underneath may be `ResetEx`,
+        // which preserves device state. Shadowed channels get their D3D8 default re-established through the channel's game-facing writer
+        // so the shadow cannot drift from the D3D9 binding. Unshadowed state knowingly keeps the `ResetEx` behavior.
+        let hr_rebind = unsafe { device8_set_indices(this, null_mut(), 0) };
+        if hr_rebind.is_err() {
+            warn!(
+                kind = "d3d8_reset_reestablish_failed",
+                call = "IDirect3DDevice8::SetIndices",
+                hr = %fmt_hr!(hr_rebind),
+            );
+        }
     }
     hr
 }
@@ -2044,7 +2082,37 @@ stub8!(device8_get_palette_entries, "IDirect3DDevice8::GetPaletteEntries"(_num: 
 stub8!(device8_set_current_texture_palette, "IDirect3DDevice8::SetCurrentTexturePalette"(_num: u32) -> D3D_OK);
 stub8!(device8_get_current_texture_palette, "IDirect3DDevice8::GetCurrentTexturePalette"(_num: *mut u32) clears _num -> D3DERR_NOTAVAILABLE);
 forward8!(device8_draw_primitive, dev9 / dev9_vt.base__.DrawPrimitive(primitive_type: D3DPRIMITIVETYPE, start_vertex: u32, primitive_count: u32) -> HRESULT);
-stub8!(device8_draw_indexed_primitive, "IDirect3DDevice8::DrawIndexedPrimitive"(_primitive_type: D3DPRIMITIVETYPE, _min_index: u32, _num_vertices: u32, _start_index: u32, _primitive_count: u32) -> D3DERR_NOTAVAILABLE);
+unsafe extern "system" fn device8_draw_indexed_primitive(
+    this: *mut c_void,
+    primitive_type: D3DPRIMITIVETYPE,
+    min_index: u32,
+    num_vertices: u32,
+    start_index: u32,
+    primitive_count: u32,
+) -> HRESULT {
+    let d = unsafe { device8(this) };
+    let p = require_live!(d.inner(), "device8_draw_indexed_primitive");
+    let binding = d.indices.get();
+    // Without a bound index buffer, native D3D8 defines the indexed draw as a successful no-op.
+    // However, both D3D9 backends refuse it, so the call must never reach them.
+    if binding.ib8.is_null() {
+        debug!(kind = "d3d8_draw_unbound_indices_noop");
+        return D3D_OK;
+    }
+    // D3D9 moved the base vertex index here from `SetIndices`. We replay the one from the game's last `SetIndices` call.
+    let base = binding.base_vertex_index.cast_signed();
+    unsafe {
+        (dev9_vt(p).base__.DrawIndexedPrimitive)(
+            p,
+            primitive_type,
+            base,
+            min_index,
+            num_vertices,
+            start_index,
+            primitive_count,
+        )
+    }
+}
 forward8!(device8_draw_primitive_up, dev9 / dev9_vt.base__.DrawPrimitiveUP(primitive_type: D3DPRIMITIVETYPE, primitive_count: u32, vertex_data: *const c_void, vertex_stride: u32) -> HRESULT);
 stub8!(device8_draw_indexed_primitive_up, "IDirect3DDevice8::DrawIndexedPrimitiveUP"(_primitive_type: D3DPRIMITIVETYPE, _min_vertex_index: u32, _num_vertex_indices: u32, _primitive_count: u32, _index_data: *const c_void, _index_data_format: D3DFORMAT, _vertex_data: *const c_void, _vertex_stride: u32) -> D3DERR_NOTAVAILABLE);
 stub8!(device8_process_vertices, "IDirect3DDevice8::ProcessVertices"(_src_start: u32, _dest_index: u32, _count: u32, _dest_buffer: *mut c_void, _flags: u32) -> D3DERR_NOTAVAILABLE);
@@ -2077,8 +2145,47 @@ unsafe extern "system" fn device8_set_stream_source(
 }
 
 stub8!(device8_get_stream_source, "IDirect3DDevice8::GetStreamSource"(_stream: u32, _out: *mut *mut c_void, _stride: *mut u32) clears _out, _stride -> D3DERR_NOTAVAILABLE);
-stub8!(device8_set_indices, "IDirect3DDevice8::SetIndices"(_ib8: *mut c_void, _base_vertex_index: u32) -> D3D_OK);
-stub8!(device8_get_indices, "IDirect3DDevice8::GetIndices"(_out: *mut *mut c_void, _base: *mut u32) clears _out, _base -> D3DERR_NOTAVAILABLE);
+unsafe extern "system" fn device8_set_indices(
+    this: *mut c_void,
+    ib8: *mut c_void,
+    base_vertex_index: u32,
+) -> HRESULT {
+    let d = unsafe { device8(this) };
+    let p = require_live!(d.inner(), "device8_set_indices");
+    // A null buffer is a legitimate unbind; a dead wrapper is a use-after-release and is refused.
+    let Ok(ib9) = (unsafe { unwrap8_arg(ib8, "device8_set_indices(ib)") }) else {
+        return D3DERR_INVALIDCALL;
+    };
+    let hr = unsafe { (dev9_vt(p).base__.SetIndices)(p, ib9) };
+    if hr.is_ok() {
+        d.indices.set(IndicesBinding {
+            ib8,
+            base_vertex_index,
+        });
+    }
+    hr
+}
+
+unsafe extern "system" fn device8_get_indices(
+    this: *mut c_void,
+    out: *mut *mut c_void,
+    base: *mut u32,
+) -> HRESULT {
+    let d = unsafe { device8(this) };
+    let (out, base) = claim_out!(out, base; "device8_get_indices");
+    let _ = require_live!(d.inner(), "device8_get_indices");
+    let bound = d.indices.get();
+    if !bound.ib8.is_null() {
+        if unsafe { unwrap8(bound.ib8) }.is_none() {
+            warn_dead_wrapper_call("device8_get_indices(bound ib)");
+            return D3DERR_INVALIDCALL;
+        }
+        unsafe { wrap_add_ref(bound.ib8) };
+    }
+    out.set(bound.ib8);
+    base.set(bound.base_vertex_index);
+    D3D_OK
+}
 stub8!(device8_create_pixel_shader, "IDirect3DDevice8::CreatePixelShader"(_function: *const u32, _handle: *mut u32) clears _handle -> D3DERR_NOTAVAILABLE);
 stub8!(device8_set_pixel_shader, "IDirect3DDevice8::SetPixelShader"(_handle: u32) -> D3D_OK);
 stub8!(device8_get_pixel_shader, "IDirect3DDevice8::GetPixelShader"(_out: *mut u32) -> D3DERR_NOTAVAILABLE);
@@ -2265,6 +2372,7 @@ unsafe extern "system" fn d3d8_create_device(
             device: null_mut(),
             internal_flags: D3D8_INTERNAL_LOCKABLE,
         },
+        indices: Cell::new(IndicesBinding::UNBOUND),
     }));
     unsafe { (*device).back_buffer.device = device };
     out.set(device.cast());
@@ -2359,10 +2467,12 @@ unsafe extern "system" fn hook_direct3dcreate8(sdk_version: u32) -> *mut c_void 
 mod tests {
     use super::{
         ComHeader, D3D_OK, D3D8_INTERNAL_LOCKABLE, D3DERR_INVALIDCALL, D3DPresentParameters8,
-        DEVICE8_VTBL, Device8, OutSlot, Resource8, SURFACE8_VTBL, Surface8Vtbl, TEXTURE8_VTBL,
-        Texture8Vtbl, caps_9_to_8, convert_present_params, copy_rect_valid,
-        device8_create_index_buffer, device8_release, device8_set_texture, resource8_release,
-        surface_desc_9_to_8, unwrap8, unwrap8_arg, wrap_add_ref, wrap_created,
+        DEVICE8_VTBL, Device8, INDEX_BUFFER8_VTBL, IndicesBinding, OutSlot, Resource8,
+        SURFACE8_VTBL, Surface8Vtbl, TEXTURE8_VTBL, Texture8Vtbl, caps_9_to_8,
+        convert_present_params, copy_rect_valid, device8_create_index_buffer,
+        device8_draw_indexed_primitive, device8_get_indices, device8_release, device8_reset,
+        device8_set_indices, device8_set_texture, resource8_release, surface_desc_9_to_8, unwrap8,
+        unwrap8_arg, wrap_add_ref, wrap_created,
     };
     use crate::fmt_hr;
     use std::cell::Cell;
@@ -2375,9 +2485,9 @@ mod tests {
         D3DCAPS9, D3DFMT_A1R5G5B5, D3DFMT_A8R8G8B8, D3DFMT_D16, D3DFMT_DXT1, D3DFMT_INDEX16,
         D3DFMT_R5G6B5, D3DFMT_X1R5G5B5, D3DFMT_X8R8G8B8, D3DFORMAT, D3DLOCKED_RECT,
         D3DMULTISAMPLE_2_SAMPLES, D3DMULTISAMPLE_NONE, D3DPOOL, D3DPOOL_MANAGED, D3DPOOL_SYSTEMMEM,
-        D3DPRESENT_INTERVAL_ONE, D3DPRESENTFLAG_LOCKABLE_BACKBUFFER, D3DSURFACE_DESC,
-        D3DSWAPEFFECT_COPY, D3DSWAPEFFECT_DISCARD, D3DSWAPEFFECT_FLIP, D3DUSAGE_DYNAMIC,
-        IDirect3DDevice9Ex_Vtbl,
+        D3DPRESENT_INTERVAL_ONE, D3DPRESENT_PARAMETERS, D3DPRESENTFLAG_LOCKABLE_BACKBUFFER,
+        D3DPRIMITIVETYPE, D3DPT_TRIANGLELIST, D3DSURFACE_DESC, D3DSWAPEFFECT_COPY,
+        D3DSWAPEFFECT_DISCARD, D3DSWAPEFFECT_FLIP, D3DUSAGE_DYNAMIC, IDirect3DDevice9Ex_Vtbl,
     };
     use windows::core::{BOOL, GUID, HRESULT, IUnknown_Vtbl};
 
@@ -2900,6 +3010,7 @@ mod tests {
                 device: null_mut(),
                 internal_flags: D3D8_INTERNAL_LOCKABLE,
             },
+            indices: Cell::new(IndicesBinding::UNBOUND),
         }))
     }
 
@@ -2937,12 +3048,28 @@ mod tests {
         vt
     }
 
+    /// Argument record of the last `DrawIndexedPrimitive` forward.
+    #[derive(Clone, Copy, PartialEq, Debug)]
+    struct DipArgs {
+        ty: D3DPRIMITIVETYPE,
+        base: i32,
+        min_index: u32,
+        num_vertices: u32,
+        start_index: u32,
+        primitive_count: u32,
+    }
+
     /// Mock `IDirect3DDevice9Ex` recording the calls made by the D3D8 forwarding paths.
     #[repr(C)]
     #[derive(Default)]
     struct MockDev9 {
         vtbl: *const IDirect3DDevice9Ex_Vtbl,
         releases: Cell<u32>,
+        set_indices_calls: Cell<u32>,
+        last_indices_ib: Cell<*mut c_void>,
+        fail_set_indices: Cell<bool>,
+        last_dip: Cell<Option<DipArgs>>,
+        resets: Cell<u32>,
         create_ib_calls: Cell<u32>,
         last_ib_pool: Cell<D3DPOOL>,
         last_ib_usage: Cell<u32>,
@@ -2952,7 +3079,10 @@ mod tests {
     static MOCK_DEV9_VTBL: LazyLock<IDirect3DDevice9Ex_Vtbl> = LazyLock::new(|| {
         let mut vt = unreached_dev9_vtbl();
         vt.base__.base__.Release = mock9_release;
+        vt.base__.Reset = mock9_reset;
         vt.base__.CreateIndexBuffer = mock9_create_index_buffer;
+        vt.base__.SetIndices = mock9_set_indices;
+        vt.base__.DrawIndexedPrimitive = mock9_draw_indexed_primitive;
         vt
     });
 
@@ -2975,6 +3105,46 @@ mod tests {
         0
     }
 
+    unsafe extern "system" fn mock9_reset(
+        this: *mut c_void,
+        _pp: *mut D3DPRESENT_PARAMETERS,
+    ) -> HRESULT {
+        let m = unsafe { &*this.cast::<MockDev9>() };
+        m.resets.update(|n| n + 1);
+        D3D_OK
+    }
+
+    unsafe extern "system" fn mock9_set_indices(this: *mut c_void, ib: *mut c_void) -> HRESULT {
+        let m = unsafe { &*this.cast::<MockDev9>() };
+        m.set_indices_calls.update(|n| n + 1);
+        if m.fail_set_indices.get() {
+            return D3DERR_INVALIDCALL;
+        }
+        m.last_indices_ib.set(ib);
+        D3D_OK
+    }
+
+    unsafe extern "system" fn mock9_draw_indexed_primitive(
+        this: *mut c_void,
+        ty: D3DPRIMITIVETYPE,
+        base: i32,
+        min_index: u32,
+        num_vertices: u32,
+        start_index: u32,
+        primitive_count: u32,
+    ) -> HRESULT {
+        let m = unsafe { &*this.cast::<MockDev9>() };
+        m.last_dip.set(Some(DipArgs {
+            ty,
+            base,
+            min_index,
+            num_vertices,
+            start_index,
+            primitive_count,
+        }));
+        D3D_OK
+    }
+
     unsafe extern "system" fn mock9_create_index_buffer(
         this: *mut c_void,
         _length: u32,
@@ -2990,6 +3160,223 @@ mod tests {
         m.last_ib_usage.set(usage);
         unsafe { out.write(m.ib_to_return.get()) };
         D3D_OK
+    }
+
+    fn mock_ib8(ib: &MockCom) -> *mut c_void {
+        let mut out = null_mut();
+        let hr = unsafe {
+            wrap_created(
+                "test",
+                D3D_OK,
+                ib.ptr(),
+                (&raw const INDEX_BUFFER8_VTBL).cast(),
+                null_mut(),
+                false,
+                &OutSlot::claim(&raw mut out, "test").unwrap(),
+            )
+        };
+        assert_eq!(hr, D3D_OK);
+        out
+    }
+
+    /// Reads the `GetIndices` pair through poison-seeded out-params, asserting success.
+    unsafe fn read_indices(device: *mut Device8) -> (*mut c_void, u32) {
+        let mut out = (&raw const MOCK_COM_VTBL).cast_mut().cast::<c_void>();
+        let mut base = 0xdead_beef_u32;
+        assert_eq!(
+            unsafe { device8_get_indices(device.cast(), &raw mut out, &raw mut base) },
+            D3D_OK,
+        );
+        (out, base)
+    }
+
+    /// Draws through the wrapper and returns the base vertex index that the mock device received.
+    unsafe fn replayed_base(device: *mut Device8, dev9: &MockDev9) -> i32 {
+        assert_eq!(
+            unsafe {
+                device8_draw_indexed_primitive(device.cast(), D3DPT_TRIANGLELIST, 0, 4, 0, 2)
+            },
+            D3D_OK,
+        );
+        dev9.last_dip.get().unwrap().base
+    }
+
+    #[test]
+    fn set_indices_stash_and_replay() {
+        let dev9 = MockDev9::new();
+        let device = mock_device8(dev9.nn());
+        let ib = MockCom::new();
+        let ib8 = mock_ib8(&ib);
+        unsafe {
+            // The binding forwards unwrapped and the base is stashed for replay.
+            assert_eq!(device8_set_indices(device.cast(), ib8, 42), D3D_OK);
+            assert_eq!(dev9.last_indices_ib.get(), ib.ptr());
+            let hr = device8_draw_indexed_primitive(device.cast(), D3DPT_TRIANGLELIST, 3, 40, 6, 2);
+            assert_eq!(hr, D3D_OK);
+            assert_eq!(
+                dev9.last_dip.get(),
+                Some(DipArgs {
+                    ty: D3DPT_TRIANGLELIST,
+                    base: 42,
+                    min_index: 3,
+                    num_vertices: 40,
+                    start_index: 6,
+                    primitive_count: 2,
+                }),
+            );
+
+            // A failed forward leaves the stashed base untouched.
+            dev9.fail_set_indices.set(true);
+            assert_eq!(
+                device8_set_indices(device.cast(), ib8, 7),
+                D3DERR_INVALIDCALL
+            );
+            assert_eq!(replayed_base(device, &dev9), 42);
+            dev9.fail_set_indices.set(false);
+
+            // A null buffer is a legitimate unbind and updates the base.
+            // An unbound indexed draw is a no-op, so the base is observable through `GetIndices`.
+            assert_eq!(device8_set_indices(device.cast(), null_mut(), 5), D3D_OK);
+            assert_eq!(read_indices(device), (null_mut(), 5));
+
+            assert_eq!(resource8_release(ib8), 0);
+            drop_mock_device8(device);
+        }
+    }
+
+    #[test]
+    fn set_indices_dead_buffer_refused() {
+        let dev9 = MockDev9::new();
+        let device = mock_device8(dev9.nn());
+
+        let ib = MockCom::new();
+        let ib_out = mock_ib8(&ib);
+        unsafe {
+            assert_eq!(resource8_release(ib_out), 0);
+            assert_eq!(
+                device8_set_indices(device.cast(), ib_out, 42),
+                D3DERR_INVALIDCALL,
+            );
+            assert_eq!(dev9.set_indices_calls.get(), 0);
+            assert_eq!(read_indices(device), (null_mut(), 0));
+
+            drop_mock_device8(device);
+        }
+    }
+
+    #[test]
+    fn reset_reestablish_unbound_pair() {
+        let dev9 = MockDev9::new();
+        let device = mock_device8(dev9.nn());
+        let ib = MockCom::new();
+        let ib8 = mock_ib8(&ib);
+        unsafe {
+            assert_eq!(device8_set_indices(device.cast(), ib8, 42), D3D_OK);
+            assert_eq!(dev9.last_indices_ib.get(), ib.ptr());
+            let mut pp8 = base_pp8();
+            assert_eq!(device8_reset(device.cast(), &raw mut pp8), D3D_OK);
+            assert_eq!(dev9.resets.get(), 1);
+            assert_eq!(dev9.set_indices_calls.get(), 2);
+            assert!(dev9.last_indices_ib.get().is_null());
+            assert_eq!(read_indices(device), (null_mut(), 0));
+            assert_eq!(resource8_release(ib8), 0);
+            drop_mock_device8(device);
+        }
+    }
+
+    #[test]
+    fn reset_reestablish_failure_keep_coherent_pair() {
+        let dev9 = MockDev9::new();
+        let device = mock_device8(dev9.nn());
+        let ib = MockCom::new();
+        let ib8 = mock_ib8(&ib);
+        unsafe {
+            assert_eq!(device8_set_indices(device.cast(), ib8, 5), D3D_OK);
+            dev9.fail_set_indices.set(true);
+            let mut pp8 = base_pp8();
+            assert_eq!(device8_reset(device.cast(), &raw mut pp8), D3D_OK);
+            let (out, base) = read_indices(device);
+            assert_eq!((out, base), (ib8, 5));
+            assert_eq!(resource8_release(out), 1);
+            assert_eq!(resource8_release(ib8), 0);
+            drop_mock_device8(device);
+        }
+    }
+
+    #[test]
+    fn get_indices_returns_bound_wrapper_and_base() {
+        let dev9 = MockDev9::new();
+        let device = mock_device8(dev9.nn());
+        let ib = MockCom::new();
+        let ib8 = mock_ib8(&ib);
+        unsafe {
+            assert_eq!(device8_set_indices(device.cast(), ib8, 42), D3D_OK);
+
+            assert_eq!(read_indices(device), (ib8, 42));
+            assert_eq!((*ib8.cast::<ComHeader>()).game_refs(), 2);
+
+            assert_eq!(device8_set_indices(device.cast(), null_mut(), 7), D3D_OK);
+            assert_eq!(read_indices(device), (null_mut(), 7));
+
+            assert_eq!(resource8_release(ib8), 1);
+            assert_eq!(resource8_release(ib8), 0);
+            assert_eq!(ib.releases.get(), 1);
+            drop_mock_device8(device);
+        }
+    }
+
+    #[test]
+    fn get_indices_bound_then_released_refused() {
+        let dev9 = MockDev9::new();
+        let device = mock_device8(dev9.nn());
+        let ib = MockCom::new();
+        let ib8 = mock_ib8(&ib);
+        unsafe {
+            assert_eq!(device8_set_indices(device.cast(), ib8, 9), D3D_OK);
+            assert_eq!(resource8_release(ib8), 0);
+
+            let mut out = (&raw const MOCK_COM_VTBL).cast_mut().cast::<c_void>();
+            let mut base = 0xdead_beef_u32;
+            assert_eq!(
+                device8_get_indices(device.cast(), &raw mut out, &raw mut base),
+                D3DERR_INVALIDCALL,
+            );
+            assert!(out.is_null());
+            assert_eq!(base, 0);
+
+            assert_eq!((*ib8.cast::<ComHeader>()).game_refs(), 0);
+
+            drop_mock_device8(device);
+        }
+    }
+
+    #[test]
+    fn draw_indexed_primitive_unbound_is_noop() {
+        let dev9 = MockDev9::new();
+        let device = mock_device8(dev9.nn());
+        let ib = MockCom::new();
+        let ib8 = mock_ib8(&ib);
+        unsafe {
+            assert_eq!(
+                device8_draw_indexed_primitive(device.cast(), D3DPT_TRIANGLELIST, 0, 4, 0, 2),
+                D3D_OK,
+            );
+            assert_eq!(dev9.last_dip.get(), None);
+
+            assert_eq!(device8_set_indices(device.cast(), ib8, 9), D3D_OK);
+            assert_eq!(replayed_base(device, &dev9), 9);
+
+            assert_eq!(device8_set_indices(device.cast(), null_mut(), 3), D3D_OK);
+            dev9.last_dip.set(None);
+            assert_eq!(
+                device8_draw_indexed_primitive(device.cast(), D3DPT_TRIANGLELIST, 0, 4, 0, 2),
+                D3D_OK,
+            );
+            assert_eq!(dev9.last_dip.get(), None);
+
+            assert_eq!(resource8_release(ib8), 0);
+            drop_mock_device8(device);
+        }
     }
 
     #[test]
