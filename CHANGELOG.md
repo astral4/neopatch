@@ -11,6 +11,7 @@ All notable changes to neopatch will be documented in this file.
 
 ### Fixed
 
+- Screenshots now support games running in 16-bit color (`R5G6B5`, `X1R5G5B5`, `A1R5G5B5`) instead of failing to save.
 - Startup dialogs no longer abort the game at launch if neopatch's import-table lookup misses.
 - D3DX9 texture loads onto a non-session device no longer have their memory pool rewritten, which could leave such a device unable to recover from a lost state.
 

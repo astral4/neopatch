@@ -22,8 +22,9 @@ use std::ptr::{NonNull, null, null_mut};
 use std::slice::from_raw_parts;
 use tracing::{info, warn};
 use windows::Win32::Graphics::Direct3D9::{
-    D3DBACKBUFFER_TYPE_MONO, D3DFMT_A8R8G8B8, D3DFMT_X8R8G8B8, D3DFORMAT, D3DLOCK_READONLY,
-    D3DLOCKED_RECT, D3DPOOL_SYSTEMMEM, IDirect3DDevice9Ex, IDirect3DSurface9,
+    D3DBACKBUFFER_TYPE_MONO, D3DFMT_A1R5G5B5, D3DFMT_A8R8G8B8, D3DFMT_R5G6B5, D3DFMT_X1R5G5B5,
+    D3DFMT_X8R8G8B8, D3DFORMAT, D3DLOCK_READONLY, D3DLOCKED_RECT, D3DPOOL_SYSTEMMEM,
+    IDirect3DDevice9Ex, IDirect3DSurface9,
 };
 use windows::core::InterfaceRef;
 use windows_sys::Win32::Foundation::{
@@ -34,9 +35,65 @@ use windows_sys::Win32::Storage::FileSystem::{
     MOVEFILE_REPLACE_EXISTING, MoveFileExA, WriteFile,
 };
 
-/// Encodes a captured frame into an in-memory image (BMP or PNG). The parameters are `(width, height, pitch, src)`,
-/// where `src` points to `height` rows of `width` 32-bit BGRX/BGRA pixels with `pitch` bytes between rows.
-type ImageEncoder = unsafe fn(u32, u32, i32, *const u8) -> Result<Vec<u8>, String>;
+/// Encodes a captured frame into an in-memory image (BMP or PNG). The parameters are `(width, height, pitch, src, format)`,
+/// where `src` points to `height` rows of `width` pixels laid out per `format`, with `pitch` bytes between rows.
+type ImageEncoder = unsafe fn(u32, u32, i32, *const u8, SourceFormat) -> Result<Vec<u8>, String>;
+
+/// Back buffer pixel layouts used for screenshot capture.
+#[derive(Clone, Copy)]
+enum SourceFormat {
+    /// 32-bit BGRX/BGRA (`X8R8G8B8`/`A8R8G8B8`); the X/A byte is dropped.
+    Bgrx8888,
+    /// 16-bit 5:6:5 (`R5G6B5`).
+    Bgr565,
+    /// 16-bit (1|X):5:5:5 (`X1R5G5B5`/`A1R5G5B5`); the top bit is dropped.
+    Bgr555,
+}
+
+impl SourceFormat {
+    fn from_d3d(format: D3DFORMAT) -> Result<Self, String> {
+        match format {
+            D3DFMT_X8R8G8B8 | D3DFMT_A8R8G8B8 => Ok(Self::Bgrx8888),
+            D3DFMT_R5G6B5 => Ok(Self::Bgr565),
+            D3DFMT_X1R5G5B5 | D3DFMT_A1R5G5B5 => Ok(Self::Bgr555),
+            _ => Err(format!("unsupported back buffer format {:#x}", format.0)),
+        }
+    }
+
+    const fn bytes_per_pixel(self) -> usize {
+        match self {
+            Self::Bgrx8888 => 4,
+            Self::Bgr565 | Self::Bgr555 => 2,
+        }
+    }
+
+    /// Decodes one pixel of `self`'s layout to `[b, g, r]`. `px` must be at least [`Self::bytes_per_pixel`] long.
+    fn decode(self, px: &[u8]) -> [u8; 3] {
+        match self {
+            Self::Bgrx8888 => [px[0], px[1], px[2]],
+            Self::Bgr565 => {
+                let v = u16::from_le_bytes([px[0], px[1]]);
+                [expand5(v), expand6(v >> 5), expand5(v >> 11)]
+            }
+            Self::Bgr555 => {
+                let v = u16::from_le_bytes([px[0], px[1]]);
+                [expand5(v), expand5(v >> 5), expand5(v >> 10)]
+            }
+        }
+    }
+}
+
+/// Expands a 5-bit channel to 8 bits.
+#[allow(clippy::cast_possible_truncation)]
+const fn expand5(c: u16) -> u8 {
+    (((c & 0x1f) << 3) | ((c & 0x1f) >> 2)) as u8
+}
+
+/// Expands a 6-bit channel to 8 bits.
+#[allow(clippy::cast_possible_truncation)]
+const fn expand6(c: u16) -> u8 {
+    (((c & 0x3f) << 2) | ((c & 0x3f) >> 4)) as u8
+}
 
 /// Discards any pending deferred capture at the start of a device replacement, since it was stashed against the outgoing rendering context.
 pub(crate) fn on_device_creating(tok: &MainToken) {
@@ -202,7 +259,7 @@ unsafe fn capture_live_and_write(
     let mut desc = unsafe { zeroed() };
     unsafe { back_buffer.GetDesc(&raw mut desc) }
         .map_err(|e| format!("GetDesc hr={}", fmt_hr!(e.code())))?;
-    require_supported_format(desc.Format)?;
+    let source_format = SourceFormat::from_d3d(desc.Format)?;
 
     let mut sysmem = None;
     unsafe {
@@ -221,7 +278,14 @@ unsafe fn capture_live_and_write(
     unsafe { dev.GetRenderTargetData(&back_buffer, &sysmem) }
         .map_err(|e| format!("GetRenderTargetData hr={}", fmt_hr!(e.code())))?;
 
-    lock_and_write(&sysmem, desc.Width, desc.Height, path, encode)
+    lock_and_write(
+        &sysmem,
+        desc.Width,
+        desc.Height,
+        path,
+        encode,
+        source_format,
+    )
 }
 
 fn lock_and_write(
@@ -230,6 +294,7 @@ fn lock_and_write(
     height: u32,
     path: &[u8],
     encode: ImageEncoder,
+    source_format: SourceFormat,
 ) -> Result<(u32, u32), String> {
     let mut locked = D3DLOCKED_RECT::default();
     unsafe { surface.LockRect(&raw mut locked, null(), D3DLOCK_READONLY.cast_unsigned()) }
@@ -241,6 +306,7 @@ fn lock_and_write(
             height,
             locked.Pitch,
             locked.pBits.cast::<u8>().cast_const(),
+            source_format,
         )
     };
     if let Err(e) = unsafe { surface.UnlockRect() } {
@@ -253,14 +319,6 @@ fn lock_and_write(
     let tmp = tmp_path(path);
     write_atomic(&tmp, path, &bytes)?;
     Ok((width, height))
-}
-
-fn require_supported_format(format: D3DFORMAT) -> Result<(), String> {
-    if format == D3DFMT_X8R8G8B8 || format == D3DFMT_A8R8G8B8 {
-        Ok(())
-    } else {
-        Err(format!("unsupported back buffer format {:#x}", format.0))
-    }
 }
 
 /// Creates the parent directory of `path` if `path` contains a separator.
@@ -278,12 +336,13 @@ fn ensure_parent(path: &[u8]) {
 /// Constructs a 24bpp BGR Windows BMP byte stream.
 ///
 /// # Safety
-/// `src` must point to `height` rows of `width` 32-bit BGRX/BGRA pixels, with `pitch` bytes between row starts.
+/// `src` must point to `height` rows of `width` pixels laid out per `format`, with `pitch` bytes between row starts.
 unsafe fn build_bmp_24bpp(
     width: u32,
     height: u32,
     pitch: i32,
     src: *const u8,
+    format: SourceFormat,
 ) -> Result<Vec<u8>, String> {
     let row_bytes_unpadded = width.checked_mul(3).ok_or("width too large")?;
     let pad = (4 - (row_bytes_unpadded % 4)) % 4;
@@ -316,14 +375,15 @@ unsafe fn build_bmp_24bpp(
     buf.extend_from_slice(&0u32.to_le_bytes()); // important colors
 
     let pad_zeros = [0u8; 3];
-    // We write rows bottom-up. Each pixel is 4 bytes BGRX/BGRA and BMP's 24bpp channel order is BGR, so we just drop the X/A byte.
+    // We write rows bottom-up. BMP's 24bpp channel order is BGR.
     let row_pixels = usize::try_from(width).map_err(|e| e.to_string())?;
     let pitch = isize::try_from(pitch).map_err(|e| e.to_string())?;
+    let bpp = format.bytes_per_pixel();
     for y in (0..height).rev() {
-        // SAFETY: The caller guarantees `height` rows of `width` 4-byte pixels `pitch` bytes apart.
-        let row = unsafe { surface_row(src, y, pitch, row_pixels)? };
-        for px in row.chunks_exact(4) {
-            buf.extend_from_slice(&px[..3]);
+        // SAFETY: The caller guarantees `height` rows of `width` pixels of `format` `pitch` bytes apart.
+        let row = unsafe { surface_row(src, y, pitch, row_pixels, bpp)? };
+        for px in row.chunks_exact(bpp) {
+            buf.extend_from_slice(&format.decode(px));
         }
         if pad > 0 {
             buf.extend_from_slice(&pad_zeros[..pad as usize]);
@@ -335,23 +395,26 @@ unsafe fn build_bmp_24bpp(
 /// Constructs an 8-bit truecolor (24bpp RGB) PNG.
 ///
 /// # Safety
-/// `src` must point to `height` rows of `width` 32-bit BGRX/BGRA pixels, with `pitch` bytes between row starts.
+/// `src` must point to `height` rows of `width` pixels laid out per `format`, with `pitch` bytes between row starts.
 unsafe fn build_png_24bpp(
     width: u32,
     height: u32,
     pitch: i32,
     src: *const u8,
+    format: SourceFormat,
 ) -> Result<Vec<u8>, String> {
     let pixels = width.checked_mul(height).ok_or("image too large")?;
     let rgb_len = pixels.checked_mul(3).ok_or("image too large")?;
     let mut rgb = Vec::with_capacity(rgb_len.try_into().unwrap_or(0));
     let row_pixels = usize::try_from(width).map_err(|e| e.to_string())?;
     let pitch = isize::try_from(pitch).map_err(|e| e.to_string())?;
+    let bpp = format.bytes_per_pixel();
     for y in 0..height {
-        // SAFETY: The caller guarantees `height` rows of `width` 4-byte pixels `pitch` bytes apart.
-        let row = unsafe { surface_row(src, y, pitch, row_pixels)? };
-        for px in row.chunks_exact(4) {
-            rgb.extend_from_slice(&[px[2], px[1], px[0]]);
+        // SAFETY: The caller guarantees `height` rows of `width` pixels of `format` `pitch` bytes apart.
+        let row = unsafe { surface_row(src, y, pitch, row_pixels, bpp)? };
+        for px in row.chunks_exact(bpp) {
+            let [b, g, r] = format.decode(px);
+            rgb.extend_from_slice(&[r, g, b]);
         }
     }
 
@@ -369,19 +432,22 @@ unsafe fn build_png_24bpp(
     Ok(out)
 }
 
-/// Borrows row `y` of a locked surface. On success, returns `row_pixels` 4-byte pixels starting `y * pitch` bytes into the surface.
+/// Borrows row `y` of a locked surface. On success, returns `row_pixels` pixels of `bytes_per_pixel` each,
+/// starting `y * pitch` bytes into the surface.
 ///
 /// # Safety
-/// `src` must point to at least `y + 1` rows of `row_pixels` 32-bit pixels, `pitch` bytes apart, readable for the returned slice's lifetime.
+/// `src` must point to at least `y + 1` rows of `row_pixels` pixels of `bytes_per_pixel` each, `pitch` bytes apart,
+/// readable for the returned slice's lifetime.
 unsafe fn surface_row<'a>(
     src: *const u8,
     y: u32,
     pitch: isize,
     row_pixels: usize,
+    bytes_per_pixel: usize,
 ) -> Result<&'a [u8], String> {
     let row_off = isize::try_from(y).map_err(|e| e.to_string())? * pitch;
     // SAFETY: Row `y` exists and rows are `pitch` bytes apart.
-    Ok(unsafe { from_raw_parts(src.offset(row_off), row_pixels * 4) })
+    Ok(unsafe { from_raw_parts(src.offset(row_off), row_pixels * bytes_per_pixel) })
 }
 
 /// Writes `data` to `tmp` via `CreateFileA + WriteFile`, then renames `tmp` to `dst` using `MoveFileExA(MOVEFILE_REPLACE_EXISTING)`.
@@ -496,7 +562,7 @@ fn log_failed(path: &[u8], error: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_bmp_24bpp, build_png_24bpp};
+    use super::{SourceFormat, build_bmp_24bpp, build_png_24bpp};
     use png::{BitDepth, ColorType, Decoder};
     use std::io::Cursor;
 
@@ -508,7 +574,8 @@ mod tests {
             0x01, 0x02, 0x03, 0xff,    0x04, 0x05, 0x06, 0xff,    0x07, 0x08, 0x09, 0xff,    0xaa, 0xaa, 0xaa, 0xaa,
             0x11, 0x12, 0x13, 0xff,    0x14, 0x15, 0x16, 0xff,    0x17, 0x18, 0x19, 0xff,    0xaa, 0xaa, 0xaa, 0xaa,
         ];
-        let out = unsafe { build_bmp_24bpp(3, 2, 16, src.as_ptr()) }.expect("encode");
+        let out = unsafe { build_bmp_24bpp(3, 2, 16, src.as_ptr(), SourceFormat::Bgrx8888) }
+            .expect("encode");
         assert_eq!(&out[..2], b"BM");
         assert_eq!(out.len(), 54 + 12 * 2);
         assert_eq!(u32::from_le_bytes(out[2..6].try_into().unwrap()), 78);
@@ -523,10 +590,16 @@ mod tests {
         assert_eq!(&out[54..], &expected_pixels);
     }
 
-    /// Encodes a top-down 32bpp BGRX source and decodes the PNG back into `(width, height, RGB bytes)`.
-    fn round_trip(width: u32, height: u32, pitch: i32, src: &[u8]) -> (u32, u32, Vec<u8>) {
+    /// Encodes a top-down source of `format` and decodes the PNG back into `(width, height, RGB bytes)`.
+    fn round_trip(
+        width: u32,
+        height: u32,
+        pitch: i32,
+        src: &[u8],
+        format: SourceFormat,
+    ) -> (u32, u32, Vec<u8>) {
         let encoded =
-            unsafe { build_png_24bpp(width, height, pitch, src.as_ptr()) }.expect("encode");
+            unsafe { build_png_24bpp(width, height, pitch, src.as_ptr(), format) }.expect("encode");
 
         let mut reader = Decoder::new(Cursor::new(encoded.as_slice()))
             .read_info()
@@ -557,7 +630,7 @@ mod tests {
             0x00, 0x00, 0xff, 0x00,    0xff, 0xff, 0xff, 0x00, // red, white
         ];
         assert_eq!(
-            round_trip(2, 2, 8, &tight),
+            round_trip(2, 2, 8, &tight, SourceFormat::Bgrx8888),
             (2, 2, [BLUE, GREEN, RED, WHITE].concat()),
         );
 
@@ -569,8 +642,41 @@ mod tests {
             0x00, 0xff, 0xff, 0x00,    0xff, 0x00, 0xff, 0x00,    0xaa, 0xaa, 0xaa, 0xaa, // yellow, magenta
         ];
         assert_eq!(
-            round_trip(2, 3, 12, &padded),
+            round_trip(2, 3, 12, &padded, SourceFormat::Bgrx8888),
             (2, 3, [BLUE, GREEN, RED, WHITE, YELLOW, MAGENTA].concat()),
         );
+    }
+
+    #[test]
+    fn build_png_24bpp_decode_565() {
+        // 2x2 source, pitch = 6 bytes/row. The 0xAA row tail padding must be skipped by the stride math.
+        #[rustfmt::skip]
+        let src = [
+            0x00, 0xf8,    0xe0, 0x07,    0xaa, 0xaa, // red, green
+            0x1f, 0x00,    0x08, 0x42,    0xaa, 0xaa, // blue, mixed
+        ];
+        let mixed = [
+            (8 << 3) | (8 >> 2),
+            (16 << 2) | (16 >> 4),
+            (8 << 3) | (8 >> 2),
+        ];
+        assert_eq!(
+            round_trip(2, 2, 6, &src, SourceFormat::Bgr565),
+            (
+                2,
+                2,
+                [[255, 0, 0], [0, 255, 0], [0, 0, 255], mixed].concat()
+            ),
+        );
+    }
+
+    #[test]
+    fn build_bmp_24bpp_decode_555() {
+        // 2x1 source.
+        #[rustfmt::skip]
+        let src = [0x00, 0x7c,    0xff, 0xff]; // red, white
+        let out = unsafe { build_bmp_24bpp(2, 1, 4, src.as_ptr(), SourceFormat::Bgr555) }
+            .expect("encode");
+        assert_eq!(&out[54..], &[0, 0, 255, 255, 255, 255, 0, 0]);
     }
 }
