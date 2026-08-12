@@ -41,6 +41,7 @@ use windows::Win32::Graphics::Direct3D9::{
 };
 use windows::Win32::Graphics::Gdi::{HMONITOR, RGNDATA};
 use windows::core::{BOOL, GUID, HRESULT, IUnknown_Vtbl};
+use windows_numerics::Matrix4x4;
 use windows_sys::Win32::Foundation::HMODULE;
 
 /// D3D8's `D3DPRESENT_PARAMETERS`.
@@ -1294,9 +1295,9 @@ struct Device8Vtbl {
     begin_scene: unsafe extern "system" fn(*mut c_void) -> HRESULT,
     end_scene: unsafe extern "system" fn(*mut c_void) -> HRESULT,
     clear: unsafe extern "system" fn(*mut c_void, u32, *const D3DRECT, u32, u32, f32, u32) -> HRESULT,
-    set_transform: unsafe extern "system" fn(*mut c_void, D3DTRANSFORMSTATETYPE, *const c_void) -> HRESULT,
-    get_transform: unsafe extern "system" fn(*mut c_void, D3DTRANSFORMSTATETYPE, *mut c_void) -> HRESULT,
-    multiply_transform: unsafe extern "system" fn(*mut c_void, D3DTRANSFORMSTATETYPE, *const c_void) -> HRESULT,
+    set_transform: unsafe extern "system" fn(*mut c_void, D3DTRANSFORMSTATETYPE, *const Matrix4x4) -> HRESULT,
+    get_transform: unsafe extern "system" fn(*mut c_void, D3DTRANSFORMSTATETYPE, *mut Matrix4x4) -> HRESULT,
+    multiply_transform: unsafe extern "system" fn(*mut c_void, D3DTRANSFORMSTATETYPE, *const Matrix4x4) -> HRESULT,
     set_viewport: unsafe extern "system" fn(*mut c_void, *const D3DVIEWPORT9) -> HRESULT,
     get_viewport: unsafe extern "system" fn(*mut c_void, *mut D3DVIEWPORT9) -> HRESULT,
     set_material: unsafe extern "system" fn(*mut c_void, *const D3DMATERIAL9) -> HRESULT,
@@ -2085,11 +2086,18 @@ stub8!(device8_get_depth_stencil_surface, "IDirect3DDevice8::GetDepthStencilSurf
 forward8!(device8_begin_scene, dev9 / dev9_vt.base__.BeginScene() -> HRESULT);
 forward8!(device8_end_scene, dev9 / dev9_vt.base__.EndScene() -> HRESULT);
 forward8!(device8_clear, dev9 / dev9_vt.base__.Clear(count: u32, rects: *const D3DRECT, flags: u32, color: u32, z: f32, stencil: u32) -> HRESULT);
-// D3D8's `D3DMATRIX` is layout-identical to `windows_numerics::Matrix4x4` used by the D3D9 `SetTransform` binding,
-// so we pass the matrix as an opaque pointer and cast at the call boundary.
-forward8!(device8_set_transform, dev9 / dev9_vt.base__.SetTransform(state: D3DTRANSFORMSTATETYPE, matrix: *const c_void) -> HRESULT => (state, matrix.cast()));
-stub8!(device8_get_transform, "IDirect3DDevice8::GetTransform"(_state: D3DTRANSFORMSTATETYPE, _matrix: *mut c_void) -> D3DERR_NOTAVAILABLE);
-stub8!(device8_multiply_transform, "IDirect3DDevice8::MultiplyTransform"(_state: D3DTRANSFORMSTATETYPE, _matrix: *const c_void) -> D3D_OK);
+forward8!(device8_set_transform, dev9 / dev9_vt.base__.SetTransform(state: D3DTRANSFORMSTATETYPE, matrix: *const Matrix4x4) -> HRESULT);
+
+unsafe extern "system" fn device8_get_transform(
+    this: *mut c_void,
+    state: D3DTRANSFORMSTATETYPE,
+    matrix: *mut Matrix4x4,
+) -> HRESULT {
+    let matrix = claim_opaque!(matrix; "device8_get_transform");
+    let p = require_live!(unsafe { dev9(this) }, "device8_get_transform");
+    unsafe { (dev9_vt(p).base__.GetTransform)(p, state, matrix.as_ptr()) }
+}
+stub8!(device8_multiply_transform, "IDirect3DDevice8::MultiplyTransform"(_state: D3DTRANSFORMSTATETYPE, _matrix: *const Matrix4x4) -> D3D_OK);
 forward8!(device8_set_viewport, dev9 / dev9_vt.base__.SetViewport(viewport: *const D3DVIEWPORT9) -> HRESULT);
 forward8!(device8_get_viewport, dev9 / dev9_vt.base__.GetViewport(viewport: *mut D3DVIEWPORT9) -> HRESULT);
 stub8!(device8_set_material, "IDirect3DDevice8::SetMaterial"(_material: *const D3DMATERIAL9) -> D3D_OK);
@@ -2675,14 +2683,14 @@ unsafe extern "system" fn hook_direct3dcreate8(sdk_version: u32) -> *mut c_void 
 mod tests {
     use super::{
         ComHeader, D3D_OK, D3D8_INTERNAL_LOCKABLE, D3DERR_INVALIDCALL, D3DPresentParameters8,
-        DEVICE8_VTBL, Device8, INDEX_BUFFER8_VTBL, IndicesBinding, OutSlot, Resource8,
+        DEVICE8_VTBL, Device8, INDEX_BUFFER8_VTBL, IndicesBinding, Matrix4x4, OutSlot, Resource8,
         SURFACE8_VTBL, Surface8Vtbl, TEXTURE8_VTBL, Texture8Vtbl, caps_9_to_8,
         convert_present_params, copy_rect_valid, device8_apply_state_block,
         device8_capture_state_block, device8_create_index_buffer, device8_create_state_block,
         device8_delete_state_block, device8_draw_indexed_primitive, device8_end_state_block,
-        device8_get_indices, device8_release, device8_reset, device8_set_indices,
-        device8_set_texture, resource8_release, surface_desc_9_to_8, unwrap8, unwrap8_arg,
-        wrap_add_ref, wrap_created,
+        device8_get_indices, device8_get_transform, device8_release, device8_reset,
+        device8_set_indices, device8_set_texture, resource8_release, surface_desc_9_to_8, unwrap8,
+        unwrap8_arg, wrap_add_ref, wrap_created,
     };
     use crate::fmt_hr;
     use std::cell::Cell;
@@ -2698,7 +2706,8 @@ mod tests {
         D3DPRESENT_INTERVAL_ONE, D3DPRESENT_PARAMETERS, D3DPRESENTFLAG_LOCKABLE_BACKBUFFER,
         D3DPRIMITIVETYPE, D3DPT_TRIANGLELIST, D3DSBT_ALL, D3DSBT_PIXELSTATE, D3DSTATEBLOCKTYPE,
         D3DSURFACE_DESC, D3DSWAPEFFECT_COPY, D3DSWAPEFFECT_DISCARD, D3DSWAPEFFECT_FLIP,
-        D3DUSAGE_DYNAMIC, IDirect3DDevice9Ex_Vtbl, IDirect3DStateBlock9_Vtbl,
+        D3DTRANSFORMSTATETYPE, D3DTS_VIEW, D3DUSAGE_DYNAMIC, IDirect3DDevice9Ex_Vtbl,
+        IDirect3DStateBlock9_Vtbl,
     };
     use windows::core::{BOOL, GUID, HRESULT, IUnknown_Vtbl};
 
@@ -3353,6 +3362,7 @@ mod tests {
         resets: Cell<u32>,
         create_sb_calls: Cell<u32>,
         sb_to_return: Cell<*mut c_void>,
+        get_transform_calls: Cell<u32>,
         create_ib_calls: Cell<u32>,
         last_ib_pool: Cell<D3DPOOL>,
         last_ib_usage: Cell<u32>,
@@ -3367,6 +3377,7 @@ mod tests {
         vt.base__.CreateStateBlock = mock9_create_state_block;
         vt.base__.SetIndices = mock9_set_indices;
         vt.base__.DrawIndexedPrimitive = mock9_draw_indexed_primitive;
+        vt.base__.GetTransform = mock9_get_transform;
         vt
     });
 
@@ -3395,6 +3406,16 @@ mod tests {
     ) -> HRESULT {
         let m = unsafe { &*this.cast::<MockDev9>() };
         m.resets.update(|n| n + 1);
+        D3D_OK
+    }
+
+    unsafe extern "system" fn mock9_get_transform(
+        this: *mut c_void,
+        _state: D3DTRANSFORMSTATETYPE,
+        _matrix: *mut Matrix4x4,
+    ) -> HRESULT {
+        let m = unsafe { &*this.cast::<MockDev9>() };
+        m.get_transform_calls.update(|n| n + 1);
         D3D_OK
     }
 
@@ -3929,6 +3950,28 @@ mod tests {
             assert_eq!(token, 0);
 
             drop(Box::from_raw(device));
+        }
+    }
+
+    #[test]
+    fn get_transform_guard_and_forward() {
+        let dev9 = MockDev9::new();
+        let device = mock_device8(dev9.nn());
+        unsafe {
+            assert_eq!(
+                device8_get_transform(device.cast(), D3DTS_VIEW, null_mut()),
+                D3DERR_INVALIDCALL,
+            );
+            assert_eq!(dev9.get_transform_calls.get(), 0);
+
+            let mut matrix = [0f32; 16];
+            assert_eq!(
+                device8_get_transform(device.cast(), D3DTS_VIEW, (&raw mut matrix).cast()),
+                D3D_OK,
+            );
+            assert_eq!(dev9.get_transform_calls.get(), 1);
+
+            drop_mock_device8(device);
         }
     }
 

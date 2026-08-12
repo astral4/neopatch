@@ -21,4 +21,5 @@ png = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 windows = { workspace = true }
+windows-numerics = { workspace = true }
 windows-sys = { workspace = true }
