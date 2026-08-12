@@ -4,6 +4,10 @@ All notable changes to neopatch will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- D3DX9 texture loads onto a non-session device no longer have their memory pool rewritten, which could leave such a device unable to recover from a lost state.
+
 ## [0.12.0] - 2026-08-12
 
 ### Added

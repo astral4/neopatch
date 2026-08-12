@@ -6,6 +6,7 @@
 
 use crate::d3d9::{format_name, out_ptr, translate_managed_pool};
 use crate::log::log_at;
+use crate::session::is_game_device;
 use crate::{fmt_hr, iat_hook};
 use std::ffi::c_void;
 use windows::Win32::Graphics::Direct3D9::{D3DFORMAT, D3DPOOL};
@@ -73,7 +74,7 @@ unsafe extern "system" fn hook_d3dx_create_texture(
 ) -> HRESULT {
     let pool_orig = pool;
     let usage_orig = usage;
-    let translated = translate_managed_pool(&mut pool, &mut usage);
+    let translated = is_game_device(device) && translate_managed_pool(&mut pool, &mut usage);
 
     let hr = unsafe {
         real_d3dx_create_texture(
@@ -121,7 +122,7 @@ unsafe extern "system" fn hook_d3dx_create_texture_from_file_in_memory_ex(
 ) -> HRESULT {
     let pool_orig = pool;
     let usage_orig = usage;
-    let translated = translate_managed_pool(&mut pool, &mut usage);
+    let translated = is_game_device(device) && translate_managed_pool(&mut pool, &mut usage);
 
     let hr = unsafe {
         real_d3dx_create_texture_from_file_in_memory_ex(
