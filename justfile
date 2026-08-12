@@ -1,4 +1,5 @@
-ship_toolchain := "nightly-2026-08-07"
+triple := "i686-pc-windows-gnu"
+ship_toolchain := "nightly-2026-08-12"
 ship_build_std := "-Zbuild-std=std,panic_abort"
 ship_rustflags := "-Zunstable-options -Cpanic=immediate-abort -Clink-arg=-Wl,--enable-stdcall-fixup"
 
@@ -7,11 +8,27 @@ laa := env("NEOPATCH_LAA", "0")
 
 build game:
     cargo build -p neopatch_{{game}} --release
-    cp target/i686-pc-windows-gnu/release/neopatch_{{game}}.dll sandbox/games/{{game}}/dinput8.dll
+    cp target/{{triple}}/release/neopatch_{{game}}.dll sandbox/games/{{game}}/dinput8.dll
 
-build-ship game:
+_ensure-ship-toolchain:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! rustup toolchain list | grep -q "^{{ship_toolchain}}-"; then
+        echo "installing toolchain {{ship_toolchain}}" >&2
+        rustup toolchain install {{ship_toolchain}} --profile minimal
+    fi
+    if ! rustup component list --installed --toolchain {{ship_toolchain}} | grep -qx rust-src; then
+        echo "adding rust-src to {{ship_toolchain}}" >&2
+        rustup component add rust-src --toolchain {{ship_toolchain}}
+    fi
+    if ! rustup target list --installed --toolchain {{ship_toolchain}} | grep -qx "{{triple}}"; then
+        echo "adding {{triple}} to {{ship_toolchain}}" >&2
+        rustup target add {{triple}} --toolchain {{ship_toolchain}}
+    fi
+
+build-ship game: _ensure-ship-toolchain
     RUSTFLAGS="{{ship_rustflags}}" cargo +{{ship_toolchain}} build -p neopatch_{{game}} --release {{ship_build_std}}
-    cp target/i686-pc-windows-gnu/release/neopatch_{{game}}.dll sandbox/games/{{game}}/dinput8.dll
+    cp target/{{triple}}/release/neopatch_{{game}}.dll sandbox/games/{{game}}/dinput8.dll
 
 _test game:
     cargo +{{ship_toolchain}} test -p neopatch_{{game}} --release
@@ -24,7 +41,7 @@ _miri flags:
     -Zmiri-address-reuse-rate=1.0 -Zmiri-retag-fields {{ flags }}" \
     CARGO_UNSTABLE_PANIC_ABORT_TESTS=false \
     CARGO_TARGET_I686_PC_WINDOWS_GNU_RUNNER="cargo-miri runner" \
-    cargo +nightly miri test -p neopatch_core --target i686-pc-windows-gnu d3d8::tests
+    cargo +nightly miri test -p neopatch_core --target {{triple}} d3d8::tests
 
 miri: (_miri "") (_miri "-Zmiri-tree-borrows")
 
@@ -69,7 +86,7 @@ run game:
     fi
     WINEDLLOVERRIDES="mscoree=,mshtml=,winemenubuilder.exe=d" wine "${launch}"
 
-release:
+release: _ensure-ship-toolchain
     #!/usr/bin/env bash
     set -euo pipefail
     out="target/release-packages"
@@ -79,7 +96,7 @@ release:
         game="${name#neopatch_}"
         RUSTFLAGS="{{ship_rustflags}}" cargo +{{ship_toolchain}} build -p "${name}" --release {{ship_build_std}}
         mkdir -p "${out}/neopatch/${game}"
-        cp "target/i686-pc-windows-gnu/release/${name}.dll" "${out}/neopatch/${game}/dinput8.dll"
+        cp "target/{{triple}}/release/${name}.dll" "${out}/neopatch/${game}/dinput8.dll"
         cp "${name}/neopatch.ini.example" "${out}/neopatch/${game}/neopatch.ini"
     done
     (cd "${out}" && zip -qr "neopatch.zip" "neopatch/")
