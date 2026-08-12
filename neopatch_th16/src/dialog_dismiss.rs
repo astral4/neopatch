@@ -4,13 +4,15 @@ use crate::CONFIG;
 use neopatch_core::config::{CONFIG as CORE_CONFIG, DisplayMode};
 use neopatch_core::iat_hook;
 use neopatch_core::patches::PatchSite;
-use std::ffi::c_char;
 use tracing::info;
 use windows_sys::Win32::Foundation::{HMODULE, HWND, LPARAM, WPARAM};
 use windows_sys::Win32::UI::Controls::{
     BST_CHECKED, BST_UNCHECKED, CheckDlgButton, CheckRadioButton,
 };
-use windows_sys::Win32::UI::WindowsAndMessaging::{BN_CLICKED, DLGPROC, PostMessageA, WM_COMMAND};
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    BN_CLICKED, CreateDialogParamA, DLGPROC, PostMessageA, WM_COMMAND,
+};
+use windows_sys::core::PCSTR;
 
 const DIALOG_TEMPLATE_ID: usize = 0xcb;
 const DIALOG_PROC_VA: usize = 0x0045_c110;
@@ -45,9 +47,10 @@ pub(crate) const DIALOG_PATCHES: &[PatchSite] = &[
 
 iat_hook! {
     REAL_CREATE_DIALOG_PARAM_A / real_create_dialog_param_a : "CreateDialogParamA"
+        fallback CreateDialogParamA
         as fn(
             hinst: HMODULE,
-            template: *const c_char,
+            template: PCSTR,
             parent: HWND,
             proc: DLGPROC,
             init_param: LPARAM,
@@ -56,7 +59,7 @@ iat_hook! {
 
 unsafe extern "system" fn hook_create_dialog_param_a(
     hinst: HMODULE,
-    template: *const c_char,
+    template: PCSTR,
     parent: HWND,
     proc: DLGPROC,
     init_param: LPARAM,

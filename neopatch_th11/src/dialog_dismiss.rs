@@ -4,10 +4,10 @@ use neopatch_core::config::{CONFIG, DisplayMode};
 use neopatch_core::game_addr::GameAddr;
 use neopatch_core::iat_hook;
 use neopatch_core::patches::PatchSite;
-use std::ffi::c_char;
 use tracing::info;
 use windows_sys::Win32::Foundation::{HMODULE, HWND, LPARAM};
-use windows_sys::Win32::UI::WindowsAndMessaging::DLGPROC;
+use windows_sys::Win32::UI::WindowsAndMessaging::{DLGPROC, DialogBoxParamA};
+use windows_sys::core::PCSTR;
 
 const DIALOG_TEMPLATE_ID: usize = 0xcb;
 const DIALOG_PROC_VA: usize = 0x0044_7910;
@@ -30,10 +30,10 @@ pub(crate) const DIALOG_PATCHES: &[PatchSite] = &[
 ];
 
 iat_hook! {
-    REAL_DIALOG_BOX_PARAM_A / real_dialog_box_param_a : "DialogBoxParamA"
+    REAL_DIALOG_BOX_PARAM_A / real_dialog_box_param_a : "DialogBoxParamA" fallback DialogBoxParamA
         as fn(
             hinst: HMODULE,
-            template: *const c_char,
+            template: PCSTR,
             parent: HWND,
             proc: DLGPROC,
             init_param: LPARAM,
@@ -42,7 +42,7 @@ iat_hook! {
 
 unsafe extern "system" fn hook_dialog_box_param_a(
     hinst: HMODULE,
-    template: *const c_char,
+    template: PCSTR,
     parent: HWND,
     proc: DLGPROC,
     init_param: LPARAM,
