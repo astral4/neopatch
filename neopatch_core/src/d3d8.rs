@@ -796,8 +796,11 @@ unsafe extern "system" fn resource8_pre_load(this: *mut c_void) {
     unsafe { (res9_vt(inner).PreLoad)(inner) };
 }
 
-// 0 is deliberately not a valid `D3DRESOURCETYPE`.
-stub8!(resource8_get_type, "IDirect3DResource8::GetType"() -> u32 = 0);
+/// `D3DRESOURCETYPE` values are identical between D3D8 and D3D9, so the type forwards unchanged.
+unsafe extern "system" fn resource8_get_type(this: *mut c_void) -> u32 {
+    let p = require_live!(unsafe { unwrap8(this) }, "resource8_get_type");
+    unsafe { (res9_vt(p).GetType)(p) }.0.cast_unsigned()
+}
 
 #[repr(C)]
 #[rustfmt::skip]
