@@ -19,6 +19,15 @@ _test game:
 test:
     cargo +{{ship_toolchain}} test --workspace --release
 
+_miri flags:
+    MIRIFLAGS="-Zmiri-ignore-leaks -Zmiri-strict-provenance -Zmiri-symbolic-alignment-check \
+    -Zmiri-address-reuse-rate=1.0 -Zmiri-retag-fields {{ flags }}" \
+    CARGO_UNSTABLE_PANIC_ABORT_TESTS=false \
+    CARGO_TARGET_I686_PC_WINDOWS_GNU_RUNNER="cargo-miri runner" \
+    cargo +nightly miri test -p neopatch_core --target i686-pc-windows-gnu d3d8::tests
+
+miri: (_miri "") (_miri "-Zmiri-tree-borrows")
+
 _clippy game:
     cargo clippy -p neopatch_{{game}} --release --all-targets -- -D warnings
 
