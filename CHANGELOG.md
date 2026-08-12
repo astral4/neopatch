@@ -4,6 +4,10 @@ All notable changes to neopatch will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- When another tool (e.g. [thcrap](https://github.com/thpatch/thcrap) or [thprac](https://github.com/touhouworldcup/thprac)) layers its own hook over one of neopatch's between two device creations, its hook is now left in place instead of silently displacing it.
+
 ### Fixed
 
 - Startup dialogs no longer abort the game at launch if neopatch's import-table lookup misses.

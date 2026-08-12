@@ -3,8 +3,10 @@
 //! Cloning vtables into heap memory doesn't work because D3D9 dispatches through private virtual slots
 //! beyond the typed-struct footprint in the `windows` crate. Reads past the clone will hit uninitialized memory.
 //!
-//! Slots whose current value points into our own DLL are left alone (idempotent re-entry).
-//! Any other value gets chained through, since things like apphelp routinely hijack these slots before we get here.
+//! Slots whose current value points into our own DLL are left alone (idempotent re-entry). On first visit, any other value
+//! gets chained through, since things like apphelp routinely hijack these slots before we get here. On a revisit, the slot is read again.
+//! If the slot holds the pointer we captured or another from the vtable's own defining module, we reapply our hook.
+//! We never replace the captured original since we can't verify that a newer pointer doesn't chain back into our own hook.
 //!
 //! We don't use `FlushInstructionCache` because vtable slots are read as data.
 
@@ -170,6 +172,13 @@ impl<F: Copy + Send + Sync + Unpin + 'static, const N: usize> IndexedFnSlots<F, 
             .original
             .get()
             .unwrap_or_else(|| panic!("indexed slot `{}[{idx}]` not claimed", self.name))
+    }
+
+    /// Returns whether `raw` is one of this table's own hook instances.
+    pub(crate) fn is_our_hook(&self, raw: *mut ()) -> bool {
+        self.hooks
+            .iter()
+            .any(|&h| unsafe { fn_ptr_to_raw(h) } == raw)
     }
 
     /// Returns the hook instance bound to entry `idx`.
@@ -347,30 +356,44 @@ impl Display for SlotStatus {
     }
 }
 
-/// Logs a revisit to a slot whose original was already captured.
-fn log_recapture(name: &str, offset: usize, kept_raw: *mut (), current_raw: *mut ()) {
-    if kept_raw == current_raw {
+/// What to do with a revisited slot whose original we have already captured.
+#[derive(Clone, Copy)]
+enum Revisit {
+    /// The slot still holds the pointer we captured. We reapply our hook.
+    Repatch,
+    /// The slot holds a different pointer from the vtable's own defining module.
+    /// This could mean a second vtable allocation for the same logical slot, or the module having re-pointed its own entry.
+    /// We reapply our hook, still forwarding through the original we captured first.
+    Reassert,
+    /// Someone else's code owns the slot. We leave it alone.
+    Refuse,
+}
+
+fn log_revisit(name: &str, offset: usize, kept: *mut (), current: *mut (), revisit: Revisit) {
+    if let Revisit::Repatch = revisit {
         debug!(
             kind = "hook_slot",
             via = "intercept",
             name,
             offset = format_args!("{offset:#x}"),
             status = %SlotStatus::Unchanged,
-            kept = format_args!("{kept_raw:p}"),
+            kept = format_args!("{kept:p}"),
         );
-    } else {
-        // A divergent values means a shim was layered between our two patches.
-        // In this situation, we keep the first capture so the reinstalled hook skips the shim.
-        warn!(
-            kind = "hook_slot",
-            via = "intercept",
-            name,
-            offset = format_args!("{offset:#x}"),
-            status = %SlotStatus::Reasserted,
-            kept = format_args!("{kept_raw:p}"),
-            seen = format_args!("{current_raw:p}"),
-        );
+        return;
     }
+    let status = match revisit {
+        Revisit::Reassert => SlotStatus::Reasserted,
+        _ => SlotStatus::Refused,
+    };
+    warn!(
+        kind = "hook_slot",
+        via = "intercept",
+        name,
+        offset = format_args!("{offset:#x}"),
+        %status,
+        kept = format_args!("{kept:p}"),
+        seen = format_args!("{current:p}"),
+    );
 }
 
 /// A slot resolved for interception.
@@ -379,13 +402,33 @@ struct ResolvedSlot<F> {
     current_raw: *mut (),
     offset: usize,
     original: F,
+    /// The pointer that the installed hook will call.
+    forwards_to: *mut (),
 }
 
 impl<V> VtblScope<V> {
-    /// Reads the slot at `proj`, short-circuiting when it already holds our hook (idempotent re-entry) or is null
+    /// Classifies a revisited slot based on the pointer we captured and the pointer now in it.
+    fn classify_revisit(&self, captured_raw: *mut (), current_raw: *mut ()) -> Revisit {
+        if captured_raw == current_raw {
+            return Revisit::Repatch;
+        }
+        #[allow(clippy::cast_possible_truncation)]
+        let current_addr = current_raw.addr() as u32;
+        match self.expected_range {
+            Some(range) if range.contains(current_addr) => Revisit::Reassert,
+            _ => Revisit::Refuse,
+        }
+    }
+
+    /// Reads the slot at `proj`, short-circuiting when it already holds code of ours (idempotent re-entry) or is null
     /// (no original to chain through, so we refuse rather than overwrite it). Returns the slot address and the displaced original on success.
     // TODO: Tighten to `F: FnPtr` if the `fn_ptr_trait` feature stabilizes.
-    fn resolve_slot<F>(&self, proj: SlotProjection<V, F>, name: &str) -> Option<ResolvedSlot<F>>
+    fn resolve_slot<F>(
+        &self,
+        proj: SlotProjection<V, F>,
+        name: &str,
+        is_ours: impl Fn(*mut ()) -> bool,
+    ) -> Option<ResolvedSlot<F>>
     where
         F: Copy + Send + Sync + Unpin + 'static,
     {
@@ -397,16 +440,11 @@ impl<V> VtblScope<V> {
         let offset = proj.offset();
 
         #[allow(clippy::cast_possible_truncation)]
-        if let Some(ours) = self.our_range
-            && ours.contains(current_raw.addr() as u32)
-        {
-            self.log_outcome(
-                name,
-                offset,
-                current_raw,
-                current_raw,
-                SlotStatus::AlreadyOurs,
-            );
+        let in_our_range = self
+            .our_range
+            .is_some_and(|ours| ours.contains(current_raw.addr() as u32));
+        if in_our_range || is_ours(current_raw) {
+            self.log_already_ours(name, offset, current_raw);
             return None;
         }
 
@@ -418,6 +456,7 @@ impl<V> VtblScope<V> {
                 current_raw,
                 offset,
                 original,
+                forwards_to: current_raw,
             })
         } else {
             warn!(
@@ -429,6 +468,31 @@ impl<V> VtblScope<V> {
             );
             None
         }
+    }
+
+    /// Returns whether to reapply our hook based on the state of the revisited slot `resolved`.
+    fn revisit<F>(&self, resolved: &mut ResolvedSlot<F>, name: &str, kept_raw: *mut ()) -> bool {
+        let revisit = self.classify_revisit(kept_raw, resolved.current_raw);
+        log_revisit(
+            name,
+            resolved.offset,
+            kept_raw,
+            resolved.current_raw,
+            revisit,
+        );
+        resolved.forwards_to = kept_raw;
+        !matches!(revisit, Revisit::Refuse)
+    }
+
+    fn log_already_ours(&self, name: &str, offset: usize, current_raw: *mut ()) {
+        self.log_outcome(
+            name,
+            offset,
+            current_raw,
+            current_raw,
+            current_raw,
+            SlotStatus::AlreadyOurs,
+        );
     }
 
     /// Writes `hook` into the resolved slot and logs the patch outcome.
@@ -455,6 +519,7 @@ impl<V> VtblScope<V> {
             resolved.offset,
             resolved.current_raw,
             hook_raw,
+            resolved.forwards_to,
             outcome,
         );
     }
@@ -470,17 +535,18 @@ impl<V> VtblScope<V> {
     ) where
         F: Copy + Send + Sync + Unpin + 'static,
     {
-        let Some(resolved) = self.resolve_slot(proj, name) else {
+        let hook_raw = unsafe { fn_ptr_to_raw(hook) };
+        let Some(mut resolved) = self.resolve_slot(proj, name, |raw| raw == hook_raw) else {
             return;
         };
 
-        // When `SlotStatus::AlreadyOurs` misses because the second visit arrives through a different vtable allocation
-        // for the same logical slot, the visit reads a slot that still holds a real original and we'd panic in `FnSlot::store`.
-        // We skip the store but still patch the slot so calls through this distinct vtable route through us.
-        // A slot patched across genuinely distinct vtables should use `intercept_indexed` instead,
-        // which forwards each vtable's calls through its own original rather than the first-captured one.
+        // A revisit reaches a slot that still holds a real original, since we never replace the captured original.
+        // Slots patched across genuinely distinct vtables should use `intercept_indexed` instead,
+        // which forwards each vtable's calls through its own original rather than a single shared one.
         if let Some(existing_raw) = original.captured_raw() {
-            log_recapture(name, resolved.offset, existing_raw, resolved.current_raw);
+            if !self.revisit(&mut resolved, name, existing_raw) {
+                return;
+            }
         } else {
             original.store(resolved.original);
         }
@@ -497,15 +563,17 @@ impl<V> VtblScope<V> {
     ) where
         F: Copy + Send + Sync + Unpin + 'static,
     {
-        let Some(resolved) = self.resolve_slot(proj, name) else {
+        let Some(mut resolved) = self.resolve_slot(proj, name, |raw| originals.is_our_hook(raw))
+        else {
             return;
         };
 
         let key = self.vtbl.addr();
         if let Some(idx) = originals.lookup(key) {
             let kept_raw = unsafe { fn_ptr_to_raw(originals.get(idx)) };
-            log_recapture(name, resolved.offset, kept_raw, resolved.current_raw);
-            self.write_hook(&resolved, name, originals.hook(idx));
+            if self.revisit(&mut resolved, name, kept_raw) {
+                self.write_hook(&resolved, name, originals.hook(idx));
+            }
             return;
         }
 
@@ -550,6 +618,8 @@ impl<V> VtblScope<V> {
                     kept = format_args!("{existing_raw:p}"),
                 );
             } else {
+                // `capture` never writes the slot, so refusing here means declining to adopt the new value.
+                // We keep forwarding through the pointer captured first for the same reason `intercept` does.
                 warn!(
                     kind = "hook_slot",
                     via = "capture",
@@ -580,19 +650,22 @@ impl<V> VtblScope<V> {
         offset: usize,
         original: *mut (),
         new: *mut (),
+        forwards_to: *mut (),
         status: SlotStatus,
     ) {
         #[allow(clippy::cast_possible_truncation)]
         let original_addr = original.addr() as u32;
         #[allow(clippy::cast_possible_truncation)]
         let new_addr = new.addr() as u32;
+        #[allow(clippy::cast_possible_truncation)]
+        let forwards_to_addr = forwards_to.addr() as u32;
 
         let chain_through = if matches!(status, SlotStatus::Installed)
             && self
                 .expected_range
-                .is_none_or(|r| !r.contains(original_addr))
+                .is_none_or(|r| !r.contains(forwards_to_addr))
         {
-            annotate_addr(original_addr)
+            annotate_addr(forwards_to_addr)
         } else {
             None
         };
@@ -606,6 +679,7 @@ impl<V> VtblScope<V> {
             %status,
             old = format_args!("{original_addr:#010x}"),
             new = format_args!("{new_addr:#010x}"),
+            forwards_to = format_args!("{forwards_to_addr:#010x}"),
             chain_through,
         );
     }
@@ -647,14 +721,197 @@ pub(crate) unsafe fn install_vtable<V>(vtbl: NonNull<V>, scope: impl FnOnce(&Vtb
 
 #[cfg(test)]
 mod tests {
-    use super::IndexedFnSlots;
+    use super::{FnSlot, IndexedFnSlots, ModuleRange, VtblScope, fn_ptr_to_raw, raw_to_fn_ptr};
     use std::num::NonZero;
+    use std::ptr::{NonNull, without_provenance_mut};
 
     fn one() -> u32 {
         1
     }
     fn two() -> u32 {
         2
+    }
+
+    type TestFn = unsafe extern "system" fn() -> u32;
+
+    #[repr(C)]
+    struct TestVtbl {
+        slot: TestFn,
+    }
+
+    const EXPECTED_BASE: usize = 0x1000_0000; // stand-in for the vtable's own module (d3d9.dll)
+    const FOREIGN_BASE: usize = 0x2000_0000; // stand-in for another tool's module (e.g. thprac/thcrap)
+    const OURS_BASE: usize = 0x3000_0000; // stand-in for neopatch's own image
+
+    const REAL_A: usize = EXPECTED_BASE + 0x1000;
+    const REAL_B: usize = EXPECTED_BASE + 0x2000;
+    const FOREIGN_HOOK: usize = FOREIGN_BASE + 0x1000;
+    const OUR_HOOK: usize = OURS_BASE + 0x1000;
+
+    fn range_at(base: usize) -> ModuleRange {
+        #[allow(clippy::cast_possible_truncation)]
+        ModuleRange {
+            base: base as u32,
+            end: (base + 0x1_0000) as u32,
+        }
+    }
+
+    fn as_fn(addr: usize) -> TestFn {
+        unsafe { raw_to_fn_ptr(without_provenance_mut(addr)) }.expect("non-null")
+    }
+
+    unsafe extern "system" fn indexed_hook<const I: u32>() -> u32 {
+        I
+    }
+
+    fn raw_of(f: TestFn) -> *mut () {
+        unsafe { fn_ptr_to_raw(f) }
+    }
+
+    /// Builds a scope with explicit module ranges, bypassing `install_vtable`.
+    fn scope_for(
+        vtbl: &mut TestVtbl,
+        our_range: Option<ModuleRange>,
+        expected_range: Option<ModuleRange>,
+    ) -> VtblScope<TestVtbl> {
+        VtblScope {
+            vtbl: NonNull::from(vtbl),
+            our_range,
+            expected_range,
+        }
+    }
+
+    /// Runs one `intercept` visit against `vtbl` with explicit module ranges.
+    fn visit_with(
+        vtbl: &mut TestVtbl,
+        slot: &'static FnSlot<TestFn>,
+        our_range: Option<ModuleRange>,
+        expected_range: Option<ModuleRange>,
+    ) {
+        scope_for(vtbl, our_range, expected_range).intercept(
+            slot,
+            vtable_field!(TestVtbl, slot),
+            "test_slot",
+            as_fn(OUR_HOOK),
+        );
+    }
+
+    /// Runs one `intercept` visit with the defining module resolved.
+    fn visit(vtbl: &mut TestVtbl, slot: &'static FnSlot<TestFn>, our_range: Option<ModuleRange>) {
+        visit_with(vtbl, slot, our_range, Some(range_at(EXPECTED_BASE)));
+    }
+
+    #[test]
+    fn intercept_behavior() {
+        static ORIGINAL: FnSlot<TestFn> = FnSlot::new("TEST_INTERCEPT");
+
+        let ours = Some(range_at(OURS_BASE));
+        let mut vtbl = TestVtbl {
+            slot: as_fn(REAL_A),
+        };
+
+        // On the first visit, we capture the real implementation and install.
+        visit(&mut vtbl, &ORIGINAL, ours);
+        assert_eq!(raw_of(vtbl.slot), raw_of(as_fn(OUR_HOOK)));
+        assert_eq!(ORIGINAL.captured_raw(), Some(raw_of(as_fn(REAL_A))));
+
+        // A revisit with our hook still installed is idempotent; nothing changes.
+        visit(&mut vtbl, &ORIGINAL, ours);
+        assert_eq!(raw_of(vtbl.slot), raw_of(as_fn(OUR_HOOK)));
+        assert_eq!(ORIGINAL.captured_raw(), Some(raw_of(as_fn(REAL_A))));
+
+        // If a tool layers its hook on top of us, then we leave the slot alone and keep the original.
+        vtbl.slot = as_fn(FOREIGN_HOOK);
+        visit(&mut vtbl, &ORIGINAL, ours);
+        assert_eq!(raw_of(vtbl.slot), raw_of(as_fn(FOREIGN_HOOK)));
+        assert_eq!(ORIGINAL.captured_raw(), Some(raw_of(as_fn(REAL_A))));
+
+        // If the slot holds the pointer we captured again (e.g. fresh vtable allocation), then we reapply our hook.
+        vtbl.slot = as_fn(REAL_A);
+        visit(&mut vtbl, &ORIGINAL, ours);
+        assert_eq!(raw_of(vtbl.slot), raw_of(as_fn(OUR_HOOK)));
+        assert_eq!(ORIGINAL.captured_raw(), Some(raw_of(as_fn(REAL_A))));
+
+        // If the slot holds a different pointer from the vtable's own module, then we reapply our hook
+        // but keep forwarding through the original we captured first.
+        vtbl.slot = as_fn(REAL_B);
+        visit(&mut vtbl, &ORIGINAL, ours);
+        assert_eq!(raw_of(vtbl.slot), raw_of(as_fn(OUR_HOOK)));
+        assert_eq!(ORIGINAL.captured_raw(), Some(raw_of(as_fn(REAL_A))));
+    }
+
+    #[test]
+    fn intercept_refuse_divergence_for_unresolved_module() {
+        static ORIGINAL: FnSlot<TestFn> = FnSlot::new("TEST_NO_RANGE");
+
+        let ours = Some(range_at(OURS_BASE));
+        let mut vtbl = TestVtbl {
+            slot: as_fn(REAL_A),
+        };
+
+        visit_with(&mut vtbl, &ORIGINAL, ours, None);
+        assert_eq!(raw_of(vtbl.slot), raw_of(as_fn(OUR_HOOK)));
+        assert_eq!(ORIGINAL.captured_raw(), Some(raw_of(as_fn(REAL_A))));
+
+        // Same-module divergence is indistinguishable from foreign without a range, so it is refused.
+        vtbl.slot = as_fn(REAL_B);
+        visit_with(&mut vtbl, &ORIGINAL, ours, None);
+        assert_eq!(raw_of(vtbl.slot), raw_of(as_fn(REAL_B)));
+
+        // The captured pointer still reapplies, so a revisit is not permanently stood down.
+        vtbl.slot = as_fn(REAL_A);
+        visit_with(&mut vtbl, &ORIGINAL, ours, None);
+        assert_eq!(raw_of(vtbl.slot), raw_of(as_fn(OUR_HOOK)));
+    }
+
+    #[test]
+    fn intercept_indexed_revisit_policy_per_vtable() {
+        static SLOTS: IndexedFnSlots<TestFn, 2> =
+            IndexedFnSlots::new("TEST_INDEXED", [indexed_hook::<0>, indexed_hook::<1>]);
+
+        let ours = Some(range_at(OURS_BASE));
+        let mut vtbl = TestVtbl {
+            slot: as_fn(REAL_A),
+        };
+
+        let run = |vtbl: &mut TestVtbl| {
+            scope_for(vtbl, ours, Some(range_at(EXPECTED_BASE))).intercept_indexed(
+                &SLOTS,
+                vtable_field!(TestVtbl, slot),
+                "test_indexed",
+            );
+        };
+
+        // On the first visit, we claim an entry for this vtable and install that entry's hook.
+        run(&mut vtbl);
+        let installed = raw_of(vtbl.slot);
+        assert_eq!(installed, raw_of(SLOTS.hook(0)));
+        assert_eq!(raw_of(SLOTS.get(0)), raw_of(as_fn(REAL_A)));
+
+        // A foreign hook on top of us is left alone, just like `intercept`.
+        vtbl.slot = as_fn(FOREIGN_HOOK);
+        run(&mut vtbl);
+        assert_eq!(raw_of(vtbl.slot), raw_of(as_fn(FOREIGN_HOOK)));
+        assert_eq!(raw_of(SLOTS.get(0)), raw_of(as_fn(REAL_A)));
+
+        // An in-module divergence reapplies our hook and keeps this entry's own original.
+        vtbl.slot = as_fn(REAL_B);
+        run(&mut vtbl);
+        assert_eq!(raw_of(vtbl.slot), installed);
+        assert_eq!(raw_of(SLOTS.get(0)), raw_of(as_fn(REAL_A)));
+    }
+
+    #[test]
+    fn intercept_capture_own_hook_only_with_resolved_self_range() {
+        static ORIGINAL: FnSlot<TestFn> = FnSlot::new("TEST_SELF");
+
+        let mut vtbl = TestVtbl {
+            slot: as_fn(OUR_HOOK),
+        };
+
+        visit(&mut vtbl, &ORIGINAL, None);
+        assert_eq!(ORIGINAL.captured_raw(), None);
+        assert_eq!(raw_of(vtbl.slot), raw_of(as_fn(OUR_HOOK)));
     }
 
     fn nz(addr: usize) -> NonZero<usize> {
