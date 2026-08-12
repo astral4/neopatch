@@ -217,7 +217,7 @@ unsafe extern "C" fn init_d3d_rendering_hook() -> i32 {
 
 /// Applies the pinned configuration overrides. This occurs at `Direct3DCreate8` time when `th07.cfg` is loaded
 /// but no window or device exists yet.
-pub(crate) fn apply_display_override() {
+fn apply_display_override() {
     let user_windowed = CFG_WINDOWED_VA.read();
 
     let opts = CFG_OPTS_VA.read();

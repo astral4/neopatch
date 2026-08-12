@@ -27,14 +27,14 @@ pub struct CoreConfig {
     pub framerate: FramerateCfg,
     pub input: InputCfg,
     pub process: ProcessCfg,
-    pub log: LogCfg,
+    pub(crate) log: LogCfg,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct DisplayCfg {
     pub mode: DisplayMode,
     /// Ignored in windowed mode.
-    pub refresh_rate: RefreshRateMode,
+    pub(crate) refresh_rate: RefreshRateMode,
 }
 
 impl Default for DisplayCfg {
@@ -53,12 +53,12 @@ impl Default for DisplayCfg {
 pub struct WindowCfg {
     /// `x` and `y` indicate the requested outer window position.
     /// `None` (both unset) leaves placement to the system and the window manager. Setting only one of the pair treats the other as `0`.
-    pub x: Option<i32>,
-    pub y: Option<i32>,
-    pub width: Option<NonZero<u32>>,
-    pub height: Option<NonZero<u32>>,
-    pub frame: Option<WindowFrame>,
-    pub always_on_top: bool,
+    pub(crate) x: Option<i32>,
+    pub(crate) y: Option<i32>,
+    pub(crate) width: Option<NonZero<u32>>,
+    pub(crate) height: Option<NonZero<u32>>,
+    pub(crate) frame: Option<WindowFrame>,
+    pub(crate) always_on_top: bool,
 }
 
 // Game logic is frame-locked at one tick per `Present`, so higher rates speed everything up.
@@ -66,8 +66,8 @@ pub struct WindowCfg {
 #[derive(Debug, PartialEq, Eq)]
 pub struct FramerateCfg {
     pub game_fps: u32,
-    pub replay_skip_fps: u32,
-    pub replay_slow_fps: u32,
+    pub(crate) replay_skip_fps: u32,
+    pub(crate) replay_slow_fps: u32,
 }
 
 impl Default for FramerateCfg {
@@ -94,10 +94,10 @@ impl Default for InputCfg {
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct ProcessCfg {
-    pub priority: PriorityClass,
+    pub(crate) priority: PriorityClass,
     /// `None` means `SetProcessAffinityMask` is not called and the OS scheduler default is used.
     // This is `u32` because 32-bit processes can't address cores beyond bit 31.
-    pub affinity_mask: Option<NonZero<u32>>,
+    pub(crate) affinity_mask: Option<NonZero<u32>>,
 }
 
 impl Default for ProcessCfg {
@@ -111,9 +111,9 @@ impl Default for ProcessCfg {
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct LogCfg {
-    pub level: LevelFilter,
-    pub sessions_to_keep: NonZero<u32>,
-    pub log_dir: Option<PathBuf>,
+    pub(crate) level: LevelFilter,
+    pub(crate) sessions_to_keep: NonZero<u32>,
+    pub(crate) log_dir: Option<PathBuf>,
 }
 
 impl Default for LogCfg {
@@ -133,7 +133,7 @@ pub enum DisplayMode {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RefreshRateMode {
+pub(crate) enum RefreshRateMode {
     /// Highest supported rate not above the desktop's rate at the chosen resolution; otherwise the lowest supported rate.
     Native,
     /// Highest supported multiple-of-60 rate not above the desktop's rate at the chosen resolution; otherwise identical to `Native`.
@@ -145,7 +145,7 @@ pub enum RefreshRateMode {
 
 /// Window frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum WindowFrame {
+pub(crate) enum WindowFrame {
     /// The "normal" desktop app appearance: title bar with system menu and minimize/maximize/close buttons.
     Framed,
     /// No caption or border, but the system menu remains fully functional (Alt+Space for Move/Minimize/Maximize/Close).
@@ -156,7 +156,7 @@ pub enum WindowFrame {
 
 // Realtime is deliberately omitted because we don't want or need it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PriorityClass {
+pub(crate) enum PriorityClass {
     Unchanged,
     Idle,
     BelowNormal,
@@ -454,7 +454,7 @@ fn parse_bitmask(v: &str) -> Option<u32> {
 
 /// Strips a BOM if present and lossily decodes the input as UTF-8.
 #[must_use]
-pub fn decode_text(bytes: &[u8]) -> Cow<'_, str> {
+fn decode_text(bytes: &[u8]) -> Cow<'_, str> {
     if let Some(body) = bytes.strip_prefix(b"\xff\xfe") {
         return Cow::Owned(decode_utf16(body, u16::from_le_bytes));
     }
@@ -604,7 +604,7 @@ impl Resolution {
     }
 
     #[must_use]
-    pub fn dimensions(self) -> (u32, u32) {
+    pub(crate) fn dimensions(self) -> (u32, u32) {
         match self {
             Self::R640x480 => (640, 480),
             Self::R960x720 => (960, 720),
@@ -631,7 +631,7 @@ pub enum DisplayModeExt {
 
 impl DisplayModeExt {
     #[must_use]
-    pub fn to_core(self) -> DisplayMode {
+    pub(crate) fn to_core(self) -> DisplayMode {
         match self {
             Self::Windowed => DisplayMode::Windowed,
             Self::Fullscreen | Self::Borderless => DisplayMode::Fullscreen,

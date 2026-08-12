@@ -274,7 +274,7 @@ fn reconcile_cached_back_buffer_format() {
 
 /// Applies the pinned configuration overrides. This occurs at `Direct3DCreate8` time when `東方紅魔郷.cfg` is loaded
 /// but no window or device exists yet.
-pub(crate) fn apply_display_override() {
+fn apply_display_override() {
     let user_windowed = CFG_WINDOWED_VA.read();
 
     let opts = CFG_OPTS_VA.read();
