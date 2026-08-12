@@ -58,12 +58,4 @@ pub(crate) use fmt_hr;
 
 // Stub; see `build.rs`.
 #[cfg(needs_unwind_resume_stub)]
-mod unwind_resume_stub {
-    use std::ffi::c_void;
-    use windows_sys::Win32::System::Threading::ExitProcess;
-
-    #[unsafe(no_mangle)]
-    unsafe extern "C" fn _Unwind_Resume(_: *mut c_void) -> ! {
-        unsafe { ExitProcess(0xdead) }
-    }
-}
+core::arch::global_asm!(".globl __Unwind_Resume", "__Unwind_Resume:", "ud2");
