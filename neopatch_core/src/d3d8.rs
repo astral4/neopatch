@@ -1041,7 +1041,12 @@ static VERTEX_BUFFER8_VTBL: Buffer8Vtbl = Buffer8Vtbl::new(
 
 forward8!(vertex_buffer8_lock, unwrap8 / vb9_vt.Lock(offset: u32, size: u32, data: *mut *mut u8, flags: u32) -> HRESULT => (offset, size, data.cast(), flags));
 forward8!(vertex_buffer8_unlock, unwrap8 / vb9_vt.Unlock() -> HRESULT);
-stub8!(vertex_buffer8_get_desc, "IDirect3DVertexBuffer8::GetDesc"(_out: *mut c_void) -> D3DERR_NOTAVAILABLE);
+unsafe extern "system" fn vertex_buffer8_get_desc(this: *mut c_void, desc: *mut c_void) -> HRESULT {
+    let desc = claim_opaque!(desc; "vertex_buffer8_get_desc");
+    let p = require_live!(unsafe { unwrap8(this) }, "vertex_buffer8_get_desc");
+    // D3D8's `D3DVERTEXBUFFER_DESC` is field-identical to D3D9's, so it forwards as an opaque pointer.
+    unsafe { (vb9_vt(p).GetDesc)(p, desc.as_ptr().cast()) }
+}
 
 /// # Safety
 /// `dev8` must be a live `IDirect3DDevice8` created by this module.
