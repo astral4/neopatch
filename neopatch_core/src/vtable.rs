@@ -11,6 +11,7 @@
 use crate::log::log_at;
 use crate::modules::{ModuleRange, annotate_addr, module_containing, module_info};
 use crate::protect::with_writable;
+use std::fmt::{Display, Formatter, Result as FmtResult};
 use std::marker::PhantomData;
 use std::mem::transmute_copy;
 use std::num::NonZero;
@@ -304,22 +305,68 @@ pub(crate) struct VtblScope<V> {
     expected_range: Option<ModuleRange>,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum SlotStatus {
+    /// Our hook is now in the slot.
+    Installed,
+    /// The slot already held code of ours, so there was nothing to do.
+    AlreadyOurs,
+    /// A revisit found the pointer we captured, unchanged.
+    Unchanged,
+    /// A revisit found a different pointer from the slot's own defining module.
+    /// Our hook was reapplied, still forwarding through the original captured first.
+    Reasserted,
+    /// We declined to write or to adopt what we found, because another tool owns the slot.
+    Refused,
+    /// The slot is null, so there is nothing to chain through.
+    NullSlot,
+    /// The named import is not in the host's import table.
+    NotImported,
+    /// The slot could not be made writable.
+    ProtectFailed,
+    /// No free entry remained in the indexed pool.
+    PoolFull,
+    /// The write did not read back as written.
+    VerifyFailed,
+}
+
+impl Display for SlotStatus {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        f.write_str(match self {
+            Self::Installed => "INSTALLED",
+            Self::AlreadyOurs => "ALREADY_OURS",
+            Self::Unchanged => "UNCHANGED",
+            Self::Reasserted => "REASSERTED",
+            Self::Refused => "REFUSED",
+            Self::NullSlot => "NULL_SLOT",
+            Self::NotImported => "NOT_IMPORTED",
+            Self::ProtectFailed => "PROTECT_FAILED",
+            Self::PoolFull => "POOL_FULL",
+            Self::VerifyFailed => "VERIFY_FAILED",
+        })
+    }
+}
+
 /// Logs a revisit to a slot whose original was already captured.
 fn log_recapture(name: &str, offset: usize, kept_raw: *mut (), current_raw: *mut ()) {
     if kept_raw == current_raw {
         debug!(
-            kind = "intercept_recapture_skipped",
+            kind = "hook_slot",
+            via = "intercept",
             name,
             offset = format_args!("{offset:#x}"),
-            value = format_args!("{kept_raw:p}"),
+            status = %SlotStatus::Unchanged,
+            kept = format_args!("{kept_raw:p}"),
         );
     } else {
         // A divergent values means a shim was layered between our two patches.
         // In this situation, we keep the first capture so the reinstalled hook skips the shim.
         warn!(
-            kind = "intercept_recapture_divergent",
+            kind = "hook_slot",
+            via = "intercept",
             name,
             offset = format_args!("{offset:#x}"),
+            status = %SlotStatus::Reasserted,
             kept = format_args!("{kept_raw:p}"),
             seen = format_args!("{current_raw:p}"),
         );
@@ -358,7 +405,7 @@ impl<V> VtblScope<V> {
                 offset,
                 current_raw,
                 current_raw,
-                PatchOutcome::AlreadyOurs,
+                SlotStatus::AlreadyOurs,
             );
             return None;
         }
@@ -374,10 +421,11 @@ impl<V> VtblScope<V> {
             })
         } else {
             warn!(
-                kind = "vtable_patch",
+                kind = "hook_slot",
+                via = "intercept",
                 name,
                 offset = format_args!("{offset:#x}"),
-                status = "NULL_SLOT_REFUSED",
+                status = %SlotStatus::NullSlot,
             );
             None
         }
@@ -398,9 +446,9 @@ impl<V> VtblScope<V> {
         // SAFETY: See above.
         let verify = unsafe { read_unaligned(resolved.slot_raw) };
         let outcome = if verify == hook_raw {
-            PatchOutcome::Applied
+            SlotStatus::Installed
         } else {
-            PatchOutcome::Mismatch
+            SlotStatus::VerifyFailed
         };
         self.log_outcome(
             name,
@@ -426,7 +474,7 @@ impl<V> VtblScope<V> {
             return;
         };
 
-        // When `PatchOutcome::AlreadyOurs` misses because the second visit arrives through a different vtable allocation
+        // When `SlotStatus::AlreadyOurs` misses because the second visit arrives through a different vtable allocation
         // for the same logical slot, the visit reads a slot that still holds a real original and we'd panic in `FnSlot::store`.
         // We skip the store but still patch the slot so calls through this distinct vtable route through us.
         // A slot patched across genuinely distinct vtables should use `intercept_indexed` instead,
@@ -463,11 +511,12 @@ impl<V> VtblScope<V> {
 
         let Some(idx) = originals.claim(key, resolved.original) else {
             warn!(
-                kind = "vtable_patch",
+                kind = "hook_slot",
+                via = "intercept",
                 name,
                 offset = format_args!("{:#x}", resolved.offset),
+                status = %SlotStatus::PoolFull,
                 key = format_args!("{key:#x}"),
-                status = "INDEX_POOL_FULL",
             );
             return;
         };
@@ -494,14 +543,18 @@ impl<V> VtblScope<V> {
         if let Some(existing_raw) = dst.captured_raw() {
             if existing_raw == current_raw {
                 debug!(
-                    kind = "capture_slot_skipped",
-                    slot = dst.name(),
-                    value = format_args!("{existing_raw:p}"),
+                    kind = "hook_slot",
+                    via = "capture",
+                    name = dst.name(),
+                    status = %SlotStatus::Unchanged,
+                    kept = format_args!("{existing_raw:p}"),
                 );
             } else {
                 warn!(
-                    kind = "capture_slot_divergent",
-                    slot = dst.name(),
+                    kind = "hook_slot",
+                    via = "capture",
+                    name = dst.name(),
+                    status = %SlotStatus::Refused,
                     kept = format_args!("{existing_raw:p}"),
                     seen = format_args!("{current_raw:p}"),
                 );
@@ -512,7 +565,12 @@ impl<V> VtblScope<V> {
         if let Some(f) = unsafe { raw_to_fn_ptr(current_raw) } {
             dst.store(f);
         } else {
-            warn!(kind = "capture_slot_null", slot = dst.name());
+            warn!(
+                kind = "hook_slot",
+                via = "capture",
+                name = dst.name(),
+                status = %SlotStatus::NullSlot,
+            );
         }
     }
 
@@ -522,20 +580,14 @@ impl<V> VtblScope<V> {
         offset: usize,
         original: *mut (),
         new: *mut (),
-        outcome: PatchOutcome,
+        status: SlotStatus,
     ) {
         #[allow(clippy::cast_possible_truncation)]
         let original_addr = original.addr() as u32;
         #[allow(clippy::cast_possible_truncation)]
         let new_addr = new.addr() as u32;
 
-        let (status, failed) = match outcome {
-            PatchOutcome::AlreadyOurs => ("IDEMPOTENT", false),
-            PatchOutcome::Applied => ("OK", false),
-            PatchOutcome::Mismatch => ("MISMATCH", true),
-        };
-
-        let chain_through = if matches!(outcome, PatchOutcome::Applied)
+        let chain_through = if matches!(status, SlotStatus::Installed)
             && self
                 .expected_range
                 .is_none_or(|r| !r.contains(original_addr))
@@ -546,23 +598,17 @@ impl<V> VtblScope<V> {
         };
         let chain_through = chain_through.as_deref().unwrap_or("");
 
-        log_at!(failed => warn / info,
-            kind = "vtable_patch",
+        log_at!(matches!(status, SlotStatus::VerifyFailed) => warn / info,
+            kind = "hook_slot",
+            via = "intercept",
             name,
             offset = format_args!("{offset:#x}"),
+            %status,
             old = format_args!("{original_addr:#010x}"),
             new = format_args!("{new_addr:#010x}"),
-            status,
             chain_through,
         );
     }
-}
-
-#[derive(Clone, Copy)]
-enum PatchOutcome {
-    Applied,
-    AlreadyOurs,
-    Mismatch,
 }
 
 /// Opens a writable window over `size_of::<V>()` bytes starting at `vtbl`, builds a [`VtblScope<V>`], and runs `scope`.
@@ -591,7 +637,8 @@ pub(crate) unsafe fn install_vtable<V>(vtbl: NonNull<V>, scope: impl FnOnce(&Vtb
     };
     if ran.is_none() {
         warn!(
-            kind = "vtable_protect_failed",
+            kind = "hook_vtable_region",
+            status = %SlotStatus::ProtectFailed,
             addr = format_args!("{region_start:p}"),
             span = size,
         );

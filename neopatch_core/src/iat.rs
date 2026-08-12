@@ -4,7 +4,7 @@
 //! The trampoline calls the captured original directly without transmuting.
 
 use crate::protect::with_writable;
-use crate::vtable::{FnSlot, fn_ptr_to_raw, raw_to_fn_ptr};
+use crate::vtable::{FnSlot, SlotStatus, fn_ptr_to_raw, raw_to_fn_ptr};
 use std::ffi::CStr;
 use std::mem::offset_of;
 use std::ptr::{NonNull, read_unaligned, write_unaligned};
@@ -126,9 +126,10 @@ impl<F: Copy + Send + Sync + Unpin + 'static> IatHook<F> {
             SlotOutcome::Hit { ptr } => ptr,
             SlotOutcome::Miss { descriptors } => {
                 info!(
-                    kind = "iat_hook",
+                    kind = "hook_slot",
+                    via = "iat",
                     name = self.name,
-                    status = "NOT_IMPORTED",
+                    status = %SlotStatus::NotImported,
                     descriptors,
                 );
                 return false;
@@ -139,12 +140,22 @@ impl<F: Copy + Send + Sync + Unpin + 'static> IatHook<F> {
         // The first call through the slot comes from game code after `DllMain` returns, so plain reads and writes don't need fences.
         let current_raw = unsafe { read_unaligned(slot_raw) };
         if current_raw == hook_raw && self.slot.try_get().is_some() {
-            info!(kind = "iat_hook", name = self.name, status = "IDEMPOTENT");
+            info!(
+                kind = "hook_slot",
+                via = "iat",
+                name = self.name,
+                status = %SlotStatus::AlreadyOurs,
+            );
             return true;
         }
 
         let Some(original) = (unsafe { raw_to_fn_ptr(current_raw) }) else {
-            warn!(kind = "iat_hook", name = self.name, status = "NULL_SLOT");
+            warn!(
+                kind = "hook_slot",
+                via = "iat",
+                name = self.name,
+                status = %SlotStatus::NullSlot,
+            );
             return false;
         };
         // The slot can be already populated by a different pointer if third-party code rebinds the IAT between two installations.
@@ -152,9 +163,10 @@ impl<F: Copy + Send + Sync + Unpin + 'static> IatHook<F> {
         if let Some(existing_raw) = self.slot.captured_raw() {
             if existing_raw != current_raw {
                 warn!(
-                    kind = "iat_hook",
+                    kind = "hook_slot",
+                    via = "iat",
                     name = self.name,
-                    status = "RECAPTURE_DIVERGENT",
+                    status = %SlotStatus::Refused,
                     kept = format_args!("{existing_raw:p}"),
                     seen = format_args!("{current_raw:p}"),
                 );
@@ -170,13 +182,19 @@ impl<F: Copy + Send + Sync + Unpin + 'static> IatHook<F> {
             })
         };
         if written.is_some() {
-            info!(kind = "iat_hook", name = self.name, status = "OK");
+            info!(
+                kind = "hook_slot",
+                via = "iat",
+                name = self.name,
+                status = %SlotStatus::Installed,
+            );
             true
         } else {
             warn!(
-                kind = "iat_hook",
+                kind = "hook_slot",
+                via = "iat",
                 name = self.name,
-                status = "PROTECT_FAILED"
+                status = %SlotStatus::ProtectFailed,
             );
             false
         }
