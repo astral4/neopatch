@@ -1057,6 +1057,7 @@ static VERTEX_BUFFER8_VTBL: Buffer8Vtbl = Buffer8Vtbl::new(
 
 forward8!(vertex_buffer8_lock, unwrap8 / vb9_vt.Lock(offset: u32, size: u32, data: *mut *mut u8, flags: u32) -> HRESULT => (offset, size, data.cast(), flags));
 forward8!(vertex_buffer8_unlock, unwrap8 / vb9_vt.Unlock() -> HRESULT);
+
 unsafe extern "system" fn vertex_buffer8_get_desc(this: *mut c_void, desc: *mut c_void) -> HRESULT {
     let desc = claim_opaque!(desc; "vertex_buffer8_get_desc");
     let p = require_live!(unsafe { unwrap8(this) }, "vertex_buffer8_get_desc");
@@ -2220,6 +2221,7 @@ unsafe extern "system" fn device8_get_render_state(
         },
     }
 }
+
 stub8!(device8_begin_state_block, "IDirect3DDevice8::BeginStateBlock"() -> D3DERR_NOTAVAILABLE);
 stub8!(device8_end_state_block, "IDirect3DDevice8::EndStateBlock"(_out_token: *mut u32) clears _out_token -> D3DERR_NOTAVAILABLE);
 
@@ -2327,6 +2329,7 @@ unsafe extern "system" fn device8_create_state_block(
 stub8!(device8_set_clip_status, "IDirect3DDevice8::SetClipStatus"(_status: *const D3DCLIPSTATUS9) -> D3D_OK);
 stub8!(device8_get_clip_status, "IDirect3DDevice8::GetClipStatus"(_status: *mut D3DCLIPSTATUS9) -> D3DERR_NOTAVAILABLE);
 stub8!(device8_get_texture, "IDirect3DDevice8::GetTexture"(_stage: u32, _out: *mut *mut c_void) clears _out -> D3DERR_NOTAVAILABLE);
+
 unsafe extern "system" fn device8_set_texture(
     this: *mut c_void,
     stage: u32,
@@ -2339,6 +2342,7 @@ unsafe extern "system" fn device8_set_texture(
     };
     unsafe { (dev9_vt(p).base__.SetTexture)(p, stage, t9) }
 }
+
 unsafe extern "system" fn device8_get_texture_stage_state(
     this: *mut c_void,
     stage: u32,
@@ -2389,6 +2393,7 @@ stub8!(device8_get_palette_entries, "IDirect3DDevice8::GetPaletteEntries"(_num: 
 stub8!(device8_set_current_texture_palette, "IDirect3DDevice8::SetCurrentTexturePalette"(_num: u32) -> D3D_OK);
 stub8!(device8_get_current_texture_palette, "IDirect3DDevice8::GetCurrentTexturePalette"(_num: *mut u32) clears _num -> D3DERR_NOTAVAILABLE);
 forward8!(device8_draw_primitive, dev9 / dev9_vt.base__.DrawPrimitive(primitive_type: D3DPRIMITIVETYPE, start_vertex: u32, primitive_count: u32) -> HRESULT);
+
 unsafe extern "system" fn device8_draw_indexed_primitive(
     this: *mut c_void,
     primitive_type: D3DPRIMITIVETYPE,
@@ -2420,6 +2425,7 @@ unsafe extern "system" fn device8_draw_indexed_primitive(
         )
     }
 }
+
 forward8!(device8_draw_primitive_up, dev9 / dev9_vt.base__.DrawPrimitiveUP(primitive_type: D3DPRIMITIVETYPE, primitive_count: u32, vertex_data: *const c_void, vertex_stride: u32) -> HRESULT);
 stub8!(device8_draw_indexed_primitive_up, "IDirect3DDevice8::DrawIndexedPrimitiveUP"(_primitive_type: D3DPRIMITIVETYPE, _min_vertex_index: u32, _num_vertex_indices: u32, _primitive_count: u32, _index_data: *const c_void, _index_data_format: D3DFORMAT, _vertex_data: *const c_void, _vertex_stride: u32) -> D3DERR_NOTAVAILABLE);
 stub8!(device8_process_vertices, "IDirect3DDevice8::ProcessVertices"(_src_start: u32, _dest_index: u32, _count: u32, _dest_buffer: *mut c_void, _flags: u32) -> D3DERR_NOTAVAILABLE);
@@ -2451,6 +2457,7 @@ unsafe extern "system" fn device8_get_vertex_shader(this: *mut c_void, out: *mut
     let p = require_live!(unsafe { dev9(this) }, "device8_get_vertex_shader");
     unsafe { (dev9_vt(p).base__.GetFVF)(p, out.as_ptr()) }
 }
+
 stub8!(device8_delete_vertex_shader, "IDirect3DDevice8::DeleteVertexShader"(_handle: u32) -> D3D_OK);
 stub8!(device8_set_vertex_shader_constant, "IDirect3DDevice8::SetVertexShaderConstant"(_register: u32, _data: *const c_void, _count: u32) -> D3D_OK);
 stub8!(device8_get_vertex_shader_constant, "IDirect3DDevice8::GetVertexShaderConstant"(_register: u32, _data: *mut c_void, _count: u32) -> D3DERR_NOTAVAILABLE);
@@ -2471,6 +2478,7 @@ unsafe extern "system" fn device8_set_stream_source(
 }
 
 stub8!(device8_get_stream_source, "IDirect3DDevice8::GetStreamSource"(_stream: u32, _out: *mut *mut c_void, _stride: *mut u32) clears _out, _stride -> D3DERR_NOTAVAILABLE);
+
 unsafe extern "system" fn device8_set_indices(
     this: *mut c_void,
     ib8: *mut c_void,
@@ -2512,6 +2520,7 @@ unsafe extern "system" fn device8_get_indices(
     base.set(bound.base_vertex_index);
     D3D_OK
 }
+
 stub8!(device8_create_pixel_shader, "IDirect3DDevice8::CreatePixelShader"(_function: *const u32, _handle: *mut u32) clears _handle -> D3DERR_NOTAVAILABLE);
 
 unsafe extern "system" fn device8_set_pixel_shader(this: *mut c_void, handle: u32) -> HRESULT {
@@ -3373,6 +3382,23 @@ mod tests {
         }
     }
 
+    fn mock_ib8(ib: &MockCom) -> *mut c_void {
+        let mut out = null_mut();
+        let hr = unsafe {
+            wrap_created(
+                "test",
+                D3D_OK,
+                ib.ptr(),
+                (&raw const INDEX_BUFFER8_VTBL).cast(),
+                null_mut(),
+                false,
+                &OutSlot::claim(&raw mut out, "test").unwrap(),
+            )
+        };
+        assert_eq!(hr, D3D_OK);
+        out
+    }
+
     /// A `IDirect3DStateBlock9` with call counters for testing the D3D8 state-block API surface.
     #[repr(C)]
     struct MockStateBlock {
@@ -3491,27 +3517,27 @@ mod tests {
         resets: Cell<u32>,
         create_sb_calls: Cell<u32>,
         sb_to_return: Cell<*mut c_void>,
+        create_ib_calls: Cell<u32>,
+        last_ib_pool: Cell<D3DPOOL>,
+        last_ib_usage: Cell<u32>,
+        ib_to_return: Cell<*mut c_void>,
         get_transform_calls: Cell<u32>,
+        set_pixel_shader_calls: Cell<u32>,
+        last_pixel_shader: Cell<*mut c_void>,
         rs_to_return: Cell<u32>,
         get_rs_calls: Cell<u32>,
         sampler_to_return: Cell<u32>,
         tss_to_return: Cell<u32>,
-        set_pixel_shader_calls: Cell<u32>,
-        last_pixel_shader: Cell<*mut c_void>,
-        set_fvf_calls: Cell<u32>,
-        last_fvf_set: Cell<u32>,
         svp_to_return: Cell<bool>,
         npatch_to_return: Cell<f32>,
+        set_fvf_calls: Cell<u32>,
+        last_fvf_set: Cell<u32>,
         svp_set_calls: Cell<u32>,
         last_svp_set: Cell<Option<bool>>,
         fail_svp_set: Cell<bool>,
         npatch_set_calls: Cell<u32>,
         last_npatch_set: Cell<f32>,
         fail_npatch_set: Cell<bool>,
-        create_ib_calls: Cell<u32>,
-        last_ib_pool: Cell<D3DPOOL>,
-        last_ib_usage: Cell<u32>,
-        ib_to_return: Cell<*mut c_void>,
     }
 
     static MOCK_DEV9_VTBL: LazyLock<IDirect3DDevice9Ex_Vtbl> = LazyLock::new(|| {
@@ -3523,13 +3549,13 @@ mod tests {
         vt.base__.SetIndices = mock9_set_indices;
         vt.base__.DrawIndexedPrimitive = mock9_draw_indexed_primitive;
         vt.base__.GetTransform = mock9_get_transform;
-        vt.base__.GetRenderState = mock9_get_render_state;
         vt.base__.SetPixelShader = mock9_set_pixel_shader;
-        vt.base__.SetFVF = mock9_set_fvf;
+        vt.base__.GetRenderState = mock9_get_render_state;
         vt.base__.GetSamplerState = mock9_get_sampler_state;
         vt.base__.GetTextureStageState = mock9_get_texture_stage_state;
         vt.base__.GetSoftwareVertexProcessing = mock9_get_software_vertex_processing;
         vt.base__.GetNPatchMode = mock9_get_npatch_mode;
+        vt.base__.SetFVF = mock9_set_fvf;
         vt.base__.SetSoftwareVertexProcessing = mock9_set_software_vertex_processing;
         vt.base__.SetNPatchMode = mock9_set_npatch_mode;
         vt
@@ -3573,17 +3599,6 @@ mod tests {
         D3D_OK
     }
 
-    unsafe extern "system" fn mock9_get_render_state(
-        this: *mut c_void,
-        _state: super::D3DRENDERSTATETYPE,
-        out: *mut u32,
-    ) -> HRESULT {
-        let m = unsafe { &*this.cast::<MockDev9>() };
-        m.get_rs_calls.update(|n| n + 1);
-        unsafe { out.write(m.rs_to_return.get()) };
-        D3D_OK
-    }
-
     unsafe extern "system" fn mock9_set_pixel_shader(
         this: *mut c_void,
         shader: *mut c_void,
@@ -3594,10 +3609,14 @@ mod tests {
         D3D_OK
     }
 
-    unsafe extern "system" fn mock9_set_fvf(this: *mut c_void, fvf: u32) -> HRESULT {
+    unsafe extern "system" fn mock9_get_render_state(
+        this: *mut c_void,
+        _state: super::D3DRENDERSTATETYPE,
+        out: *mut u32,
+    ) -> HRESULT {
         let m = unsafe { &*this.cast::<MockDev9>() };
-        m.set_fvf_calls.update(|n| n + 1);
-        m.last_fvf_set.set(fvf);
+        m.get_rs_calls.update(|n| n + 1);
+        unsafe { out.write(m.rs_to_return.get()) };
         D3D_OK
     }
 
@@ -3631,6 +3650,13 @@ mod tests {
     unsafe extern "system" fn mock9_get_npatch_mode(this: *mut c_void) -> f32 {
         let m = unsafe { &*this.cast::<MockDev9>() };
         m.npatch_to_return.get()
+    }
+
+    unsafe extern "system" fn mock9_set_fvf(this: *mut c_void, fvf: u32) -> HRESULT {
+        let m = unsafe { &*this.cast::<MockDev9>() };
+        m.set_fvf_calls.update(|n| n + 1);
+        m.last_fvf_set.set(fvf);
+        D3D_OK
     }
 
     unsafe extern "system" fn mock9_set_software_vertex_processing(
@@ -3713,23 +3739,6 @@ mod tests {
         m.last_ib_usage.set(usage);
         unsafe { out.write(m.ib_to_return.get()) };
         D3D_OK
-    }
-
-    fn mock_ib8(ib: &MockCom) -> *mut c_void {
-        let mut out = null_mut();
-        let hr = unsafe {
-            wrap_created(
-                "test",
-                D3D_OK,
-                ib.ptr(),
-                (&raw const INDEX_BUFFER8_VTBL).cast(),
-                null_mut(),
-                false,
-                &OutSlot::claim(&raw mut out, "test").unwrap(),
-            )
-        };
-        assert_eq!(hr, D3D_OK);
-        out
     }
 
     /// Reads the `GetIndices` pair through poison-seeded out-params, asserting success.
@@ -3849,6 +3858,131 @@ mod tests {
     }
 
     #[test]
+    fn pixel_shader_pinned_to_null_shader() {
+        let dev9 = MockDev9::new();
+        let device = mock_device8(dev9.nn());
+        unsafe {
+            assert_eq!(device8_set_pixel_shader(device.cast(), 0), D3D_OK);
+            assert_eq!(dev9.set_pixel_shader_calls.get(), 1);
+            assert!(dev9.last_pixel_shader.get().is_null());
+
+            assert_eq!(
+                device8_set_pixel_shader(device.cast(), 0xcb01),
+                D3DERR_INVALIDCALL,
+            );
+            assert_eq!(dev9.set_pixel_shader_calls.get(), 1);
+
+            let mut ps = 0xdead_beef_u32;
+            assert_eq!(device8_get_pixel_shader(device.cast(), &raw mut ps), D3D_OK);
+            assert_eq!(ps, 0);
+
+            drop_mock_device8(device);
+        }
+    }
+
+    #[test]
+    fn render_state_readback_is_inverse() {
+        let dev9 = MockDev9::new();
+        let device = mock_device8(dev9.nn());
+        dev9.rs_to_return.set(2); // D3DCULL_CW
+        dev9.svp_to_return.set(true);
+        dev9.npatch_to_return.set(4.0);
+        unsafe {
+            let mut v = 0u32;
+            assert_eq!(
+                device8_get_render_state(device.cast(), 22, &raw mut v),
+                D3D_OK,
+            );
+            assert_eq!(v, 2);
+            assert_eq!(dev9.get_rs_calls.get(), 1);
+
+            let mut z = 0xdead_beef_u32;
+            assert_eq!(
+                device8_get_render_state(device.cast(), 47, &raw mut z),
+                D3D_OK,
+            );
+            assert_eq!(z, 0);
+            assert_eq!(dev9.get_rs_calls.get(), 1);
+
+            let mut svp = 0u32;
+            assert_eq!(
+                device8_get_render_state(device.cast(), 153, &raw mut svp),
+                D3D_OK,
+            );
+            assert_eq!(svp, 1);
+
+            let mut seg = 0u32;
+            assert_eq!(
+                device8_get_render_state(device.cast(), 164, &raw mut seg),
+                D3D_OK,
+            );
+            assert_eq!(seg, 4.0f32.to_bits());
+
+            drop_mock_device8(device);
+        }
+    }
+
+    #[test]
+    fn texture_stage_state_readback_split() {
+        let dev9 = MockDev9::new();
+        let device = mock_device8(dev9.nn());
+        dev9.sampler_to_return.set(2); // D3DTEXF_LINEAR
+        dev9.tss_to_return.set(4); // D3DTOP_MODULATE
+        unsafe {
+            // D3D8's MINFILTER (17) moved to the D3D9 sampler block.
+            let mut filter = 0u32;
+            assert_eq!(
+                device8_get_texture_stage_state(device.cast(), 0, 17, &raw mut filter),
+                D3D_OK,
+            );
+            assert_eq!(filter, 2);
+
+            // COLOROP (1) stayed a texture-stage state.
+            let mut op = 0u32;
+            assert_eq!(
+                device8_get_texture_stage_state(device.cast(), 0, 1, &raw mut op),
+                D3D_OK,
+            );
+            assert_eq!(op, 4);
+
+            drop_mock_device8(device);
+        }
+    }
+
+    #[test]
+    fn apply_restore_applied_nodes_snapshot() {
+        let dev9 = MockDev9::new();
+        let device = mock_device8(dev9.nn());
+        let sb_a = MockStateBlock::new();
+        let sb_b = MockStateBlock::new();
+        let ib = MockCom::new();
+        let ib8 = mock_ib8(&ib);
+        unsafe {
+            assert_eq!(device8_set_indices(device.cast(), ib8, 7), D3D_OK);
+            dev9.sb_to_return.set(sb_a.ptr());
+            let a = create_sb(device, D3DSBT_ALL);
+            assert_eq!(device8_set_indices(device.cast(), null_mut(), 99), D3D_OK);
+            dev9.sb_to_return.set(sb_b.ptr());
+            let b = create_sb(device, D3DSBT_ALL);
+
+            assert_eq!(device8_apply_state_block(device.cast(), a), D3D_OK);
+            assert_eq!(replayed_base(device, &dev9), 7);
+            let (out, base) = read_indices(device);
+            assert_eq!((out, base), (ib8, 7));
+            assert_eq!(resource8_release(out), 1);
+
+            assert_eq!(device8_apply_state_block(device.cast(), b), D3D_OK);
+            assert_eq!(read_indices(device), (null_mut(), 99));
+
+            assert_eq!(device8_delete_state_block(device.cast(), a), D3D_OK);
+            assert_eq!(device8_delete_state_block(device.cast(), b), D3D_OK);
+            assert_eq!(resource8_release(ib8), 0);
+
+            drop_mock_device8(device);
+        }
+    }
+
+    #[test]
     fn reset_reestablish_failure_keep_coherent_pair() {
         let dev9 = MockDev9::new();
         let device = mock_device8(dev9.nn());
@@ -3863,6 +3997,57 @@ mod tests {
             assert_eq!((out, base), (ib8, 5));
             assert_eq!(resource8_release(out), 1);
             assert_eq!(resource8_release(ib8), 0);
+            drop_mock_device8(device);
+        }
+    }
+
+    #[test]
+    fn state_block_tokens_unique_across_devices() {
+        let dev9_a = MockDev9::new();
+        let sb_a = MockStateBlock::new();
+        dev9_a.sb_to_return.set(sb_a.ptr());
+        let a = mock_device8(dev9_a.nn());
+        let dev9_b = MockDev9::new();
+        let sb_b = MockStateBlock::new();
+        dev9_b.sb_to_return.set(sb_b.ptr());
+        let b = mock_device8(dev9_b.nn());
+        unsafe {
+            let ta = create_sb(a, D3DSBT_ALL);
+            let tb = create_sb(b, D3DSBT_ALL);
+
+            assert_ne!(ta, tb);
+            assert_eq!(device8_apply_state_block(b.cast(), ta), D3DERR_INVALIDCALL);
+            assert_eq!(device8_delete_state_block(a.cast(), ta), D3D_OK);
+            assert_eq!(device8_delete_state_block(b.cast(), tb), D3D_OK);
+
+            drop_mock_device8(a);
+            drop_mock_device8(b);
+        }
+    }
+
+    #[test]
+    fn create_index_buffer_forwarding() {
+        let dev9 = MockDev9::new();
+        let device = mock_device8(dev9.nn());
+        let ib = MockCom::new();
+        dev9.ib_to_return.set(ib.ptr());
+        let usage = D3DUSAGE_DYNAMIC.cast_unsigned();
+        let mut out = null_mut();
+        unsafe {
+            let hr = device8_create_index_buffer(
+                device.cast(),
+                64,
+                usage,
+                D3DFMT_INDEX16,
+                D3DPOOL_MANAGED,
+                &raw mut out,
+            );
+            assert_eq!(hr, D3D_OK);
+            assert_eq!(dev9.create_ib_calls.get(), 1);
+            assert_eq!(dev9.last_ib_pool.get(), D3DPOOL_MANAGED);
+            assert_eq!(dev9.last_ib_usage.get(), usage);
+            assert_eq!(resource8_release(out), 0);
+            assert_eq!(ib.releases.get(), 1);
             drop_mock_device8(device);
         }
     }
@@ -3910,35 +4095,6 @@ mod tests {
 
             assert_eq!((*ib8.cast::<ComHeader>()).game_refs(), 0);
 
-            drop_mock_device8(device);
-        }
-    }
-
-    #[test]
-    fn draw_indexed_primitive_unbound_is_noop() {
-        let dev9 = MockDev9::new();
-        let device = mock_device8(dev9.nn());
-        let ib = MockCom::new();
-        let ib8 = mock_ib8(&ib);
-        unsafe {
-            assert_eq!(
-                device8_draw_indexed_primitive(device.cast(), D3DPT_TRIANGLELIST, 0, 4, 0, 2),
-                D3D_OK,
-            );
-            assert_eq!(dev9.last_dip.get(), None);
-
-            assert_eq!(device8_set_indices(device.cast(), ib8, 9), D3D_OK);
-            assert_eq!(replayed_base(device, &dev9), 9);
-
-            assert_eq!(device8_set_indices(device.cast(), null_mut(), 3), D3D_OK);
-            dev9.last_dip.set(None);
-            assert_eq!(
-                device8_draw_indexed_primitive(device.cast(), D3DPT_TRIANGLELIST, 0, 4, 0, 2),
-                D3D_OK,
-            );
-            assert_eq!(dev9.last_dip.get(), None);
-
-            assert_eq!(resource8_release(ib8), 0);
             drop_mock_device8(device);
         }
     }
@@ -4014,39 +4170,6 @@ mod tests {
     }
 
     #[test]
-    fn apply_restore_applied_nodes_snapshot() {
-        let dev9 = MockDev9::new();
-        let device = mock_device8(dev9.nn());
-        let sb_a = MockStateBlock::new();
-        let sb_b = MockStateBlock::new();
-        let ib = MockCom::new();
-        let ib8 = mock_ib8(&ib);
-        unsafe {
-            assert_eq!(device8_set_indices(device.cast(), ib8, 7), D3D_OK);
-            dev9.sb_to_return.set(sb_a.ptr());
-            let a = create_sb(device, D3DSBT_ALL);
-            assert_eq!(device8_set_indices(device.cast(), null_mut(), 99), D3D_OK);
-            dev9.sb_to_return.set(sb_b.ptr());
-            let b = create_sb(device, D3DSBT_ALL);
-
-            assert_eq!(device8_apply_state_block(device.cast(), a), D3D_OK);
-            assert_eq!(replayed_base(device, &dev9), 7);
-            let (out, base) = read_indices(device);
-            assert_eq!((out, base), (ib8, 7));
-            assert_eq!(resource8_release(out), 1);
-
-            assert_eq!(device8_apply_state_block(device.cast(), b), D3D_OK);
-            assert_eq!(read_indices(device), (null_mut(), 99));
-
-            assert_eq!(device8_delete_state_block(device.cast(), a), D3D_OK);
-            assert_eq!(device8_delete_state_block(device.cast(), b), D3D_OK);
-            assert_eq!(resource8_release(ib8), 0);
-
-            drop_mock_device8(device);
-        }
-    }
-
-    #[test]
     fn subset_state_block_keep_shadow_base() {
         let dev9 = MockDev9::new();
         let device = mock_device8(dev9.nn());
@@ -4067,30 +4190,6 @@ mod tests {
             assert_eq!(device8_delete_state_block(device.cast(), token), D3D_OK);
             assert_eq!(resource8_release(ib8), 0);
             drop_mock_device8(device);
-        }
-    }
-
-    #[test]
-    fn state_block_tokens_unique_across_devices() {
-        let dev9_a = MockDev9::new();
-        let sb_a = MockStateBlock::new();
-        dev9_a.sb_to_return.set(sb_a.ptr());
-        let a = mock_device8(dev9_a.nn());
-        let dev9_b = MockDev9::new();
-        let sb_b = MockStateBlock::new();
-        dev9_b.sb_to_return.set(sb_b.ptr());
-        let b = mock_device8(dev9_b.nn());
-        unsafe {
-            let ta = create_sb(a, D3DSBT_ALL);
-            let tb = create_sb(b, D3DSBT_ALL);
-
-            assert_ne!(ta, tb);
-            assert_eq!(device8_apply_state_block(b.cast(), ta), D3DERR_INVALIDCALL);
-            assert_eq!(device8_delete_state_block(a.cast(), ta), D3D_OK);
-            assert_eq!(device8_delete_state_block(b.cast(), tb), D3D_OK);
-
-            drop_mock_device8(a);
-            drop_mock_device8(b);
         }
     }
 
@@ -4191,88 +4290,52 @@ mod tests {
     }
 
     #[test]
-    fn pixel_shader_pinned_to_null_shader() {
+    fn get_transform_guard_and_forward() {
         let dev9 = MockDev9::new();
         let device = mock_device8(dev9.nn());
         unsafe {
-            assert_eq!(device8_set_pixel_shader(device.cast(), 0), D3D_OK);
-            assert_eq!(dev9.set_pixel_shader_calls.get(), 1);
-            assert!(dev9.last_pixel_shader.get().is_null());
-
             assert_eq!(
-                device8_set_pixel_shader(device.cast(), 0xcb01),
+                device8_get_transform(device.cast(), D3DTS_VIEW, null_mut()),
                 D3DERR_INVALIDCALL,
             );
-            assert_eq!(dev9.set_pixel_shader_calls.get(), 1);
+            assert_eq!(dev9.get_transform_calls.get(), 0);
 
-            let mut ps = 0xdead_beef_u32;
-            assert_eq!(device8_get_pixel_shader(device.cast(), &raw mut ps), D3D_OK);
-            assert_eq!(ps, 0);
+            let mut matrix = [0f32; 16];
+            assert_eq!(
+                device8_get_transform(device.cast(), D3DTS_VIEW, (&raw mut matrix).cast()),
+                D3D_OK,
+            );
+            assert_eq!(dev9.get_transform_calls.get(), 1);
 
             drop_mock_device8(device);
         }
     }
 
     #[test]
-    fn set_vertex_shader_fvf_ceiling() {
+    fn draw_indexed_primitive_unbound_is_noop() {
         let dev9 = MockDev9::new();
         let device = mock_device8(dev9.nn());
+        let ib = MockCom::new();
+        let ib8 = mock_ib8(&ib);
         unsafe {
             assert_eq!(
-                device8_set_vertex_shader(device.cast(), 0xF000_0000),
-                D3D_OK
-            );
-            assert_eq!(dev9.last_fvf_set.get(), 0xF000_0000);
-            assert_eq!(dev9.set_fvf_calls.get(), 1);
-
-            assert_eq!(
-                device8_set_vertex_shader(device.cast(), 0xF000_0001),
-                D3DERR_INVALIDCALL,
-            );
-            assert_eq!(dev9.set_fvf_calls.get(), 1);
-
-            drop_mock_device8(device);
-        }
-    }
-
-    #[test]
-    fn render_state_readback_is_inverse() {
-        let dev9 = MockDev9::new();
-        let device = mock_device8(dev9.nn());
-        dev9.rs_to_return.set(2); // D3DCULL_CW
-        dev9.svp_to_return.set(true);
-        dev9.npatch_to_return.set(4.0);
-        unsafe {
-            let mut v = 0u32;
-            assert_eq!(
-                device8_get_render_state(device.cast(), 22, &raw mut v),
+                device8_draw_indexed_primitive(device.cast(), D3DPT_TRIANGLELIST, 0, 4, 0, 2),
                 D3D_OK,
             );
-            assert_eq!(v, 2);
-            assert_eq!(dev9.get_rs_calls.get(), 1);
+            assert_eq!(dev9.last_dip.get(), None);
 
-            let mut z = 0xdead_beef_u32;
+            assert_eq!(device8_set_indices(device.cast(), ib8, 9), D3D_OK);
+            assert_eq!(replayed_base(device, &dev9), 9);
+
+            assert_eq!(device8_set_indices(device.cast(), null_mut(), 3), D3D_OK);
+            dev9.last_dip.set(None);
             assert_eq!(
-                device8_get_render_state(device.cast(), 47, &raw mut z),
+                device8_draw_indexed_primitive(device.cast(), D3DPT_TRIANGLELIST, 0, 4, 0, 2),
                 D3D_OK,
             );
-            assert_eq!(z, 0);
-            assert_eq!(dev9.get_rs_calls.get(), 1);
+            assert_eq!(dev9.last_dip.get(), None);
 
-            let mut svp = 0u32;
-            assert_eq!(
-                device8_get_render_state(device.cast(), 153, &raw mut svp),
-                D3D_OK,
-            );
-            assert_eq!(svp, 1);
-
-            let mut seg = 0u32;
-            assert_eq!(
-                device8_get_render_state(device.cast(), 164, &raw mut seg),
-                D3D_OK,
-            );
-            assert_eq!(seg, 4.0f32.to_bits());
-
+            assert_eq!(resource8_release(ib8), 0);
             drop_mock_device8(device);
         }
     }
@@ -4316,77 +4379,23 @@ mod tests {
     }
 
     #[test]
-    fn texture_stage_state_readback_split() {
-        let dev9 = MockDev9::new();
-        let device = mock_device8(dev9.nn());
-        dev9.sampler_to_return.set(2); // D3DTEXF_LINEAR
-        dev9.tss_to_return.set(4); // D3DTOP_MODULATE
-        unsafe {
-            // D3D8's MINFILTER (17) moved to the D3D9 sampler block.
-            let mut filter = 0u32;
-            assert_eq!(
-                device8_get_texture_stage_state(device.cast(), 0, 17, &raw mut filter),
-                D3D_OK,
-            );
-            assert_eq!(filter, 2);
-
-            // COLOROP (1) stayed a texture-stage state.
-            let mut op = 0u32;
-            assert_eq!(
-                device8_get_texture_stage_state(device.cast(), 0, 1, &raw mut op),
-                D3D_OK,
-            );
-            assert_eq!(op, 4);
-
-            drop_mock_device8(device);
-        }
-    }
-
-    #[test]
-    fn get_transform_guard_and_forward() {
+    fn set_vertex_shader_fvf_ceiling() {
         let dev9 = MockDev9::new();
         let device = mock_device8(dev9.nn());
         unsafe {
             assert_eq!(
-                device8_get_transform(device.cast(), D3DTS_VIEW, null_mut()),
+                device8_set_vertex_shader(device.cast(), 0xF000_0000),
+                D3D_OK
+            );
+            assert_eq!(dev9.last_fvf_set.get(), 0xF000_0000);
+            assert_eq!(dev9.set_fvf_calls.get(), 1);
+
+            assert_eq!(
+                device8_set_vertex_shader(device.cast(), 0xF000_0001),
                 D3DERR_INVALIDCALL,
             );
-            assert_eq!(dev9.get_transform_calls.get(), 0);
+            assert_eq!(dev9.set_fvf_calls.get(), 1);
 
-            let mut matrix = [0f32; 16];
-            assert_eq!(
-                device8_get_transform(device.cast(), D3DTS_VIEW, (&raw mut matrix).cast()),
-                D3D_OK,
-            );
-            assert_eq!(dev9.get_transform_calls.get(), 1);
-
-            drop_mock_device8(device);
-        }
-    }
-
-    #[test]
-    fn create_index_buffer_forwarding() {
-        let dev9 = MockDev9::new();
-        let device = mock_device8(dev9.nn());
-        let ib = MockCom::new();
-        dev9.ib_to_return.set(ib.ptr());
-        let usage = D3DUSAGE_DYNAMIC.cast_unsigned();
-        let mut out = null_mut();
-        unsafe {
-            let hr = device8_create_index_buffer(
-                device.cast(),
-                64,
-                usage,
-                D3DFMT_INDEX16,
-                D3DPOOL_MANAGED,
-                &raw mut out,
-            );
-            assert_eq!(hr, D3D_OK);
-            assert_eq!(dev9.create_ib_calls.get(), 1);
-            assert_eq!(dev9.last_ib_pool.get(), D3DPOOL_MANAGED);
-            assert_eq!(dev9.last_ib_usage.get(), usage);
-            assert_eq!(resource8_release(out), 0);
-            assert_eq!(ib.releases.get(), 1);
             drop_mock_device8(device);
         }
     }
