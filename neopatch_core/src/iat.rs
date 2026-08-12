@@ -30,15 +30,26 @@ use windows_sys::Win32::System::WindowsProgramming::IMAGE_THUNK_DATA32;
 ///
 /// The example above expands to `static REAL_GET_DEVICE_CAPS: IatHook<unsafe extern "system" fn(HDC, i32) -> i32>`
 /// and a typed `real_get_device_caps` trampoline. Hook bodies installed against this slot are typechecked.
+///
+/// A `fallback <path>` clause after the import name makes the trampoline call `<path>` if the import walk never captured anything,
+/// instead of panicking:
+///
+/// ```ignore
+/// iat_hook! {
+///     REAL_DIALOG_BOX_PARAM_A / real_dialog_box_param_a : "DialogBoxParamA" fallback DialogBoxParamA
+///         as fn(hinst: HMODULE, template: PCSTR, parent: HWND, proc: DLGPROC, param: LPARAM) -> isize;
+/// }
+/// ```
+///
+/// This should be used when the hook can be reached without [`IatHook::install`] having succeeded.
+/// For example, a byte-patched call site rewritten to call the hook directly stays reachable even if the import walk missed.
 #[macro_export]
 macro_rules! iat_hook {
     (
         $real:ident / $trampoline:ident : $name:literal
             as fn($($arg:ident : $argty:ty),* $(,)?) -> $ret:ty;
     ) => {
-        static $real: $crate::iat::IatHook<
-            unsafe extern "system" fn($($argty),*) -> $ret,
-        > = $crate::iat::IatHook::new($name, stringify!($real));
+        $crate::iat_hook!(@decl $real / $trampoline : $name as fn($($arg : $argty),*) -> $ret);
 
         #[inline]
         #[allow(dead_code, clippy::too_many_arguments)]
@@ -46,6 +57,29 @@ macro_rules! iat_hook {
             let f = $real.original();
             unsafe { f($($arg),*) }
         }
+    };
+    (
+        $real:ident / $trampoline:ident : $name:literal fallback $fallback:path
+            as fn($($arg:ident : $argty:ty),* $(,)?) -> $ret:ty;
+    ) => {
+        $crate::iat_hook!(@decl $real / $trampoline : $name as fn($($arg : $argty),*) -> $ret);
+
+        #[inline]
+        #[allow(dead_code, clippy::too_many_arguments)]
+        unsafe fn $trampoline($($arg : $argty),*) -> $ret {
+            match $real.try_original() {
+                Some(f) => unsafe { f($($arg),*) },
+                None => unsafe { $fallback($($arg),*) },
+            }
+        }
+    };
+    (
+        @decl $real:ident / $trampoline:ident : $name:literal
+            as fn($($arg:ident : $argty:ty),* $(,)?) -> $ret:ty
+    ) => {
+        static $real: $crate::iat::IatHook<
+            unsafe extern "system" fn($($argty),*) -> $ret,
+        > = $crate::iat::IatHook::new($name, stringify!($real));
     };
 }
 
@@ -73,6 +107,12 @@ impl<F: Copy + Send + Sync + Unpin + 'static> IatHook<F> {
         self.slot
             .try_get()
             .unwrap_or_else(|| panic!("IAT hook {:?} not installed", self.name))
+    }
+
+    /// Reads the captured original, returning `None` if `install` never captured the slot.
+    /// For fallback paths that must not panic; hook trampolines use [`Self::original`].
+    pub fn try_original(&self) -> Option<F> {
+        self.slot.try_get()
     }
 
     /// Walks `host`'s IAT, displaces the slot, and captures the original. Returns `true` on hit and `false` on failure.
