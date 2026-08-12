@@ -18,6 +18,7 @@ use std::mem::offset_of;
 use std::num::NonZero;
 use std::ptr::{NonNull, copy_nonoverlapping, null_mut};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU32, Ordering};
 use tracing::{debug, info, warn};
 use windows::Win32::Foundation::{E_NOINTERFACE, HWND, POINT, RECT, S_FALSE};
 use windows::Win32::Graphics::Direct3D9::{
@@ -31,11 +32,12 @@ use windows::Win32::Graphics::Direct3D9::{
     D3DPRIMITIVETYPE, D3DRASTER_STATUS, D3DRECT, D3DRENDERSTATETYPE, D3DRESOURCETYPE,
     D3DSAMP_ADDRESSU, D3DSAMP_ADDRESSV, D3DSAMP_ADDRESSW, D3DSAMP_BORDERCOLOR, D3DSAMP_MAGFILTER,
     D3DSAMP_MAXANISOTROPY, D3DSAMP_MAXMIPLEVEL, D3DSAMP_MINFILTER, D3DSAMP_MIPFILTER,
-    D3DSAMP_MIPMAPLODBIAS, D3DSAMPLERSTATETYPE, D3DSTATEBLOCKTYPE, D3DSURFACE_DESC, D3DSWAPEFFECT,
-    D3DSWAPEFFECT_COPY, D3DSWAPEFFECT_DISCARD, D3DSWAPEFFECT_FLIP, D3DTEXF_NONE,
+    D3DSAMP_MIPMAPLODBIAS, D3DSAMPLERSTATETYPE, D3DSBT_ALL, D3DSTATEBLOCKTYPE, D3DSURFACE_DESC,
+    D3DSWAPEFFECT, D3DSWAPEFFECT_COPY, D3DSWAPEFFECT_DISCARD, D3DSWAPEFFECT_FLIP, D3DTEXF_NONE,
     D3DTEXTURESTAGESTATETYPE, D3DTRANSFORMSTATETYPE, D3DVIEWPORT9, IDirect3D9Ex_Vtbl,
     IDirect3DDevice9Ex_Vtbl, IDirect3DIndexBuffer9_Vtbl, IDirect3DResource9_Vtbl,
-    IDirect3DSurface9_Vtbl, IDirect3DTexture9_Vtbl, IDirect3DVertexBuffer9_Vtbl,
+    IDirect3DStateBlock9_Vtbl, IDirect3DSurface9_Vtbl, IDirect3DTexture9_Vtbl,
+    IDirect3DVertexBuffer9_Vtbl,
 };
 use windows::Win32::Graphics::Gdi::{HMONITOR, RGNDATA};
 use windows::core::{BOOL, GUID, HRESULT, IUnknown_Vtbl};
@@ -652,6 +654,7 @@ vtable_accessors! {
     tex9_vt => IDirect3DTexture9_Vtbl,
     vb9_vt => IDirect3DVertexBuffer9_Vtbl,
     ib9_vt => IDirect3DIndexBuffer9_Vtbl,
+    sb9_vt => IDirect3DStateBlock9_Vtbl,
     res9_vt => IDirect3DResource9_Vtbl,
     dev8_vt => Device8Vtbl,
 }
@@ -1128,6 +1131,19 @@ impl IndicesBinding {
     };
 }
 
+/// A live D3D8 state block. Nodes are owned by the device's intrusive list ([`Device8::sb_head`]),
+/// which is boxed at `CreateStateBlock` and freed at `DeleteStateBlock` or device death.
+struct SbNode {
+    /// The game-facing `DWORD` token; see [`Device8::mint_state_block_token`].
+    token: NonZero<u32>,
+    sb9: NonNull<c_void>,
+    /// The block type.
+    ty: D3DSTATEBLOCKTYPE,
+    /// The [`IndicesBinding`] at `CreateStateBlock` / `CaptureStateBlock` time.
+    indices: Cell<IndicesBinding>,
+    next: Cell<Option<NonNull<SbNode>>>,
+}
+
 #[repr(C)]
 struct Device8 {
     // `header.inner` is the wrapped `IDirect3DDevice9Ex`.
@@ -1138,12 +1154,93 @@ struct Device8 {
     back_buffer: Resource8,
     /// The pair from the game's last accepted `SetIndices` call.
     indices: Cell<IndicesBinding>,
+    /// The head of the intrusive list of live state blocks.
+    sb_head: Cell<Option<NonNull<SbNode>>>,
+    /// The number of state blocks created on this device over its lifetime.
+    sb_created: Cell<u32>,
 }
+
+/// Process-global state-block token sequence; see [`Device8::mint_state_block_token`].
+/// This is only atomic because statics must implement `Sync`.
+static SB_SEQ: AtomicU32 = AtomicU32::new(1);
+
+/// Multiplier applied to [`SB_SEQ`]; the closest prime to `2^32 / phi`. See also: Fibonacci hashing.
+const SB_TOKEN_SPREAD: u32 = 0x9e37_79b1;
 
 impl Device8 {
     /// Returns the wrapped `IDirect3DDevice9Ex`, or `None` when the wrapper is dead. Unwrap through `require_live!`.
     fn inner(&self) -> Option<NonNull<c_void>> {
         self.header.inner()
+    }
+
+    /// Returns the live state block identified by `token`, or `None` for zero, stale/deleted, or fabricated tokens.
+    /// The returned reference is only valid until the next list mutation. Callers must not hold it across a foreign (D3D9) call.
+    fn find_state_block(&self, token: u32) -> Option<&SbNode> {
+        let token = NonZero::new(token)?;
+        let mut cur = self.sb_head.get();
+        while let Some(node_ptr) = cur {
+            // SAFETY: Nodes are owned by this list and freed only by `unlink_state_block` / `drain_state_blocks`,
+            // which cannot run during this walk since we assume D3D usage is single-threaded.
+            let node = unsafe { node_ptr.as_ref() };
+            if node.token == token {
+                return Some(node);
+            }
+            cur = node.next.get();
+        }
+        None
+    }
+
+    /// Unlinks the node holding `token` and returns ownership of it to the caller.
+    fn unlink_state_block(&self, token: u32) -> Option<Box<SbNode>> {
+        let token = NonZero::new(token)?;
+        // `link` is the incoming edge of the node under inspection, so a match can be unlinked in place.
+        // It never points into a freed node since it lags one node behind the cursor.
+        let mut link = &self.sb_head;
+        while let Some(node_ptr) = link.get() {
+            // SAFETY: See `find_state_block`. The borrow ends before the node is freed below.
+            let (found, next) = {
+                let node = unsafe { node_ptr.as_ref() };
+                (node.token == token, node.next.get())
+            };
+            if found {
+                link.set(next);
+                // SAFETY: `node_ptr` was minted by `Box::into_raw` at creation and just unlinked, so this is the sole remaining owner.
+                return Some(unsafe { Box::from_raw(node_ptr.as_ptr()) });
+            }
+            // SAFETY: See above. The produced `&Cell` stays valid because only an unlink frees nodes,
+            // and an unlink returns instead of continuing the walk.
+            link = unsafe { &node_ptr.as_ref().next };
+        }
+        None
+    }
+
+    /// Releases every live state block, returning how many there were. Runs at device death.
+    fn drain_state_blocks(&self) -> u32 {
+        let mut drained = 0;
+        while let Some(node_ptr) = self.sb_head.get() {
+            // SAFETY: `node_ptr` was minted by `Box::into_raw` at creation.
+            // The list is the sole owner and the head is advanced past the node before it drops.
+            let node = unsafe { Box::from_raw(node_ptr.as_ptr()) };
+            self.sb_head.set(node.next.get());
+            unsafe { com_release(node.sb9.as_ptr()) };
+            drained += 1;
+        }
+        drained
+    }
+
+    /// Mints a state-block token.
+    fn mint_state_block_token(&self) -> NonZero<u32> {
+        loop {
+            // Instead of directly using the monotonic counter `SB_SEQ` for tokens, we multiply by `SB_TOKEN_SPREAD`,
+            // which makes a fabricated or uninitialized DWORD less likely to collide with a live block.
+            // Also, tokens from released devices should not be reused.
+            let seq = SB_SEQ.fetch_add(1, Ordering::Relaxed);
+            if let Some(token) = NonZero::new(seq.wrapping_mul(SB_TOKEN_SPREAD))
+                && self.find_state_block(token.get()).is_none()
+            {
+                return token;
+            }
+        }
     }
 }
 
@@ -1367,6 +1464,17 @@ unsafe extern "system" fn device8_release(this: *mut c_void) -> u32 {
     };
     if n == 0 {
         let d = unsafe { device8(this) };
+        // Leftover blocks would keep the D3D9Ex device alive past the game's release
+        // since each block holds a device reference, so we release them.
+        let leaked = d.drain_state_blocks();
+        let total_created = d.sb_created.get();
+        if total_created != 0 {
+            log_at!(leaked == 0 => info / warn,
+                kind = "d3d8_state_block_census",
+                total_created,
+                leaked_at_death = leaked,
+            );
+        }
         info!(kind = "d3d8_device_released");
         // The dead wrapper stays behind to catch over-release.
         if !d.parent.is_null() {
@@ -2034,10 +2142,108 @@ unsafe extern "system" fn device8_set_render_state(
 stub8!(device8_get_render_state, "IDirect3DDevice8::GetRenderState"(_state: u32, _out: *mut u32) -> D3DERR_NOTAVAILABLE);
 stub8!(device8_begin_state_block, "IDirect3DDevice8::BeginStateBlock"() -> D3DERR_NOTAVAILABLE);
 stub8!(device8_end_state_block, "IDirect3DDevice8::EndStateBlock"(_out_token: *mut u32) clears _out_token -> D3DERR_NOTAVAILABLE);
-stub8!(device8_apply_state_block, "IDirect3DDevice8::ApplyStateBlock"(_token: u32) -> D3DERR_NOTAVAILABLE);
-stub8!(device8_capture_state_block, "IDirect3DDevice8::CaptureStateBlock"(_token: u32) -> D3DERR_NOTAVAILABLE);
-stub8!(device8_delete_state_block, "IDirect3DDevice8::DeleteStateBlock"(_token: u32) -> D3DERR_NOTAVAILABLE);
-stub8!(device8_create_state_block, "IDirect3DDevice8::CreateStateBlock"(_ty: D3DSTATEBLOCKTYPE, _out: *mut u32) -> D3DERR_NOTAVAILABLE);
+
+/// Logs and refuses a state-block call whose token matches no live block.
+fn refuse_unknown_state_block_token(method: &'static str, token: u32) -> HRESULT {
+    warn!(
+        kind = "d3d8_state_block_unknown_token",
+        method,
+        token = format_args!("{token:#x}"),
+    );
+    D3DERR_INVALIDCALL
+}
+
+unsafe extern "system" fn device8_apply_state_block(this: *mut c_void, token: u32) -> HRESULT {
+    let d = unsafe { device8(this) };
+    let _ = require_live!(d.inner(), "device8_apply_state_block");
+
+    if token == 0 {
+        return D3D_OK;
+    }
+    let Some(node) = d.find_state_block(token) else {
+        return refuse_unknown_state_block_token("device8_apply_state_block", token);
+    };
+
+    // We copy out before the foreign call because a re-entrant `DeleteStateBlock` during `ApplyStateBlock` would free the node behind the borrow.
+    let (sb, ty, snapshot) = (node.sb9.as_ptr(), node.ty, node.indices.get());
+    let hr = unsafe { (sb9_vt(sb).Apply)(sb) };
+    // `D3DSBT_ALL` is the only block type whose D3D9 side restores the index-buffer binding
+    // (D3D9 specifies the index buffer as `ALL`-only state), so only there does the shadow follow.
+    if hr.is_ok() && ty == D3DSBT_ALL {
+        d.indices.set(snapshot);
+    }
+    hr
+}
+
+unsafe extern "system" fn device8_capture_state_block(this: *mut c_void, token: u32) -> HRESULT {
+    let d = unsafe { device8(this) };
+    let _ = require_live!(d.inner(), "device8_capture_state_block");
+
+    let Some(node) = d.find_state_block(token) else {
+        return refuse_unknown_state_block_token("device8_capture_state_block", token);
+    };
+
+    let (sb, ty) = (node.sb9.as_ptr(), node.ty);
+    let hr = unsafe { (sb9_vt(sb).Capture)(sb) };
+    // `Capture` redefines the block's contents to the current device state; the snapshot follows. We look up the state block again
+    // instead of holding it across the foreign call because a re-entrant `DeleteStateBlock` would have freed the node.
+    if hr.is_ok()
+        && ty == D3DSBT_ALL
+        && let Some(node) = d.find_state_block(token)
+    {
+        node.indices.set(d.indices.get());
+    }
+    hr
+}
+
+unsafe extern "system" fn device8_delete_state_block(this: *mut c_void, token: u32) -> HRESULT {
+    let d = unsafe { device8(this) };
+    // Device death drains the list (see `device8_release`), so a dead device can never hold a deletable block.
+    // This guard lets us differentiate a use-after-release here from a fabricated token that just happens to match the drained-empty list.
+    let _ = require_live!(d.inner(), "device8_delete_state_block");
+    let Some(node) = d.unlink_state_block(token) else {
+        return refuse_unknown_state_block_token("device8_delete_state_block", token);
+    };
+    // The node owned the single reference minted at creation; releasing it destroys the block.
+    unsafe { com_release(node.sb9.as_ptr()) };
+    D3D_OK
+}
+
+unsafe extern "system" fn device8_create_state_block(
+    this: *mut c_void,
+    ty: D3DSTATEBLOCKTYPE,
+    out_token: *mut u32,
+) -> HRESULT {
+    let d = unsafe { device8(this) };
+    let out_token = claim_out!(out_token; "device8_create_state_block");
+    let p = require_live!(d.inner(), "device8_create_state_block");
+    let mut sb9 = null_mut();
+    let hr = unsafe { (dev9_vt(p).base__.CreateStateBlock)(p, ty, &raw mut sb9) };
+    if hr.is_err() {
+        return hr;
+    }
+    let Some(sb9) = NonNull::new(sb9) else {
+        warn!(
+            kind = "d3d9_null_on_success",
+            call = "IDirect3DDevice9::CreateStateBlock",
+        );
+        return D3DERR_INVALIDCALL;
+    };
+    let token = d.mint_state_block_token();
+    let node = Box::into_raw(Box::new(SbNode {
+        token,
+        sb9,
+        ty,
+        indices: Cell::new(d.indices.get()),
+        next: Cell::new(d.sb_head.get()),
+    }));
+    // SAFETY: `Box::into_raw` never returns a null pointer.
+    d.sb_head.set(Some(unsafe { NonNull::new_unchecked(node) }));
+    d.sb_created.set(d.sb_created.get().saturating_add(1));
+    out_token.set(token.get());
+    hr
+}
+
 stub8!(device8_set_clip_status, "IDirect3DDevice8::SetClipStatus"(_status: *const D3DCLIPSTATUS9) -> D3D_OK);
 stub8!(device8_get_clip_status, "IDirect3DDevice8::GetClipStatus"(_status: *mut D3DCLIPSTATUS9) -> D3DERR_NOTAVAILABLE);
 stub8!(device8_get_texture, "IDirect3DDevice8::GetTexture"(_stage: u32, _out: *mut *mut c_void) clears _out -> D3DERR_NOTAVAILABLE);
@@ -2373,6 +2579,8 @@ unsafe extern "system" fn d3d8_create_device(
             internal_flags: D3D8_INTERNAL_LOCKABLE,
         },
         indices: Cell::new(IndicesBinding::UNBOUND),
+        sb_head: Cell::new(None),
+        sb_created: Cell::new(0),
     }));
     unsafe { (*device).back_buffer.device = device };
     out.set(device.cast());
@@ -2469,10 +2677,12 @@ mod tests {
         ComHeader, D3D_OK, D3D8_INTERNAL_LOCKABLE, D3DERR_INVALIDCALL, D3DPresentParameters8,
         DEVICE8_VTBL, Device8, INDEX_BUFFER8_VTBL, IndicesBinding, OutSlot, Resource8,
         SURFACE8_VTBL, Surface8Vtbl, TEXTURE8_VTBL, Texture8Vtbl, caps_9_to_8,
-        convert_present_params, copy_rect_valid, device8_create_index_buffer,
-        device8_draw_indexed_primitive, device8_get_indices, device8_release, device8_reset,
-        device8_set_indices, device8_set_texture, resource8_release, surface_desc_9_to_8, unwrap8,
-        unwrap8_arg, wrap_add_ref, wrap_created,
+        convert_present_params, copy_rect_valid, device8_apply_state_block,
+        device8_capture_state_block, device8_create_index_buffer, device8_create_state_block,
+        device8_delete_state_block, device8_draw_indexed_primitive, device8_end_state_block,
+        device8_get_indices, device8_release, device8_reset, device8_set_indices,
+        device8_set_texture, resource8_release, surface_desc_9_to_8, unwrap8, unwrap8_arg,
+        wrap_add_ref, wrap_created,
     };
     use crate::fmt_hr;
     use std::cell::Cell;
@@ -2486,8 +2696,9 @@ mod tests {
         D3DFMT_R5G6B5, D3DFMT_X1R5G5B5, D3DFMT_X8R8G8B8, D3DFORMAT, D3DLOCKED_RECT,
         D3DMULTISAMPLE_2_SAMPLES, D3DMULTISAMPLE_NONE, D3DPOOL, D3DPOOL_MANAGED, D3DPOOL_SYSTEMMEM,
         D3DPRESENT_INTERVAL_ONE, D3DPRESENT_PARAMETERS, D3DPRESENTFLAG_LOCKABLE_BACKBUFFER,
-        D3DPRIMITIVETYPE, D3DPT_TRIANGLELIST, D3DSURFACE_DESC, D3DSWAPEFFECT_COPY,
-        D3DSWAPEFFECT_DISCARD, D3DSWAPEFFECT_FLIP, D3DUSAGE_DYNAMIC, IDirect3DDevice9Ex_Vtbl,
+        D3DPRIMITIVETYPE, D3DPT_TRIANGLELIST, D3DSBT_ALL, D3DSBT_PIXELSTATE, D3DSTATEBLOCKTYPE,
+        D3DSURFACE_DESC, D3DSWAPEFFECT_COPY, D3DSWAPEFFECT_DISCARD, D3DSWAPEFFECT_FLIP,
+        D3DUSAGE_DYNAMIC, IDirect3DDevice9Ex_Vtbl, IDirect3DStateBlock9_Vtbl,
     };
     use windows::core::{BOOL, GUID, HRESULT, IUnknown_Vtbl};
 
@@ -3011,6 +3222,8 @@ mod tests {
                 internal_flags: D3D8_INTERNAL_LOCKABLE,
             },
             indices: Cell::new(IndicesBinding::UNBOUND),
+            sb_head: Cell::new(None),
+            sb_created: Cell::new(0),
         }))
     }
 
@@ -3021,6 +3234,74 @@ mod tests {
             drop(Box::from_raw(device));
         }
     }
+
+    /// A `IDirect3DStateBlock9` with call counters for testing the D3D8 state-block API surface.
+    #[repr(C)]
+    struct MockStateBlock {
+        vtbl: *const IDirect3DStateBlock9_Vtbl,
+        adds: Cell<u32>,
+        captures: Cell<u32>,
+        applies: Cell<u32>,
+        releases: Cell<u32>,
+    }
+
+    impl MockStateBlock {
+        fn new() -> Self {
+            Self {
+                vtbl: &raw const MOCK_SB_VTBL,
+                adds: Cell::new(0),
+                captures: Cell::new(0),
+                applies: Cell::new(0),
+                releases: Cell::new(0),
+            }
+        }
+
+        fn ptr(&self) -> *mut c_void {
+            (&raw const *self).cast_mut().cast()
+        }
+    }
+
+    unsafe extern "system" fn mock_sb_add_ref(this: *mut c_void) -> u32 {
+        let m = unsafe { &*this.cast::<MockStateBlock>() };
+        m.adds.update(|n| n + 1);
+        1
+    }
+
+    unsafe extern "system" fn mock_sb_release(this: *mut c_void) -> u32 {
+        let m = unsafe { &*this.cast::<MockStateBlock>() };
+        m.releases.update(|n| n + 1);
+        0
+    }
+
+    unsafe extern "system" fn mock_sb_get_device(
+        _this: *mut c_void,
+        _out: *mut *mut c_void,
+    ) -> HRESULT {
+        E_NOINTERFACE
+    }
+
+    unsafe extern "system" fn mock_sb_capture(this: *mut c_void) -> HRESULT {
+        let m = unsafe { &*this.cast::<MockStateBlock>() };
+        m.captures.update(|n| n + 1);
+        D3D_OK
+    }
+
+    unsafe extern "system" fn mock_sb_apply(this: *mut c_void) -> HRESULT {
+        let m = unsafe { &*this.cast::<MockStateBlock>() };
+        m.applies.update(|n| n + 1);
+        D3D_OK
+    }
+
+    static MOCK_SB_VTBL: IDirect3DStateBlock9_Vtbl = IDirect3DStateBlock9_Vtbl {
+        base__: IUnknown_Vtbl {
+            QueryInterface: mock_com_query_interface,
+            AddRef: mock_sb_add_ref,
+            Release: mock_sb_release,
+        },
+        GetDevice: mock_sb_get_device,
+        Capture: mock_sb_capture,
+        Apply: mock_sb_apply,
+    };
 
     fn unreached_dev9_vtbl() -> IDirect3DDevice9Ex_Vtbl {
         const fn fn_ptr_like<T>(_: &T) -> bool {
@@ -3070,6 +3351,8 @@ mod tests {
         fail_set_indices: Cell<bool>,
         last_dip: Cell<Option<DipArgs>>,
         resets: Cell<u32>,
+        create_sb_calls: Cell<u32>,
+        sb_to_return: Cell<*mut c_void>,
         create_ib_calls: Cell<u32>,
         last_ib_pool: Cell<D3DPOOL>,
         last_ib_usage: Cell<u32>,
@@ -3081,6 +3364,7 @@ mod tests {
         vt.base__.base__.Release = mock9_release;
         vt.base__.Reset = mock9_reset;
         vt.base__.CreateIndexBuffer = mock9_create_index_buffer;
+        vt.base__.CreateStateBlock = mock9_create_state_block;
         vt.base__.SetIndices = mock9_set_indices;
         vt.base__.DrawIndexedPrimitive = mock9_draw_indexed_primitive;
         vt
@@ -3145,6 +3429,17 @@ mod tests {
         D3D_OK
     }
 
+    unsafe extern "system" fn mock9_create_state_block(
+        this: *mut c_void,
+        _ty: D3DSTATEBLOCKTYPE,
+        out: *mut *mut c_void,
+    ) -> HRESULT {
+        let m = unsafe { &*this.cast::<MockDev9>() };
+        m.create_sb_calls.update(|n| n + 1);
+        unsafe { out.write(m.sb_to_return.get()) };
+        D3D_OK
+    }
+
     unsafe extern "system" fn mock9_create_index_buffer(
         this: *mut c_void,
         _length: u32,
@@ -3188,6 +3483,17 @@ mod tests {
             D3D_OK,
         );
         (out, base)
+    }
+
+    /// Creates a state block through the wrapper, asserting success and a nonzero token.
+    unsafe fn create_sb(device: *mut Device8, ty: D3DSTATEBLOCKTYPE) -> u32 {
+        let mut token = 0u32;
+        assert_eq!(
+            unsafe { device8_create_state_block(device.cast(), ty, &raw mut token) },
+            D3D_OK,
+        );
+        assert_ne!(token, 0);
+        token
     }
 
     /// Draws through the wrapper and returns the base vertex index that the mock device received.
@@ -3376,6 +3682,253 @@ mod tests {
 
             assert_eq!(resource8_release(ib8), 0);
             drop_mock_device8(device);
+        }
+    }
+
+    #[test]
+    fn state_block_capture_model_round_trip() {
+        let dev9 = MockDev9::new();
+        let device = mock_device8(dev9.nn());
+        let sb = MockStateBlock::new();
+        dev9.sb_to_return.set(sb.ptr());
+        let ib = MockCom::new();
+        let ib8 = mock_ib8(&ib);
+
+        unsafe {
+            // The snapshot is taken at create time.
+            assert_eq!(device8_set_indices(device.cast(), ib8, 7), D3D_OK);
+            let token = create_sb(device, D3DSBT_ALL);
+            assert_eq!(dev9.create_sb_calls.get(), 1);
+
+            // `ApplyStateBlock` restores the D3D8 half of the `SetIndices` pair alongside the D3D9 binding.
+            assert_eq!(device8_set_indices(device.cast(), ib8, 99), D3D_OK);
+            assert_eq!(device8_apply_state_block(device.cast(), token), D3D_OK);
+            assert_eq!(sb.applies.get(), 1);
+            assert_eq!(replayed_base(device, &dev9), 7);
+
+            // `CaptureStateBlock` redefines the block's contents. The snapshot follows.
+            assert_eq!(device8_set_indices(device.cast(), ib8, 123), D3D_OK);
+            assert_eq!(device8_capture_state_block(device.cast(), token), D3D_OK);
+            assert_eq!(sb.captures.get(), 1);
+            assert_eq!(device8_set_indices(device.cast(), ib8, 5), D3D_OK);
+            assert_eq!(device8_apply_state_block(device.cast(), token), D3D_OK);
+            assert_eq!(replayed_base(device, &dev9), 123);
+
+            // `DeleteStateBlock` releases the block. The token goes stale and is refused everywhere after.
+            assert_eq!(device8_delete_state_block(device.cast(), token), D3D_OK);
+            assert_eq!(sb.releases.get(), 1);
+            assert_eq!(
+                device8_apply_state_block(device.cast(), token),
+                D3DERR_INVALIDCALL,
+            );
+            assert_eq!(
+                device8_capture_state_block(device.cast(), token),
+                D3DERR_INVALIDCALL,
+            );
+            assert_eq!(
+                device8_delete_state_block(device.cast(), token),
+                D3DERR_INVALIDCALL,
+            );
+            assert_eq!(sb.applies.get(), 2);
+            assert_eq!(sb.releases.get(), 1);
+
+            // Token 0 is a no-op for `ApplyStateBlock` and refused for `CaptureStateBlock` / `DeleteStateBlock`.
+            // Fabricated tokens are always refused.
+            assert_eq!(device8_apply_state_block(device.cast(), 0), D3D_OK);
+            assert_eq!(sb.applies.get(), 2);
+            assert_eq!(
+                device8_capture_state_block(device.cast(), 0),
+                D3DERR_INVALIDCALL,
+            );
+            assert_eq!(
+                device8_delete_state_block(device.cast(), 0),
+                D3DERR_INVALIDCALL,
+            );
+            assert_eq!(
+                device8_apply_state_block(device.cast(), 0xdead_beef),
+                D3DERR_INVALIDCALL,
+            );
+            assert_eq!(sb.adds.get(), 0);
+
+            assert_eq!(resource8_release(ib8), 0);
+            drop_mock_device8(device);
+        }
+    }
+
+    #[test]
+    fn apply_restore_applied_nodes_snapshot() {
+        let dev9 = MockDev9::new();
+        let device = mock_device8(dev9.nn());
+        let sb_a = MockStateBlock::new();
+        let sb_b = MockStateBlock::new();
+        let ib = MockCom::new();
+        let ib8 = mock_ib8(&ib);
+        unsafe {
+            assert_eq!(device8_set_indices(device.cast(), ib8, 7), D3D_OK);
+            dev9.sb_to_return.set(sb_a.ptr());
+            let a = create_sb(device, D3DSBT_ALL);
+            assert_eq!(device8_set_indices(device.cast(), null_mut(), 99), D3D_OK);
+            dev9.sb_to_return.set(sb_b.ptr());
+            let b = create_sb(device, D3DSBT_ALL);
+
+            assert_eq!(device8_apply_state_block(device.cast(), a), D3D_OK);
+            assert_eq!(replayed_base(device, &dev9), 7);
+            let (out, base) = read_indices(device);
+            assert_eq!((out, base), (ib8, 7));
+            assert_eq!(resource8_release(out), 1);
+
+            assert_eq!(device8_apply_state_block(device.cast(), b), D3D_OK);
+            assert_eq!(read_indices(device), (null_mut(), 99));
+
+            assert_eq!(device8_delete_state_block(device.cast(), a), D3D_OK);
+            assert_eq!(device8_delete_state_block(device.cast(), b), D3D_OK);
+            assert_eq!(resource8_release(ib8), 0);
+
+            drop_mock_device8(device);
+        }
+    }
+
+    #[test]
+    fn subset_state_block_keep_shadow_base() {
+        let dev9 = MockDev9::new();
+        let device = mock_device8(dev9.nn());
+        let sb = MockStateBlock::new();
+        dev9.sb_to_return.set(sb.ptr());
+        let ib = MockCom::new();
+        let ib8 = mock_ib8(&ib);
+
+        unsafe {
+            assert_eq!(device8_set_indices(device.cast(), ib8, 7), D3D_OK);
+            let token = create_sb(device, D3DSBT_PIXELSTATE);
+            assert_eq!(device8_set_indices(device.cast(), ib8, 99), D3D_OK);
+            // Non-ALL blocks do not restore the index binding on the D3D9 side, so the shadow base must not move either.
+            assert_eq!(device8_apply_state_block(device.cast(), token), D3D_OK);
+            assert_eq!(sb.applies.get(), 1);
+            assert_eq!(replayed_base(device, &dev9), 99);
+
+            assert_eq!(device8_delete_state_block(device.cast(), token), D3D_OK);
+            assert_eq!(resource8_release(ib8), 0);
+            drop_mock_device8(device);
+        }
+    }
+
+    #[test]
+    fn state_block_tokens_unique_across_devices() {
+        let dev9_a = MockDev9::new();
+        let sb_a = MockStateBlock::new();
+        dev9_a.sb_to_return.set(sb_a.ptr());
+        let a = mock_device8(dev9_a.nn());
+        let dev9_b = MockDev9::new();
+        let sb_b = MockStateBlock::new();
+        dev9_b.sb_to_return.set(sb_b.ptr());
+        let b = mock_device8(dev9_b.nn());
+        unsafe {
+            let ta = create_sb(a, D3DSBT_ALL);
+            let tb = create_sb(b, D3DSBT_ALL);
+
+            assert_ne!(ta, tb);
+            assert_eq!(device8_apply_state_block(b.cast(), ta), D3DERR_INVALIDCALL);
+            assert_eq!(device8_delete_state_block(a.cast(), ta), D3D_OK);
+            assert_eq!(device8_delete_state_block(b.cast(), tb), D3D_OK);
+
+            drop_mock_device8(a);
+            drop_mock_device8(b);
+        }
+    }
+
+    #[test]
+    fn state_block_list_growth() {
+        let dev9 = MockDev9::new();
+        let device = mock_device8(dev9.nn());
+        let sb = MockStateBlock::new();
+        dev9.sb_to_return.set(sb.ptr());
+
+        unsafe {
+            let mut tokens = [0u32; 20];
+            for t in &mut tokens {
+                *t = create_sb(device, D3DSBT_ALL);
+            }
+
+            let mut sorted = tokens;
+            sorted.sort_unstable();
+            assert!(sorted.windows(2).all(|w| w[0] < w[1]));
+
+            for t in tokens {
+                assert_eq!(device8_apply_state_block(device.cast(), t), D3D_OK);
+            }
+            for t in tokens {
+                assert_eq!(device8_delete_state_block(device.cast(), t), D3D_OK);
+            }
+            assert_eq!(sb.releases.get(), 20);
+            assert_eq!(
+                device8_delete_state_block(device.cast(), tokens[0]),
+                D3DERR_INVALIDCALL,
+            );
+
+            drop_mock_device8(device);
+        }
+    }
+
+    #[test]
+    fn state_blocks_drain_at_device_death() {
+        let dev9 = MockDev9::new();
+        let device = mock_device8(dev9.nn());
+        let sb = MockStateBlock::new();
+        dev9.sb_to_return.set(sb.ptr());
+
+        unsafe {
+            let a = create_sb(device, D3DSBT_ALL);
+            let b = create_sb(device, D3DSBT_ALL);
+
+            assert_eq!(device8_release(device.cast()), 0);
+            assert_eq!(sb.releases.get(), 2);
+            assert_eq!(dev9.releases.get(), 1);
+
+            assert_eq!(
+                device8_apply_state_block(device.cast(), a),
+                D3DERR_INVALIDCALL,
+            );
+            assert_eq!(sb.applies.get(), 0);
+            assert_eq!(
+                device8_delete_state_block(device.cast(), b),
+                D3DERR_INVALIDCALL,
+            );
+            assert_eq!(sb.releases.get(), 2);
+
+            drop(Box::from_raw(device));
+        }
+    }
+
+    #[test]
+    fn end_state_block_zero_out_token() {
+        let dev9 = MockCom::new();
+        let device = mock_device8(dev9.nn());
+        let mut token = 0xdead_beef_u32;
+        unsafe {
+            assert_eq!(
+                device8_end_state_block(device.cast(), &raw mut token),
+                super::D3DERR_NOTAVAILABLE,
+            );
+            assert_eq!(token, 0);
+            drop_mock_device8(device);
+        }
+    }
+
+    #[test]
+    fn create_state_block_dead_device_zero_out_token() {
+        let dev9 = MockCom::new();
+        let device = mock_device8(dev9.nn());
+        unsafe {
+            assert_eq!(device8_release(device.cast()), 0);
+
+            let mut token = 0xdead_beef_u32;
+            assert_eq!(
+                device8_create_state_block(device.cast(), D3DSBT_ALL, &raw mut token),
+                D3DERR_INVALIDCALL,
+            );
+            assert_eq!(token, 0);
+
+            drop(Box::from_raw(device));
         }
     }
 
