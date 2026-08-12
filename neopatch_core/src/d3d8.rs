@@ -2339,7 +2339,28 @@ unsafe extern "system" fn device8_set_texture(
     };
     unsafe { (dev9_vt(p).base__.SetTexture)(p, stage, t9) }
 }
-stub8!(device8_get_texture_stage_state, "IDirect3DDevice8::GetTextureStageState"(_stage: u32, _ty: u32, _out: *mut u32) -> D3DERR_NOTAVAILABLE);
+unsafe extern "system" fn device8_get_texture_stage_state(
+    this: *mut c_void,
+    stage: u32,
+    ty: u32,
+    out: *mut u32,
+) -> HRESULT {
+    let out = claim_out!(out; "device8_get_texture_stage_state");
+    let p = require_live!(unsafe { dev9(this) }, "device8_get_texture_stage_state");
+    match tss_to_sampler_state(ty) {
+        Some(sampler) => unsafe {
+            (dev9_vt(p).base__.GetSamplerState)(p, stage, sampler, out.as_ptr())
+        },
+        None => unsafe {
+            (dev9_vt(p).base__.GetTextureStageState)(
+                p,
+                stage,
+                D3DTEXTURESTAGESTATETYPE(ty.cast_signed()),
+                out.as_ptr(),
+            )
+        },
+    }
+}
 
 unsafe extern "system" fn device8_set_texture_stage_state(
     this: *mut c_void,
@@ -2760,9 +2781,10 @@ mod tests {
         convert_present_params, copy_rect_valid, device8_apply_state_block,
         device8_capture_state_block, device8_create_index_buffer, device8_create_state_block,
         device8_delete_state_block, device8_draw_indexed_primitive, device8_end_state_block,
-        device8_get_indices, device8_get_render_state, device8_get_transform, device8_release,
-        device8_reset, device8_set_indices, device8_set_render_state, device8_set_texture,
-        resource8_release, surface_desc_9_to_8, unwrap8, unwrap8_arg, wrap_add_ref, wrap_created,
+        device8_get_indices, device8_get_render_state, device8_get_texture_stage_state,
+        device8_get_transform, device8_release, device8_reset, device8_set_indices,
+        device8_set_render_state, device8_set_texture, resource8_release, surface_desc_9_to_8,
+        unwrap8, unwrap8_arg, wrap_add_ref, wrap_created,
     };
     use crate::fmt_hr;
     use std::cell::Cell;
@@ -3437,6 +3459,8 @@ mod tests {
         get_transform_calls: Cell<u32>,
         rs_to_return: Cell<u32>,
         get_rs_calls: Cell<u32>,
+        sampler_to_return: Cell<u32>,
+        tss_to_return: Cell<u32>,
         svp_to_return: Cell<bool>,
         npatch_to_return: Cell<f32>,
         svp_set_calls: Cell<u32>,
@@ -3461,6 +3485,8 @@ mod tests {
         vt.base__.DrawIndexedPrimitive = mock9_draw_indexed_primitive;
         vt.base__.GetTransform = mock9_get_transform;
         vt.base__.GetRenderState = mock9_get_render_state;
+        vt.base__.GetSamplerState = mock9_get_sampler_state;
+        vt.base__.GetTextureStageState = mock9_get_texture_stage_state;
         vt.base__.GetSoftwareVertexProcessing = mock9_get_software_vertex_processing;
         vt.base__.GetNPatchMode = mock9_get_npatch_mode;
         vt.base__.SetSoftwareVertexProcessing = mock9_set_software_vertex_processing;
@@ -3514,6 +3540,28 @@ mod tests {
         let m = unsafe { &*this.cast::<MockDev9>() };
         m.get_rs_calls.update(|n| n + 1);
         unsafe { out.write(m.rs_to_return.get()) };
+        D3D_OK
+    }
+
+    unsafe extern "system" fn mock9_get_sampler_state(
+        this: *mut c_void,
+        _stage: u32,
+        _sampler: super::D3DSAMPLERSTATETYPE,
+        out: *mut u32,
+    ) -> HRESULT {
+        let m = unsafe { &*this.cast::<MockDev9>() };
+        unsafe { out.write(m.sampler_to_return.get()) };
+        D3D_OK
+    }
+
+    unsafe extern "system" fn mock9_get_texture_stage_state(
+        this: *mut c_void,
+        _stage: u32,
+        _ty: super::D3DTEXTURESTAGESTATETYPE,
+        out: *mut u32,
+    ) -> HRESULT {
+        let m = unsafe { &*this.cast::<MockDev9>() };
+        unsafe { out.write(m.tss_to_return.get()) };
         D3D_OK
     }
 
@@ -4159,6 +4207,33 @@ mod tests {
 
             assert_eq!(dev9.last_svp_set.get(), Some(true));
             assert_eq!(dev9.last_npatch_set.get().to_bits(), 4.0f32.to_bits());
+
+            drop_mock_device8(device);
+        }
+    }
+
+    #[test]
+    fn texture_stage_state_readback_split() {
+        let dev9 = MockDev9::new();
+        let device = mock_device8(dev9.nn());
+        dev9.sampler_to_return.set(2); // D3DTEXF_LINEAR
+        dev9.tss_to_return.set(4); // D3DTOP_MODULATE
+        unsafe {
+            // D3D8's MINFILTER (17) moved to the D3D9 sampler block.
+            let mut filter = 0u32;
+            assert_eq!(
+                device8_get_texture_stage_state(device.cast(), 0, 17, &raw mut filter),
+                D3D_OK,
+            );
+            assert_eq!(filter, 2);
+
+            // COLOROP (1) stayed a texture-stage state.
+            let mut op = 0u32;
+            assert_eq!(
+                device8_get_texture_stage_state(device.cast(), 0, 1, &raw mut op),
+                D3D_OK,
+            );
+            assert_eq!(op, 4);
 
             drop_mock_device8(device);
         }
