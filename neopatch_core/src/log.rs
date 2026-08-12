@@ -80,6 +80,8 @@ where
         return false;
     };
 
+    // Retention runs on every launch so `sessions_to_keep` bounds the log root unconditionally,
+    // including on hosts that never pass the patch precheck.
     apply_retention(&log_root, core_cfg.log.sessions_to_keep, &session_id);
 
     drop(write_manifest(
@@ -295,18 +297,19 @@ fn local_time_string() -> String {
     )
 }
 
+/// Prunes old session directories down to the configured budget, oldest first.
 fn apply_retention(log_root: &Path, keep: NonZero<u32>, current: &str) {
     let Ok(entries) = read_dir(log_root) else {
         return;
     };
     let mut dirs: Vec<PathBuf> = entries
         .filter_map(Result::ok)
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
         .map(|e| e.path())
         .filter(|p| {
             p.file_name()
                 .and_then(|n| n.to_str())
                 .is_some_and(|n| n != current && is_session_id(n))
-                && p.is_dir()
                 && (p.join("manifest.txt").exists() || p.join("events.log").exists())
         })
         .collect();
@@ -437,15 +440,33 @@ impl Visit for FieldVisitor<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Level, NeopatchLayer, is_session_id};
+    use super::{Level, NeopatchLayer, apply_retention, is_session_id};
+    use std::env::temp_dir;
+    use std::fs::{create_dir_all, remove_dir_all, write};
+    use std::num::NonZero;
+    use std::path::{Path, PathBuf};
+    use std::process::id;
     use tracing::subscriber::with_default as set_default_subscriber;
     use tracing::warn;
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::registry;
     use windows_sys::Win32::Foundation::{GetLastError, SetLastError};
 
+    fn scratch_log_root(test: &str) -> PathBuf {
+        let root = temp_dir().join(format!("neopatch_log_test_{test}_{}", id()));
+        drop(remove_dir_all(&root));
+        create_dir_all(&root).expect("create scratch root");
+        root
+    }
+
+    fn create_session_dir(root: &Path, name: &str) {
+        let dir = root.join(name);
+        create_dir_all(&dir).expect("create session dir");
+        write(dir.join("manifest.txt"), "test").expect("write manifest");
+    }
+
     #[test]
-    fn hooks_restore_last_error_after_emitting_event() {
+    fn event_emission_clobber_last_error() {
         let subscriber = registry().with(NeopatchLayer {
             level: Level::TRACE,
         });
@@ -457,15 +478,12 @@ mod tests {
     }
 
     #[test]
-    fn is_session_id_accepts_real_session_format() {
+    fn is_session_id_checks() {
         assert!(is_session_id("20260516_123045_p1"));
         assert!(is_session_id("20260516_123045_p12345"));
         assert!(is_session_id("00000000_000000_p0"));
         assert!(is_session_id("99999999_999999_p4294967295"));
-    }
 
-    #[test]
-    fn is_session_id_rejects_unrelated_names() {
         assert!(!is_session_id(""));
         assert!(!is_session_id("important_data"));
         assert!(!is_session_id("20260516"));
@@ -479,5 +497,43 @@ mod tests {
         assert!(!is_session_id("20260516_123045-p1"));
         assert!(!is_session_id("20260516_123045_x1"));
         assert!(!is_session_id("20260516_123045_p1a"));
+    }
+
+    #[test]
+    fn retention_pruning() {
+        let root = scratch_log_root("prune_oldest");
+        create_session_dir(&root, "20260101_010000_p1");
+        create_session_dir(&root, "20260101_020000_p1");
+        create_session_dir(&root, "20260101_030000_p1");
+        apply_retention(&root, NonZero::new(3).unwrap(), "20260101_040000_p9");
+        assert!(!root.join("20260101_010000_p1").exists());
+        assert!(root.join("20260101_020000_p1").exists());
+        assert!(root.join("20260101_030000_p1").exists());
+        drop(remove_dir_all(&root));
+    }
+
+    #[test]
+    fn retention_ignore_contentless_directories() {
+        let root = scratch_log_root("prune_bare");
+        let bare = root.join("20260101_010000_p1");
+        create_dir_all(&bare).expect("create bare dir");
+        create_session_dir(&root, "20260101_020000_p2");
+        apply_retention(&root, NonZero::new(1).unwrap(), "20260101_030000_p9");
+        assert!(bare.exists());
+        assert!(!root.join("20260101_020000_p2").exists());
+        drop(remove_dir_all(&root));
+    }
+
+    #[test]
+    fn retention_ignore_non_session_id_names() {
+        let root = scratch_log_root("prune_foreign");
+        let foreign = root.join("important_data");
+        create_dir_all(&foreign).expect("create foreign dir");
+        write(foreign.join("manifest.txt"), "test").expect("write manifest");
+        create_session_dir(&root, "20260101_010000_p1");
+        apply_retention(&root, NonZero::new(1).unwrap(), "20260101_020000_p9");
+        assert!(foreign.exists());
+        assert!(!root.join("20260101_010000_p1").exists());
+        drop(remove_dir_all(&root));
     }
 }
