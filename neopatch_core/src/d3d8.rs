@@ -34,8 +34,8 @@ use windows::Win32::Graphics::Direct3D9::{
     D3DSAMP_MIPMAPLODBIAS, D3DSAMPLERSTATETYPE, D3DSTATEBLOCKTYPE, D3DSURFACE_DESC, D3DSWAPEFFECT,
     D3DSWAPEFFECT_COPY, D3DSWAPEFFECT_DISCARD, D3DSWAPEFFECT_FLIP, D3DTEXF_NONE,
     D3DTEXTURESTAGESTATETYPE, D3DTRANSFORMSTATETYPE, D3DVIEWPORT9, IDirect3D9Ex_Vtbl,
-    IDirect3DDevice9Ex_Vtbl, IDirect3DResource9_Vtbl, IDirect3DSurface9_Vtbl,
-    IDirect3DTexture9_Vtbl, IDirect3DVertexBuffer9_Vtbl,
+    IDirect3DDevice9Ex_Vtbl, IDirect3DIndexBuffer9_Vtbl, IDirect3DResource9_Vtbl,
+    IDirect3DSurface9_Vtbl, IDirect3DTexture9_Vtbl, IDirect3DVertexBuffer9_Vtbl,
 };
 use windows::Win32::Graphics::Gdi::{HMONITOR, RGNDATA};
 use windows::core::{BOOL, GUID, HRESULT, IUnknown_Vtbl};
@@ -644,6 +644,7 @@ vtable_accessors! {
     surf9_vt => IDirect3DSurface9_Vtbl,
     tex9_vt => IDirect3DTexture9_Vtbl,
     vb9_vt => IDirect3DVertexBuffer9_Vtbl,
+    ib9_vt => IDirect3DIndexBuffer9_Vtbl,
     res9_vt => IDirect3DResource9_Vtbl,
     dev8_vt => Device8Vtbl,
 }
@@ -1046,6 +1047,22 @@ unsafe extern "system" fn vertex_buffer8_get_desc(this: *mut c_void, desc: *mut 
     let p = require_live!(unsafe { unwrap8(this) }, "vertex_buffer8_get_desc");
     // D3D8's `D3DVERTEXBUFFER_DESC` is field-identical to D3D9's, so it forwards as an opaque pointer.
     unsafe { (vb9_vt(p).GetDesc)(p, desc.as_ptr().cast()) }
+}
+
+static INDEX_BUFFER8_VTBL: Buffer8Vtbl = Buffer8Vtbl::new(
+    index_buffer8_lock,
+    index_buffer8_unlock,
+    index_buffer8_get_desc,
+);
+
+forward8!(index_buffer8_lock, unwrap8 / ib9_vt.Lock(offset: u32, size: u32, data: *mut *mut u8, flags: u32) -> HRESULT => (offset, size, data.cast(), flags));
+forward8!(index_buffer8_unlock, unwrap8 / ib9_vt.Unlock() -> HRESULT);
+
+unsafe extern "system" fn index_buffer8_get_desc(this: *mut c_void, desc: *mut c_void) -> HRESULT {
+    let desc = claim_opaque!(desc; "index_buffer8_get_desc");
+    let p = require_live!(unsafe { unwrap8(this) }, "index_buffer8_get_desc");
+    // D3D8's `D3DINDEXBUFFER_DESC` is field-identical to D3D9's, so it forwards as an opaque pointer.
+    unsafe { (ib9_vt(p).GetDesc)(p, desc.as_ptr().cast()) }
 }
 
 /// # Safety
@@ -1466,6 +1483,7 @@ unsafe extern "system" fn device8_create_texture(
 ) -> HRESULT {
     let out = claim_out!(out; "device8_create_texture");
     let p = require_live!(unsafe { dev9(this) }, "device8_create_texture");
+    // The managed pool is translated by the `d3d9` create hook, which this call reaches through the patched vtable slot.
     let mut t9 = null_mut();
     let hr = unsafe {
         (dev9_vt(p).base__.CreateTexture)(
@@ -1506,6 +1524,7 @@ unsafe extern "system" fn device8_create_vertex_buffer(
 ) -> HRESULT {
     let out = claim_out!(out; "device8_create_vertex_buffer");
     let p = require_live!(unsafe { dev9(this) }, "device8_create_vertex_buffer");
+    // The managed pool is translated by the `d3d9` create hook, which this call reaches through the patched vtable slot.
     let mut vb9 = null_mut();
     let hr = unsafe {
         (dev9_vt(p).base__.CreateVertexBuffer)(
@@ -1531,7 +1550,41 @@ unsafe extern "system" fn device8_create_vertex_buffer(
     }
 }
 
-stub8!(device8_create_index_buffer, "IDirect3DDevice8::CreateIndexBuffer"(_length: u32, _usage: u32, _format: D3DFORMAT, _pool: D3DPOOL, _out: *mut *mut c_void) clears _out -> D3DERR_NOTAVAILABLE);
+unsafe extern "system" fn device8_create_index_buffer(
+    this: *mut c_void,
+    length: u32,
+    usage: u32,
+    format: D3DFORMAT,
+    pool: D3DPOOL,
+    out: *mut *mut c_void,
+) -> HRESULT {
+    let out = claim_out!(out; "device8_create_index_buffer");
+    let p = require_live!(unsafe { dev9(this) }, "device8_create_index_buffer");
+    // The managed pool is translated by the `d3d9` create hook, which this call reaches through the patched vtable slot.
+    let mut ib9 = null_mut();
+    let hr = unsafe {
+        (dev9_vt(p).base__.CreateIndexBuffer)(
+            p,
+            length,
+            usage,
+            format,
+            pool,
+            &raw mut ib9,
+            null_mut(),
+        )
+    };
+    unsafe {
+        wrap_created(
+            "IDirect3DDevice9::CreateIndexBuffer",
+            hr,
+            ib9,
+            (&raw const INDEX_BUFFER8_VTBL).cast(),
+            this.cast::<Device8>(),
+            false,
+            &out,
+        )
+    }
+}
 
 unsafe extern "system" fn device8_create_render_target(
     this: *mut c_void,
@@ -2307,21 +2360,24 @@ mod tests {
     use super::{
         ComHeader, D3D_OK, D3D8_INTERNAL_LOCKABLE, D3DERR_INVALIDCALL, D3DPresentParameters8,
         DEVICE8_VTBL, Device8, OutSlot, Resource8, SURFACE8_VTBL, Surface8Vtbl, TEXTURE8_VTBL,
-        Texture8Vtbl, caps_9_to_8, convert_present_params, copy_rect_valid, device8_release,
-        device8_set_texture, resource8_release, surface_desc_9_to_8, unwrap8, unwrap8_arg,
-        wrap_add_ref, wrap_created,
+        Texture8Vtbl, caps_9_to_8, convert_present_params, copy_rect_valid,
+        device8_create_index_buffer, device8_release, device8_set_texture, resource8_release,
+        surface_desc_9_to_8, unwrap8, unwrap8_arg, wrap_add_ref, wrap_created,
     };
     use crate::fmt_hr;
     use std::cell::Cell;
     use std::ffi::c_void;
+    use std::mem::transmute;
     use std::ptr::{NonNull, null, null_mut};
-    use windows::Win32::Foundation::{E_NOINTERFACE, HWND, POINT, RECT};
+    use std::sync::LazyLock;
+    use windows::Win32::Foundation::{E_NOINTERFACE, HANDLE, HWND, POINT, RECT};
     use windows::Win32::Graphics::Direct3D9::{
-        D3DCAPS9, D3DFMT_A1R5G5B5, D3DFMT_A8R8G8B8, D3DFMT_D16, D3DFMT_DXT1, D3DFMT_R5G6B5,
-        D3DFMT_X1R5G5B5, D3DFMT_X8R8G8B8, D3DLOCKED_RECT, D3DMULTISAMPLE_2_SAMPLES,
-        D3DMULTISAMPLE_NONE, D3DPOOL_SYSTEMMEM, D3DPRESENT_INTERVAL_ONE,
-        D3DPRESENTFLAG_LOCKABLE_BACKBUFFER, D3DSURFACE_DESC, D3DSWAPEFFECT_COPY,
-        D3DSWAPEFFECT_DISCARD, D3DSWAPEFFECT_FLIP,
+        D3DCAPS9, D3DFMT_A1R5G5B5, D3DFMT_A8R8G8B8, D3DFMT_D16, D3DFMT_DXT1, D3DFMT_INDEX16,
+        D3DFMT_R5G6B5, D3DFMT_X1R5G5B5, D3DFMT_X8R8G8B8, D3DFORMAT, D3DLOCKED_RECT,
+        D3DMULTISAMPLE_2_SAMPLES, D3DMULTISAMPLE_NONE, D3DPOOL, D3DPOOL_MANAGED, D3DPOOL_SYSTEMMEM,
+        D3DPRESENT_INTERVAL_ONE, D3DPRESENTFLAG_LOCKABLE_BACKBUFFER, D3DSURFACE_DESC,
+        D3DSWAPEFFECT_COPY, D3DSWAPEFFECT_DISCARD, D3DSWAPEFFECT_FLIP, D3DUSAGE_DYNAMIC,
+        IDirect3DDevice9Ex_Vtbl,
     };
     use windows::core::{BOOL, GUID, HRESULT, IUnknown_Vtbl};
 
@@ -2525,15 +2581,7 @@ mod tests {
         let surf_b = MockCom::new();
 
         // Mirrors construction in `d3d8_create_device` with a mock D3D9 device.
-        let device = Box::into_raw(Box::new(Device8 {
-            header: ComHeader::new_alive((&raw const DEVICE8_VTBL).cast(), dev9.nn()),
-            parent: null_mut(),
-            back_buffer: Resource8 {
-                header: ComHeader::new_dead((&raw const SURFACE8_VTBL).cast()),
-                device: null_mut(),
-                internal_flags: D3D8_INTERNAL_LOCKABLE,
-            },
-        }));
+        let device = mock_device8(dev9.nn());
 
         unsafe {
             (*device).back_buffer.device = device;
@@ -2673,18 +2721,7 @@ mod tests {
     #[test]
     fn dead_argument_wrapper_refused() {
         let dev9_mock = MockCom::new();
-        let device = Box::into_raw(Box::new(Device8 {
-            header: ComHeader::new_alive(
-                (&raw const DEVICE8_VTBL).cast(),
-                NonNull::new(dev9_mock.ptr()).unwrap(),
-            ),
-            parent: null_mut(),
-            back_buffer: Resource8 {
-                header: ComHeader::new_dead((&raw const SURFACE8_VTBL).cast()),
-                device: null_mut(),
-                internal_flags: D3D8_INTERNAL_LOCKABLE,
-            },
-        }));
+        let device = mock_device8(dev9_mock.nn());
 
         let tex = MockCom::new();
         let mut tex_out = null_mut();
@@ -2852,5 +2889,133 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(surface_desc_9_to_8(&compressed).Size, 64 * 32 * 4);
+    }
+
+    fn mock_device8(inner: NonNull<c_void>) -> *mut Device8 {
+        Box::into_raw(Box::new(Device8 {
+            header: ComHeader::new_alive((&raw const DEVICE8_VTBL).cast(), inner),
+            parent: null_mut(),
+            back_buffer: Resource8 {
+                header: ComHeader::new_dead((&raw const SURFACE8_VTBL).cast()),
+                device: null_mut(),
+                internal_flags: D3D8_INTERNAL_LOCKABLE,
+            },
+        }))
+    }
+
+    /// The inverse of [`mock_device8`].
+    unsafe fn drop_mock_device8(device: *mut Device8) {
+        unsafe {
+            assert_eq!(device8_release(device.cast()), 0);
+            drop(Box::from_raw(device));
+        }
+    }
+
+    fn unreached_dev9_vtbl() -> IDirect3DDevice9Ex_Vtbl {
+        const fn fn_ptr_like<T>(_: &T) -> bool {
+            size_of::<Option<T>>() == size_of::<T>()
+        }
+
+        unsafe extern "system" fn unreached() {
+            unreachable!("mock IDirect3DDevice9Ex vtable slot called without an override");
+        }
+
+        const SLOTS: usize = size_of::<IDirect3DDevice9Ex_Vtbl>() / size_of::<*const ()>();
+        const _: () = assert!(SLOTS == 134);
+
+        let filler = unreached as *const ();
+        let vt =
+            unsafe { transmute::<[*const (); SLOTS], IDirect3DDevice9Ex_Vtbl>([filler; SLOTS]) };
+
+        assert!(fn_ptr_like(&vt.base__.Present));
+        assert!(fn_ptr_like(&vt.base__.SetLight));
+        assert!(fn_ptr_like(&vt.base__.GetLight));
+        assert!(fn_ptr_like(&vt.base__.SetPaletteEntries));
+        assert!(fn_ptr_like(&vt.base__.GetPaletteEntries));
+        assert!(fn_ptr_like(&vt.PresentEx));
+
+        vt
+    }
+
+    /// Mock `IDirect3DDevice9Ex` recording the calls made by the D3D8 forwarding paths.
+    #[repr(C)]
+    #[derive(Default)]
+    struct MockDev9 {
+        vtbl: *const IDirect3DDevice9Ex_Vtbl,
+        releases: Cell<u32>,
+        create_ib_calls: Cell<u32>,
+        last_ib_pool: Cell<D3DPOOL>,
+        last_ib_usage: Cell<u32>,
+        ib_to_return: Cell<*mut c_void>,
+    }
+
+    static MOCK_DEV9_VTBL: LazyLock<IDirect3DDevice9Ex_Vtbl> = LazyLock::new(|| {
+        let mut vt = unreached_dev9_vtbl();
+        vt.base__.base__.Release = mock9_release;
+        vt.base__.CreateIndexBuffer = mock9_create_index_buffer;
+        vt
+    });
+
+    impl MockDev9 {
+        fn new() -> Self {
+            Self {
+                vtbl: &raw const *MOCK_DEV9_VTBL,
+                ..Self::default()
+            }
+        }
+
+        fn nn(&self) -> NonNull<c_void> {
+            NonNull::new((&raw const *self).cast_mut().cast()).unwrap()
+        }
+    }
+
+    unsafe extern "system" fn mock9_release(this: *mut c_void) -> u32 {
+        let m = unsafe { &*this.cast::<MockDev9>() };
+        m.releases.update(|n| n + 1);
+        0
+    }
+
+    unsafe extern "system" fn mock9_create_index_buffer(
+        this: *mut c_void,
+        _length: u32,
+        usage: u32,
+        _format: D3DFORMAT,
+        pool: D3DPOOL,
+        out: *mut *mut c_void,
+        _shared: *mut HANDLE,
+    ) -> HRESULT {
+        let m = unsafe { &*this.cast::<MockDev9>() };
+        m.create_ib_calls.update(|n| n + 1);
+        m.last_ib_pool.set(pool);
+        m.last_ib_usage.set(usage);
+        unsafe { out.write(m.ib_to_return.get()) };
+        D3D_OK
+    }
+
+    #[test]
+    fn create_index_buffer_forwarding() {
+        let dev9 = MockDev9::new();
+        let device = mock_device8(dev9.nn());
+        let ib = MockCom::new();
+        dev9.ib_to_return.set(ib.ptr());
+        let usage = D3DUSAGE_DYNAMIC.cast_unsigned();
+        let mut out = null_mut();
+        unsafe {
+            let hr = device8_create_index_buffer(
+                device.cast(),
+                64,
+                usage,
+                D3DFMT_INDEX16,
+                D3DPOOL_MANAGED,
+                &raw mut out,
+            );
+            assert_eq!(hr, D3D_OK);
+            assert_eq!(dev9.create_ib_calls.get(), 1);
+            assert_eq!(dev9.last_ib_pool.get(), D3DPOOL_MANAGED);
+            assert_eq!(dev9.last_ib_usage.get(), usage);
+            assert_eq!(resource8_release(out), 0);
+            assert_eq!(ib.releases.get(), 1);
+            drop_mock_device8(device);
+        }
     }
 }
