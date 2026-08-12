@@ -6,8 +6,8 @@
 //! We force `D3DPRESENT_INTERVAL_IMMEDIATE` in both windowed and fullscreen exclusive,
 //! so `Present` never blocks on vblank and our pacer is the sole timing source, assuming no driver override.
 //!
-//! `D3DPOOL_MANAGED` is forced to `D3DPOOL_DEFAULT` + `D3DUSAGE_DYNAMIC` on every `CreateTexture` and `CreateVertexBuffer` call
-//! because D3D9Ex removes managed pools and otherwise rejects calls with `D3DERR_INVALIDCALL`.
+//! `D3DPOOL_MANAGED` is forced to `D3DPOOL_DEFAULT` + `D3DUSAGE_DYNAMIC` on every `CreateTexture`, `CreateVertexBuffer`,
+//! and `CreateIndexBuffer` call because D3D9Ex removes managed pools and otherwise rejects calls with `D3DERR_INVALIDCALL`.
 //!
 //! `D3DCREATE_MULTITHREADED` is OR'd into the device behavior flags since the games use D3D9 from worker threads
 //! without asking for a thread-safe device.
@@ -41,12 +41,12 @@ use windows::Win32::Graphics::Direct3D9::{
     D3DFMT_A2R10G10B10, D3DFMT_A4R4G4B4, D3DFMT_A8, D3DFMT_A8B8G8R8, D3DFMT_A8R3G3B2,
     D3DFMT_A8R8G8B8, D3DFMT_A16B16G16R16, D3DFMT_D15S1, D3DFMT_D16, D3DFMT_D16_LOCKABLE,
     D3DFMT_D24FS8, D3DFMT_D24S8, D3DFMT_D24X4S4, D3DFMT_D24X8, D3DFMT_D32, D3DFMT_D32F_LOCKABLE,
-    D3DFMT_G16R16, D3DFMT_R3G3B2, D3DFMT_R5G6B5, D3DFMT_R8G8B8, D3DFMT_UNKNOWN, D3DFMT_X1R5G5B5,
-    D3DFMT_X4R4G4B4, D3DFMT_X8B8G8R8, D3DFMT_X8R8G8B8, D3DFORMAT, D3DPOOL, D3DPOOL_DEFAULT,
-    D3DPOOL_MANAGED, D3DPRESENT_INTERVAL_IMMEDIATE, D3DPRESENT_PARAMETERS,
-    D3DPRESENTFLAG_LOCKABLE_BACKBUFFER, D3DRESOURCETYPE, D3DSCANLINEORDERING_PROGRESSIVE,
-    D3DUSAGE_DYNAMIC, Direct3DCreate9Ex, IDirect3D9, IDirect3D9Ex, IDirect3D9Ex_Vtbl,
-    IDirect3DDevice9Ex, IDirect3DDevice9Ex_Vtbl,
+    D3DFMT_G16R16, D3DFMT_INDEX16, D3DFMT_INDEX32, D3DFMT_R3G3B2, D3DFMT_R5G6B5, D3DFMT_R8G8B8,
+    D3DFMT_UNKNOWN, D3DFMT_X1R5G5B5, D3DFMT_X4R4G4B4, D3DFMT_X8B8G8R8, D3DFMT_X8R8G8B8, D3DFORMAT,
+    D3DPOOL, D3DPOOL_DEFAULT, D3DPOOL_MANAGED, D3DPRESENT_INTERVAL_IMMEDIATE,
+    D3DPRESENT_PARAMETERS, D3DPRESENTFLAG_LOCKABLE_BACKBUFFER, D3DRESOURCETYPE,
+    D3DSCANLINEORDERING_PROGRESSIVE, D3DUSAGE_DYNAMIC, Direct3DCreate9Ex, IDirect3D9, IDirect3D9Ex,
+    IDirect3D9Ex_Vtbl, IDirect3DDevice9Ex, IDirect3DDevice9Ex_Vtbl,
 };
 use windows::Win32::Graphics::Gdi::RGNDATA;
 use windows::core::{HRESULT, Interface, InterfaceRef};
@@ -181,6 +181,18 @@ vtable_slot! {
             fvf: u32,
             pool: D3DPOOL,
             pp_vertex_buffer: *mut *mut c_void,
+            p_shared_handle: *mut HANDLE,
+        ) -> HRESULT;
+}
+vtable_slot! {
+    REAL_CREATE_INDEX_BUFFER / call_real_create_index_buffer :
+        as fn(
+            this: *mut c_void,
+            length: u32,
+            usage: u32,
+            format: D3DFORMAT,
+            pool: D3DPOOL,
+            pp_index_buffer: *mut *mut c_void,
             p_shared_handle: *mut HANDLE,
         ) -> HRESULT;
 }
@@ -893,8 +905,9 @@ fn build_display_mode_ex(pp: &D3DPRESENT_PARAMETERS) -> D3DDISPLAYMODEEX {
     }
 }
 
-/// D3D9Ex rejects `D3DPOOL_MANAGED` with `INVALIDCALL`, so we substitute the closest valid pair on every `Create*Texture`
-/// and `CreateVertexBuffer` path where the game or D3DX9 hands us `MANAGED`. Returns whether a translation happened.
+/// D3D9Ex rejects `D3DPOOL_MANAGED` with `INVALIDCALL`, so we substitute the closest valid pair on every `Create*Texture`,
+/// `CreateVertexBuffer`, and `CreateIndexBuffer` path where the game, D3DX9, or an overlay hands us `MANAGED`.
+/// Returns whether a translation happened.
 pub(crate) fn translate_managed_pool(pool: &mut D3DPOOL, usage: &mut u32) -> bool {
     if *pool == D3DPOOL_MANAGED {
         *pool = D3DPOOL_DEFAULT;
@@ -944,6 +957,8 @@ pub(crate) fn format_name(f: D3DFORMAT) -> &'static str {
         D3DFMT_D16,
         D3DFMT_D32F_LOCKABLE,
         D3DFMT_D24FS8,
+        D3DFMT_INDEX16,
+        D3DFMT_INDEX32,
     )
 }
 
@@ -1282,6 +1297,12 @@ unsafe fn install_device_hooks(dev: NonNull<c_void>) {
                 vtable_field!(IDirect3DDevice9Ex_Vtbl, base__.CreateVertexBuffer),
                 "CreateVertexBuffer",
                 hook_create_vertex_buffer,
+            );
+            scope.intercept(
+                &REAL_CREATE_INDEX_BUFFER,
+                vtable_field!(IDirect3DDevice9Ex_Vtbl, base__.CreateIndexBuffer),
+                "CreateIndexBuffer",
+                hook_create_index_buffer,
             );
         });
     }
@@ -1669,7 +1690,7 @@ unsafe extern "system" fn hook_create_texture(
         width,
         height,
         levels,
-        format = ?format,
+        format = format_name(format),
         pool_in = ?pool_orig,
         pool_out = ?pool,
         usage_in = format_args!("{usage_orig:#x}"),
@@ -1724,6 +1745,60 @@ unsafe extern "system" fn hook_create_vertex_buffer(
         kind = "create_vbuffer",
         length,
         fvf = format_args!("{fvf:#x}"),
+        pool_in = ?pool_orig,
+        pool_out = ?pool,
+        usage_in = format_args!("{usage_orig:#x}"),
+        usage_out = format_args!("{usage:#x}"),
+        hr = fmt_hr!(hr),
+        ptr = format_args!("{returned:p}"),
+    );
+
+    hr
+}
+
+unsafe extern "system" fn hook_create_index_buffer(
+    this: *mut c_void,
+    length: u32,
+    mut usage: u32,
+    format: D3DFORMAT,
+    mut pool: D3DPOOL,
+    pp_index_buffer: *mut *mut c_void,
+    p_shared_handle: *mut HANDLE,
+) -> HRESULT {
+    if !is_game_device(this) {
+        return unsafe {
+            call_real_create_index_buffer(
+                this,
+                length,
+                usage,
+                format,
+                pool,
+                pp_index_buffer,
+                p_shared_handle,
+            )
+        };
+    }
+
+    let usage_orig = usage;
+    let pool_orig = pool;
+    translate_managed_pool(&mut pool, &mut usage);
+    let hr = unsafe {
+        call_real_create_index_buffer(
+            this,
+            length,
+            usage,
+            format,
+            pool,
+            pp_index_buffer,
+            p_shared_handle,
+        )
+    };
+    let returned = unsafe { out_ptr(pp_index_buffer) };
+
+    log_at!(hr.is_ok() => debug / warn,
+        kind = "create_ibuffer",
+        length,
+        format = format_name(format),
         pool_in = ?pool_orig,
         pool_out = ?pool,
         usage_in = format_args!("{usage_orig:#x}"),
