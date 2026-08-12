@@ -388,9 +388,13 @@ fn warn_dead_wrapper_call(method: &'static str) {
     warn!(kind = "d3d8_dead_wrapper_call", method);
 }
 
-/// Unwraps a receiver accessor ([`unwrap8`], [`dev9`], the `inner` methods), refusing the call when the wrapper is dead.
-/// Early-returns the method's [`DeadDefault`], or, in the `nulls` form for `Create*`-style methods,
-/// nulls the interface out-slot like real D3D8 does on failure.
+/// Logs and refuses a call whose required out-pointer is null.
+fn refuse_null_out_param(method: &'static str) -> HRESULT {
+    warn!(kind = "d3d8_null_out_param", method);
+    D3DERR_INVALIDCALL
+}
+
+/// Unwraps a receiver accessor, refusing the call when the wrapper is dead and early-returning the method's [`DeadDefault`].
 macro_rules! require_live {
     ($acc:expr, $method:expr) => {
         match $acc {
@@ -399,12 +403,6 @@ macro_rules! require_live {
                 warn_dead_wrapper_call($method);
                 return DeadDefault::dead();
             }
-        }
-    };
-    ($acc:expr, $method:expr, nulls $out:expr) => {
-        match $acc {
-            Some(p) => p.as_ptr(),
-            None => return unsafe { refuse_dead_create($method, $out) },
         }
     };
 }
@@ -429,6 +427,71 @@ impl DeadDefault for u32 {
 
 impl DeadDefault for () {
     fn dead() -> Self {}
+}
+
+/// The value that a refusal hands back through an out-param.
+trait Inert {
+    fn inert() -> Self;
+}
+
+impl Inert for u32 {
+    fn inert() -> Self {
+        0
+    }
+}
+
+impl Inert for BOOL {
+    fn inert() -> Self {
+        BOOL(0)
+    }
+}
+
+impl<T> Inert for *mut T {
+    fn inert() -> Self {
+        null_mut()
+    }
+}
+
+/// A checked, pre-cleared out-param.
+struct OutSlot<T>(NonNull<T>);
+
+impl<T: Inert> OutSlot<T> {
+    /// Claims `p` as `method`'s out-param, writing the inert `T` value if `p` is non-null and refusing otherwise.
+    ///
+    /// # Safety
+    /// `p` must be null or valid for writes of `T`.
+    unsafe fn claim(p: *mut T, method: &'static str) -> Option<Self> {
+        if let Some(p) = NonNull::new(p) {
+            unsafe { p.write(T::inert()) };
+            Some(Self(p))
+        } else {
+            let _ = refuse_null_out_param(method);
+            None
+        }
+    }
+
+    fn set(&self, value: T) {
+        unsafe { self.0.write(value) };
+    }
+}
+
+/// Claims a method's [`Inert`] out-params ([`OutSlot::claim`]) or refuses the call.
+macro_rules! claim_out {
+    ($p:ident ; $method:literal) => {
+        match unsafe { OutSlot::claim($p, concat!($method, "(", stringify!($p), ")")) } {
+            Some(slot) => slot,
+            None => return D3DERR_INVALIDCALL,
+        }
+    };
+}
+
+macro_rules! claim_opaque {
+    ($p:ident ; $method:literal) => {
+        match NonNull::new($p) {
+            Some(nn) => nn,
+            None => return refuse_null_out_param(concat!($method, "(", stringify!($p), ")")),
+        }
+    };
 }
 
 unsafe fn com_add_ref(p: *mut c_void) -> u32 {
@@ -465,15 +528,16 @@ macro_rules! stub8 {
             warn!(kind = "d3d8_stub", method = $method);
         }
     };
-    // `HRESULT`-returning stub with an interface out-slot.
-    // `nulls` sets the `*mut *mut c_void` argument to NULL before refusing, matching what real D3D8 hands back on failure.
-    ($fn_name:ident, $method:literal ( $($arg:ident : $ty:ty),* ) nulls $out:ident -> $ret:expr) => {
+    // Refusal with out-params.
+    ($fn_name:ident, $method:literal ( $($arg:ident : $ty:ty),* ) clears $($p:ident),+ -> $ret:expr) => {
         unsafe extern "system" fn $fn_name(_this: *mut c_void $(, $arg : $ty)*) -> HRESULT {
             $(let _ = $arg;)*
             warn!(kind = "d3d8_stub", method = $method);
-            if !$out.is_null() {
-                unsafe { $out.write(null_mut()) };
-            }
+            $(
+                if !$p.is_null() {
+                    unsafe { $p.write(Inert::inert()) };
+                }
+            )+
             $ret
         }
     };
@@ -675,35 +739,17 @@ unsafe fn wrap_created(
     vtbl: *const c_void,
     device: *mut Device8,
     lockable: bool,
-    out: *mut *mut c_void,
+    out: &OutSlot<*mut c_void>,
 ) -> HRESULT {
-    if out.is_null() {
-        // The D3D9 object already exists; without this a null out-pointer leaks one reference per call.
-        if hr.is_ok() && !inner.is_null() {
-            unsafe { com_release(inner) };
-        }
-        return D3DERR_INVALIDCALL;
-    }
     if hr.is_err() {
-        unsafe { *out = null_mut() };
         return hr;
     }
     let Some(inner) = NonNull::new(inner) else {
         warn!(kind = "d3d9_null_on_success", call);
-        unsafe { *out = null_mut() };
         return D3DERR_INVALIDCALL;
     };
-    unsafe { *out = Resource8::new_raw(vtbl, inner, device, lockable) };
+    out.set(unsafe { Resource8::new_raw(vtbl, inner, device, lockable) });
     hr
-}
-
-/// Refuses a `Create*`-style call on a dead device wrapper, nulling the out-slot like real D3D8 does on failure.
-unsafe fn refuse_dead_create(method: &'static str, out: *mut *mut c_void) -> HRESULT {
-    warn_dead_wrapper_call(method);
-    if !out.is_null() {
-        unsafe { out.write(null_mut()) };
-    }
-    D3DERR_INVALIDCALL
 }
 
 unsafe extern "system" fn resource8_release(this: *mut c_void) -> u32 {
@@ -727,21 +773,20 @@ unsafe extern "system" fn resource8_get_device(
     out: *mut *mut c_void,
 ) -> HRESULT {
     let h = unsafe { &*this.cast::<Resource8>() };
+    let out = claim_out!(out; "resource8_get_device");
     // A live receiver's backpointer target is itself alive: resources hold a device reference for their whole live period
     // (see `Resource8::new_raw`/`adopt`), so only the dead-receiver case needs refusing.
-    let _ = require_live!(h.header.inner(), "resource8_get_device", nulls out);
-    if out.is_null() || h.device.is_null() {
+    let _ = require_live!(h.header.inner(), "resource8_get_device");
+    if h.device.is_null() {
         return D3DERR_INVALIDCALL;
     }
-    unsafe {
-        wrap_add_ref(h.device.cast());
-        *out = h.device.cast();
-    }
+    unsafe { wrap_add_ref(h.device.cast()) };
+    out.set(h.device.cast());
     D3D_OK
 }
 
 stub8!(resource8_set_private_data, "IDirect3DResource8::SetPrivateData"(_refguid: *const GUID, _data: *const c_void, _size: u32, _flags: u32) -> D3D_OK);
-stub8!(resource8_get_private_data, "IDirect3DResource8::GetPrivateData"(_refguid: *const GUID, _data: *mut c_void, _size: *mut u32) -> D3DERR_NOTAVAILABLE);
+stub8!(resource8_get_private_data, "IDirect3DResource8::GetPrivateData"(_refguid: *const GUID, _data: *mut c_void, _size: *mut u32) clears _size -> D3DERR_NOTAVAILABLE);
 stub8!(resource8_free_private_data, "IDirect3DResource8::FreePrivateData"(_refguid: *const GUID) -> D3D_OK);
 forward8!(resource8_set_priority, unwrap8 / res9_vt.SetPriority(priority: u32) -> u32);
 stub8!(resource8_get_priority, "IDirect3DResource8::GetPriority"() -> u32 = 0);
@@ -830,13 +875,11 @@ unsafe extern "system" fn surface8_get_desc(
     this: *mut c_void,
     out: *mut D3DSurfaceDesc8,
 ) -> HRESULT {
-    if out.is_null() {
-        return D3DERR_INVALIDCALL;
-    }
+    let out = claim_opaque!(out; "surface8_get_desc");
     let inner = require_live!(unsafe { unwrap8(this) }, "surface8_get_desc");
     match unsafe { surface_desc9(inner) } {
         Ok(d9) => {
-            unsafe { *out = surface_desc_9_to_8(&d9) };
+            unsafe { out.write(surface_desc_9_to_8(&d9)) };
             D3D_OK
         }
         Err(hr) => hr,
@@ -903,14 +946,12 @@ unsafe extern "system" fn texture8_get_level_desc(
     level: u32,
     out: *mut D3DSurfaceDesc8,
 ) -> HRESULT {
-    if out.is_null() {
-        return D3DERR_INVALIDCALL;
-    }
+    let out = claim_opaque!(out; "texture8_get_level_desc");
     let inner = require_live!(unsafe { unwrap8(this) }, "texture8_get_level_desc");
     let mut d9 = D3DSURFACE_DESC::default();
     let hr = unsafe { (tex9_vt(inner).GetLevelDesc)(inner, level, &raw mut d9) };
     if hr.is_ok() {
-        unsafe { *out = surface_desc_9_to_8(&d9) };
+        unsafe { out.write(surface_desc_9_to_8(&d9)) };
     }
     hr
 }
@@ -921,7 +962,8 @@ unsafe extern "system" fn texture8_get_surface_level(
     out: *mut *mut c_void,
 ) -> HRESULT {
     let h = unsafe { &*this.cast::<Resource8>() };
-    let inner = require_live!(h.header.inner(), "texture8_get_surface_level", nulls out);
+    let out = claim_out!(out; "texture8_get_surface_level");
+    let inner = require_live!(h.header.inner(), "texture8_get_surface_level");
     let mut s9 = null_mut();
     let hr = unsafe { (tex9_vt(inner).GetSurfaceLevel)(inner, level, &raw mut s9) };
     // Texture levels are not directly lockable surfaces in the internal-flags sense.
@@ -933,7 +975,7 @@ unsafe extern "system" fn texture8_get_surface_level(
             (&raw const SURFACE8_VTBL).cast(),
             h.device,
             false,
-            out,
+            &out,
         )
     }
 }
@@ -1280,16 +1322,15 @@ unsafe extern "system" fn device8_get_direct3d(
     out: *mut *mut c_void,
 ) -> HRESULT {
     let d = unsafe { device8(this) };
+    let out = claim_out!(out; "device8_get_direct3d");
     // A live receiver's backpointer target is itself alive: the device holds a parent reference for its whole live period
     // (see `d3d8_create_device`), so only the dead-receiver case needs refusing.
-    let _ = require_live!(d.inner(), "device8_get_direct3d", nulls out);
-    if out.is_null() || d.parent.is_null() {
+    let _ = require_live!(d.inner(), "device8_get_direct3d");
+    if d.parent.is_null() {
         return D3DERR_INVALIDCALL;
     }
-    unsafe {
-        wrap_add_ref(d.parent.cast());
-        *out = d.parent.cast();
-    }
+    unsafe { wrap_add_ref(d.parent.cast()) };
+    out.set(d.parent.cast());
     D3D_OK
 }
 
@@ -1297,14 +1338,12 @@ unsafe extern "system" fn device8_get_device_caps(
     this: *mut c_void,
     out: *mut D3DCaps8,
 ) -> HRESULT {
-    if out.is_null() {
-        return D3DERR_INVALIDCALL;
-    }
+    let out = claim_opaque!(out; "device8_get_device_caps");
     let p = require_live!(unsafe { dev9(this) }, "device8_get_device_caps");
     let mut caps9 = D3DCAPS9::default();
     let hr = unsafe { (dev9_vt(p).base__.GetDeviceCaps)(p, &raw mut caps9) };
     if hr.is_ok() {
-        unsafe { *out = caps_9_to_8(&caps9) };
+        unsafe { out.write(caps_9_to_8(&caps9)) };
     }
     hr
 }
@@ -1314,7 +1353,7 @@ forward8!(device8_get_creation_parameters, dev9 / dev9_vt.base__.GetCreationPara
 stub8!(device8_set_cursor_properties, "IDirect3DDevice8::SetCursorProperties"(_x: u32, _y: u32, _bitmap: *mut c_void) -> D3D_OK);
 stub8!(device8_set_cursor_position, "IDirect3DDevice8::SetCursorPosition"(_x: u32, _y: u32, _flags: u32));
 stub8!(device8_show_cursor, "IDirect3DDevice8::ShowCursor"(_show: BOOL) -> BOOL = BOOL(0));
-stub8!(device8_create_additional_swap_chain, "IDirect3DDevice8::CreateAdditionalSwapChain"(_pp: *mut D3DPresentParameters8, _out: *mut *mut c_void) nulls _out -> D3DERR_NOTAVAILABLE);
+stub8!(device8_create_additional_swap_chain, "IDirect3DDevice8::CreateAdditionalSwapChain"(_pp: *mut D3DPresentParameters8, _out: *mut *mut c_void) clears _out -> D3DERR_NOTAVAILABLE);
 
 unsafe extern "system" fn device8_reset(
     this: *mut c_void,
@@ -1342,13 +1381,9 @@ unsafe extern "system" fn device8_get_back_buffer(
     out: *mut *mut c_void,
 ) -> HRESULT {
     let d = unsafe { device8(this) };
-
+    let out = claim_out!(out; "device8_get_back_buffer");
     let embedded = back_buffer == 0 && ty == D3DBACKBUFFER_TYPE_MONO;
-    if embedded && out.is_null() {
-        return D3DERR_INVALIDCALL;
-    }
-
-    let p = require_live!(d.inner(), "device8_get_back_buffer", nulls out);
+    let p = require_live!(d.inner(), "device8_get_back_buffer");
     let mut s9 = null_mut();
     let hr = unsafe { (dev9_vt(p).base__.GetBackBuffer)(p, 0, back_buffer, ty, &raw mut s9) };
     if !embedded {
@@ -1360,12 +1395,11 @@ unsafe extern "system" fn device8_get_back_buffer(
                 (&raw const SURFACE8_VTBL).cast(),
                 this.cast::<Device8>(),
                 true,
-                out,
+                &out,
             )
         };
     }
     if hr.is_err() {
-        unsafe { *out = null_mut() };
         return hr;
     }
     let Some(s9) = NonNull::new(s9) else {
@@ -1373,14 +1407,12 @@ unsafe extern "system" fn device8_get_back_buffer(
             kind = "d3d9_null_on_success",
             call = "IDirect3DDevice9::GetBackBuffer",
         );
-        unsafe { *out = null_mut() };
         return D3DERR_INVALIDCALL;
     };
     if !unsafe { d.back_buffer.adopt(s9) } {
-        unsafe { *out = null_mut() };
         return D3DERR_INVALIDCALL;
     }
-    unsafe { *out = (&raw const d.back_buffer).cast_mut().cast() };
+    out.set((&raw const d.back_buffer).cast_mut().cast());
     hr
 }
 
@@ -1410,7 +1442,8 @@ unsafe extern "system" fn device8_create_texture(
     pool: D3DPOOL,
     out: *mut *mut c_void,
 ) -> HRESULT {
-    let p = require_live!(unsafe { dev9(this) }, "device8_create_texture", nulls out);
+    let out = claim_out!(out; "device8_create_texture");
+    let p = require_live!(unsafe { dev9(this) }, "device8_create_texture");
     let mut t9 = null_mut();
     let hr = unsafe {
         (dev9_vt(p).base__.CreateTexture)(
@@ -1433,13 +1466,13 @@ unsafe extern "system" fn device8_create_texture(
             (&raw const TEXTURE8_VTBL).cast(),
             this.cast::<Device8>(),
             false,
-            out,
+            &out,
         )
     }
 }
 
-stub8!(device8_create_volume_texture, "IDirect3DDevice8::CreateVolumeTexture"(_w: u32, _h: u32, _d: u32, _levels: u32, _usage: u32, _format: D3DFORMAT, _pool: D3DPOOL, _out: *mut *mut c_void) nulls _out -> D3DERR_NOTAVAILABLE);
-stub8!(device8_create_cube_texture, "IDirect3DDevice8::CreateCubeTexture"(_edge: u32, _levels: u32, _usage: u32, _format: D3DFORMAT, _pool: D3DPOOL, _out: *mut *mut c_void) nulls _out -> D3DERR_NOTAVAILABLE);
+stub8!(device8_create_volume_texture, "IDirect3DDevice8::CreateVolumeTexture"(_w: u32, _h: u32, _d: u32, _levels: u32, _usage: u32, _format: D3DFORMAT, _pool: D3DPOOL, _out: *mut *mut c_void) clears _out -> D3DERR_NOTAVAILABLE);
+stub8!(device8_create_cube_texture, "IDirect3DDevice8::CreateCubeTexture"(_edge: u32, _levels: u32, _usage: u32, _format: D3DFORMAT, _pool: D3DPOOL, _out: *mut *mut c_void) clears _out -> D3DERR_NOTAVAILABLE);
 
 unsafe extern "system" fn device8_create_vertex_buffer(
     this: *mut c_void,
@@ -1449,7 +1482,8 @@ unsafe extern "system" fn device8_create_vertex_buffer(
     pool: D3DPOOL,
     out: *mut *mut c_void,
 ) -> HRESULT {
-    let p = require_live!(unsafe { dev9(this) }, "device8_create_vertex_buffer", nulls out);
+    let out = claim_out!(out; "device8_create_vertex_buffer");
+    let p = require_live!(unsafe { dev9(this) }, "device8_create_vertex_buffer");
     let mut vb9 = null_mut();
     let hr = unsafe {
         (dev9_vt(p).base__.CreateVertexBuffer)(
@@ -1470,12 +1504,12 @@ unsafe extern "system" fn device8_create_vertex_buffer(
             (&raw const VERTEX_BUFFER8_VTBL).cast(),
             this.cast::<Device8>(),
             false,
-            out,
+            &out,
         )
     }
 }
 
-stub8!(device8_create_index_buffer, "IDirect3DDevice8::CreateIndexBuffer"(_length: u32, _usage: u32, _format: D3DFORMAT, _pool: D3DPOOL, _out: *mut *mut c_void) nulls _out -> D3DERR_NOTAVAILABLE);
+stub8!(device8_create_index_buffer, "IDirect3DDevice8::CreateIndexBuffer"(_length: u32, _usage: u32, _format: D3DFORMAT, _pool: D3DPOOL, _out: *mut *mut c_void) clears _out -> D3DERR_NOTAVAILABLE);
 
 unsafe extern "system" fn device8_create_render_target(
     this: *mut c_void,
@@ -1486,7 +1520,8 @@ unsafe extern "system" fn device8_create_render_target(
     lockable: BOOL,
     out: *mut *mut c_void,
 ) -> HRESULT {
-    let p = require_live!(unsafe { dev9(this) }, "device8_create_render_target", nulls out);
+    let out = claim_out!(out; "device8_create_render_target");
+    let p = require_live!(unsafe { dev9(this) }, "device8_create_render_target");
     let mut s9 = null_mut();
     let hr = unsafe {
         (dev9_vt(p).base__.CreateRenderTarget)(
@@ -1509,13 +1544,13 @@ unsafe extern "system" fn device8_create_render_target(
             (&raw const SURFACE8_VTBL).cast(),
             this.cast::<Device8>(),
             lockable.0 != 0,
-            out,
+            &out,
         )
     }
 }
 
 // Every game's only depth buffer is the automatic one (`EnableAutoDepthStencil`, D16). No standalone depth-stencil surface is ever created.
-stub8!(device8_create_depth_stencil_surface, "IDirect3DDevice8::CreateDepthStencilSurface"(_width: u32, _height: u32, _format: D3DFORMAT, _multi_sample: D3DMULTISAMPLE_TYPE, _out: *mut *mut c_void) nulls _out -> D3DERR_NOTAVAILABLE);
+stub8!(device8_create_depth_stencil_surface, "IDirect3DDevice8::CreateDepthStencilSurface"(_width: u32, _height: u32, _format: D3DFORMAT, _multi_sample: D3DMULTISAMPLE_TYPE, _out: *mut *mut c_void) clears _out -> D3DERR_NOTAVAILABLE);
 
 /// D3D8's `CreateImageSurface` can create lockable sysmem surfaces. The D3D9 equivalent is an offscreen plain sysmem surface.
 unsafe extern "system" fn device8_create_image_surface(
@@ -1525,7 +1560,8 @@ unsafe extern "system" fn device8_create_image_surface(
     format: D3DFORMAT,
     out: *mut *mut c_void,
 ) -> HRESULT {
-    let p = require_live!(unsafe { dev9(this) }, "device8_create_image_surface", nulls out);
+    let out = claim_out!(out; "device8_create_image_surface");
+    let p = require_live!(unsafe { dev9(this) }, "device8_create_image_surface");
     let mut s9 = null_mut();
     let hr = unsafe {
         (dev9_vt(p).base__.CreateOffscreenPlainSurface)(
@@ -1547,7 +1583,7 @@ unsafe extern "system" fn device8_create_image_surface(
             (&raw const SURFACE8_VTBL).cast(),
             this.cast::<Device8>(),
             true,
-            out,
+            &out,
         )
     }
 }
@@ -1823,8 +1859,8 @@ unsafe extern "system" fn device8_update_texture(
 
 stub8!(device8_get_front_buffer, "IDirect3DDevice8::GetFrontBuffer"(_dst8: *mut c_void) -> D3DERR_NOTAVAILABLE);
 stub8!(device8_set_render_target, "IDirect3DDevice8::SetRenderTarget"(_rt8: *mut c_void, _zs8: *mut c_void) -> D3DERR_NOTAVAILABLE);
-stub8!(device8_get_render_target, "IDirect3DDevice8::GetRenderTarget"(_out: *mut *mut c_void) nulls _out -> D3DERR_NOTAVAILABLE);
-stub8!(device8_get_depth_stencil_surface, "IDirect3DDevice8::GetDepthStencilSurface"(_out: *mut *mut c_void) nulls _out -> D3DERR_NOTAVAILABLE);
+stub8!(device8_get_render_target, "IDirect3DDevice8::GetRenderTarget"(_out: *mut *mut c_void) clears _out -> D3DERR_NOTAVAILABLE);
+stub8!(device8_get_depth_stencil_surface, "IDirect3DDevice8::GetDepthStencilSurface"(_out: *mut *mut c_void) clears _out -> D3DERR_NOTAVAILABLE);
 forward8!(device8_begin_scene, dev9 / dev9_vt.base__.BeginScene() -> HRESULT);
 forward8!(device8_end_scene, dev9 / dev9_vt.base__.EndScene() -> HRESULT);
 forward8!(device8_clear, dev9 / dev9_vt.base__.Clear(count: u32, rects: *const D3DRECT, flags: u32, color: u32, z: f32, stencil: u32) -> HRESULT);
@@ -1840,7 +1876,7 @@ stub8!(device8_get_material, "IDirect3DDevice8::GetMaterial"(_material: *mut D3D
 stub8!(device8_set_light, "IDirect3DDevice8::SetLight"(_index: u32, _light: *const D3DLIGHT9) -> D3D_OK);
 stub8!(device8_get_light, "IDirect3DDevice8::GetLight"(_index: u32, _light: *mut D3DLIGHT9) -> D3DERR_NOTAVAILABLE);
 stub8!(device8_light_enable, "IDirect3DDevice8::LightEnable"(_index: u32, _enable: BOOL) -> D3D_OK);
-stub8!(device8_get_light_enable, "IDirect3DDevice8::GetLightEnable"(_index: u32, _enable: *mut BOOL) -> D3DERR_NOTAVAILABLE);
+stub8!(device8_get_light_enable, "IDirect3DDevice8::GetLightEnable"(_index: u32, _enable: *mut BOOL) clears _enable -> D3DERR_NOTAVAILABLE);
 stub8!(device8_set_clip_plane, "IDirect3DDevice8::SetClipPlane"(_index: u32, _plane: *const f32) -> D3D_OK);
 stub8!(device8_get_clip_plane, "IDirect3DDevice8::GetClipPlane"(_index: u32, _plane: *mut f32) -> D3DERR_NOTAVAILABLE);
 
@@ -1884,14 +1920,14 @@ unsafe extern "system" fn device8_set_render_state(
 
 stub8!(device8_get_render_state, "IDirect3DDevice8::GetRenderState"(_state: u32, _out: *mut u32) -> D3DERR_NOTAVAILABLE);
 stub8!(device8_begin_state_block, "IDirect3DDevice8::BeginStateBlock"() -> D3DERR_NOTAVAILABLE);
-stub8!(device8_end_state_block, "IDirect3DDevice8::EndStateBlock"(_out: *mut u32) -> D3DERR_NOTAVAILABLE);
+stub8!(device8_end_state_block, "IDirect3DDevice8::EndStateBlock"(_out_token: *mut u32) clears _out_token -> D3DERR_NOTAVAILABLE);
 stub8!(device8_apply_state_block, "IDirect3DDevice8::ApplyStateBlock"(_token: u32) -> D3DERR_NOTAVAILABLE);
 stub8!(device8_capture_state_block, "IDirect3DDevice8::CaptureStateBlock"(_token: u32) -> D3DERR_NOTAVAILABLE);
 stub8!(device8_delete_state_block, "IDirect3DDevice8::DeleteStateBlock"(_token: u32) -> D3DERR_NOTAVAILABLE);
 stub8!(device8_create_state_block, "IDirect3DDevice8::CreateStateBlock"(_ty: D3DSTATEBLOCKTYPE, _out: *mut u32) -> D3DERR_NOTAVAILABLE);
 stub8!(device8_set_clip_status, "IDirect3DDevice8::SetClipStatus"(_status: *const D3DCLIPSTATUS9) -> D3D_OK);
 stub8!(device8_get_clip_status, "IDirect3DDevice8::GetClipStatus"(_status: *mut D3DCLIPSTATUS9) -> D3DERR_NOTAVAILABLE);
-stub8!(device8_get_texture, "IDirect3DDevice8::GetTexture"(_stage: u32, _out: *mut *mut c_void) nulls _out -> D3DERR_NOTAVAILABLE);
+stub8!(device8_get_texture, "IDirect3DDevice8::GetTexture"(_stage: u32, _out: *mut *mut c_void) clears _out -> D3DERR_NOTAVAILABLE);
 unsafe extern "system" fn device8_set_texture(
     this: *mut c_void,
     stage: u32,
@@ -1926,18 +1962,18 @@ unsafe extern "system" fn device8_set_texture_stage_state(
     }
 }
 
-stub8!(device8_validate_device, "IDirect3DDevice8::ValidateDevice"(_passes: *mut u32) -> D3DERR_NOTAVAILABLE);
+stub8!(device8_validate_device, "IDirect3DDevice8::ValidateDevice"(_passes: *mut u32) clears _passes -> D3DERR_NOTAVAILABLE);
 stub8!(device8_get_info, "IDirect3DDevice8::GetInfo"(_info_id: u32, _info: *mut c_void, _size: u32) -> S_FALSE);
 stub8!(device8_set_palette_entries, "IDirect3DDevice8::SetPaletteEntries"(_num: u32, _entries: *const c_void) -> D3D_OK);
 stub8!(device8_get_palette_entries, "IDirect3DDevice8::GetPaletteEntries"(_num: u32, _entries: *mut c_void) -> D3DERR_NOTAVAILABLE);
 stub8!(device8_set_current_texture_palette, "IDirect3DDevice8::SetCurrentTexturePalette"(_num: u32) -> D3D_OK);
-stub8!(device8_get_current_texture_palette, "IDirect3DDevice8::GetCurrentTexturePalette"(_num: *mut u32) -> D3DERR_NOTAVAILABLE);
+stub8!(device8_get_current_texture_palette, "IDirect3DDevice8::GetCurrentTexturePalette"(_num: *mut u32) clears _num -> D3DERR_NOTAVAILABLE);
 forward8!(device8_draw_primitive, dev9 / dev9_vt.base__.DrawPrimitive(primitive_type: D3DPRIMITIVETYPE, start_vertex: u32, primitive_count: u32) -> HRESULT);
 stub8!(device8_draw_indexed_primitive, "IDirect3DDevice8::DrawIndexedPrimitive"(_primitive_type: D3DPRIMITIVETYPE, _min_index: u32, _num_vertices: u32, _start_index: u32, _primitive_count: u32) -> D3DERR_NOTAVAILABLE);
 forward8!(device8_draw_primitive_up, dev9 / dev9_vt.base__.DrawPrimitiveUP(primitive_type: D3DPRIMITIVETYPE, primitive_count: u32, vertex_data: *const c_void, vertex_stride: u32) -> HRESULT);
 stub8!(device8_draw_indexed_primitive_up, "IDirect3DDevice8::DrawIndexedPrimitiveUP"(_primitive_type: D3DPRIMITIVETYPE, _min_vertex_index: u32, _num_vertex_indices: u32, _primitive_count: u32, _index_data: *const c_void, _index_data_format: D3DFORMAT, _vertex_data: *const c_void, _vertex_stride: u32) -> D3DERR_NOTAVAILABLE);
 stub8!(device8_process_vertices, "IDirect3DDevice8::ProcessVertices"(_src_start: u32, _dest_index: u32, _count: u32, _dest_buffer: *mut c_void, _flags: u32) -> D3DERR_NOTAVAILABLE);
-stub8!(device8_create_vertex_shader, "IDirect3DDevice8::CreateVertexShader"(_declaration: *const u32, _function: *const u32, _handle: *mut u32, _usage: u32) -> D3DERR_NOTAVAILABLE);
+stub8!(device8_create_vertex_shader, "IDirect3DDevice8::CreateVertexShader"(_declaration: *const u32, _function: *const u32, _handle: *mut u32, _usage: u32) clears _handle -> D3DERR_NOTAVAILABLE);
 
 unsafe extern "system" fn device8_set_vertex_shader(this: *mut c_void, handle: u32) -> HRESULT {
     let p = require_live!(unsafe { dev9(this) }, "device8_set_vertex_shader");
@@ -1949,8 +1985,8 @@ stub8!(device8_get_vertex_shader, "IDirect3DDevice8::GetVertexShader"(_out: *mut
 stub8!(device8_delete_vertex_shader, "IDirect3DDevice8::DeleteVertexShader"(_handle: u32) -> D3D_OK);
 stub8!(device8_set_vertex_shader_constant, "IDirect3DDevice8::SetVertexShaderConstant"(_register: u32, _data: *const c_void, _count: u32) -> D3D_OK);
 stub8!(device8_get_vertex_shader_constant, "IDirect3DDevice8::GetVertexShaderConstant"(_register: u32, _data: *mut c_void, _count: u32) -> D3DERR_NOTAVAILABLE);
-stub8!(device8_get_vertex_shader_declaration, "IDirect3DDevice8::GetVertexShaderDeclaration"(_handle: u32, _data: *mut c_void, _size: *mut u32) -> D3DERR_NOTAVAILABLE);
-stub8!(device8_get_vertex_shader_function, "IDirect3DDevice8::GetVertexShaderFunction"(_handle: u32, _data: *mut c_void, _size: *mut u32) -> D3DERR_NOTAVAILABLE);
+stub8!(device8_get_vertex_shader_declaration, "IDirect3DDevice8::GetVertexShaderDeclaration"(_handle: u32, _data: *mut c_void, _size: *mut u32) clears _size -> D3DERR_NOTAVAILABLE);
+stub8!(device8_get_vertex_shader_function, "IDirect3DDevice8::GetVertexShaderFunction"(_handle: u32, _data: *mut c_void, _size: *mut u32) clears _size -> D3DERR_NOTAVAILABLE);
 
 unsafe extern "system" fn device8_set_stream_source(
     this: *mut c_void,
@@ -1965,16 +2001,16 @@ unsafe extern "system" fn device8_set_stream_source(
     unsafe { (dev9_vt(p).base__.SetStreamSource)(p, stream, vb9, 0, stride) }
 }
 
-stub8!(device8_get_stream_source, "IDirect3DDevice8::GetStreamSource"(_stream: u32, _out: *mut *mut c_void, _stride: *mut u32) nulls _out -> D3DERR_NOTAVAILABLE);
+stub8!(device8_get_stream_source, "IDirect3DDevice8::GetStreamSource"(_stream: u32, _out: *mut *mut c_void, _stride: *mut u32) clears _out, _stride -> D3DERR_NOTAVAILABLE);
 stub8!(device8_set_indices, "IDirect3DDevice8::SetIndices"(_ib8: *mut c_void, _base_vertex_index: u32) -> D3D_OK);
-stub8!(device8_get_indices, "IDirect3DDevice8::GetIndices"(_out: *mut *mut c_void, _base: *mut u32) nulls _out -> D3DERR_NOTAVAILABLE);
-stub8!(device8_create_pixel_shader, "IDirect3DDevice8::CreatePixelShader"(_function: *const u32, _handle: *mut u32) -> D3DERR_NOTAVAILABLE);
+stub8!(device8_get_indices, "IDirect3DDevice8::GetIndices"(_out: *mut *mut c_void, _base: *mut u32) clears _out, _base -> D3DERR_NOTAVAILABLE);
+stub8!(device8_create_pixel_shader, "IDirect3DDevice8::CreatePixelShader"(_function: *const u32, _handle: *mut u32) clears _handle -> D3DERR_NOTAVAILABLE);
 stub8!(device8_set_pixel_shader, "IDirect3DDevice8::SetPixelShader"(_handle: u32) -> D3D_OK);
 stub8!(device8_get_pixel_shader, "IDirect3DDevice8::GetPixelShader"(_out: *mut u32) -> D3DERR_NOTAVAILABLE);
 stub8!(device8_delete_pixel_shader, "IDirect3DDevice8::DeletePixelShader"(_handle: u32) -> D3D_OK);
 stub8!(device8_set_pixel_shader_constant, "IDirect3DDevice8::SetPixelShaderConstant"(_register: u32, _data: *const c_void, _count: u32) -> D3D_OK);
 stub8!(device8_get_pixel_shader_constant, "IDirect3DDevice8::GetPixelShaderConstant"(_register: u32, _data: *mut c_void, _count: u32) -> D3DERR_NOTAVAILABLE);
-stub8!(device8_get_pixel_shader_function, "IDirect3DDevice8::GetPixelShaderFunction"(_handle: u32, _data: *mut c_void, _size: *mut u32) -> D3DERR_NOTAVAILABLE);
+stub8!(device8_get_pixel_shader_function, "IDirect3DDevice8::GetPixelShaderFunction"(_handle: u32, _data: *mut c_void, _size: *mut u32) clears _size -> D3DERR_NOTAVAILABLE);
 stub8!(device8_draw_rect_patch, "IDirect3DDevice8::DrawRectPatch"(_handle: u32, _num_segs: *const f32, _info: *const c_void) -> D3DERR_NOTAVAILABLE);
 stub8!(device8_draw_tri_patch, "IDirect3DDevice8::DrawTriPatch"(_handle: u32, _num_segs: *const f32, _info: *const c_void) -> D3DERR_NOTAVAILABLE);
 stub8!(device8_delete_patch, "IDirect3DDevice8::DeletePatch"(_handle: u32) -> D3DERR_NOTAVAILABLE);
@@ -2106,11 +2142,7 @@ unsafe extern "system" fn d3d8_create_device(
     pp8: *mut D3DPresentParameters8,
     out: *mut *mut c_void,
 ) -> HRESULT {
-    if out.is_null() {
-        return D3DERR_INVALIDCALL;
-    }
-    unsafe { *out = null_mut() };
-
+    let out = claim_out!(out; "d3d8_create_device");
     let Some(pp8_ref) = (unsafe { pp8.as_mut() }) else {
         return D3DERR_INVALIDCALL;
     };
@@ -2159,10 +2191,8 @@ unsafe extern "system" fn d3d8_create_device(
             internal_flags: D3D8_INTERNAL_LOCKABLE,
         },
     }));
-    unsafe {
-        (*device).back_buffer.device = device;
-        *out = device.cast();
-    }
+    unsafe { (*device).back_buffer.device = device };
+    out.set(device.cast());
 
     info!(
         kind = "d3d8_device_created",
@@ -2254,9 +2284,10 @@ unsafe extern "system" fn hook_direct3dcreate8(sdk_version: u32) -> *mut c_void 
 mod tests {
     use super::{
         ComHeader, D3D_OK, D3D8_INTERNAL_LOCKABLE, D3DERR_INVALIDCALL, D3DPresentParameters8,
-        DEVICE8_VTBL, Device8, Resource8, SURFACE8_VTBL, Surface8Vtbl, TEXTURE8_VTBL, Texture8Vtbl,
-        caps_9_to_8, convert_present_params, copy_rect_valid, device8_release, device8_set_texture,
-        resource8_release, surface_desc_9_to_8, unwrap8, unwrap8_arg, wrap_add_ref, wrap_created,
+        DEVICE8_VTBL, Device8, OutSlot, Resource8, SURFACE8_VTBL, Surface8Vtbl, TEXTURE8_VTBL,
+        Texture8Vtbl, caps_9_to_8, convert_present_params, copy_rect_valid, device8_release,
+        device8_set_texture, resource8_release, surface_desc_9_to_8, unwrap8, unwrap8_arg,
+        wrap_add_ref, wrap_created,
     };
     use crate::fmt_hr;
     use std::cell::Cell;
@@ -2430,7 +2461,7 @@ mod tests {
                     (&raw const SURFACE8_VTBL).cast(),
                     null_mut(),
                     false,
-                    &raw mut out,
+                    &OutSlot::claim(&raw mut out, "test").unwrap(),
                 )
             };
             assert_eq!(hr, expected, "returned {}", fmt_hr!(returned));
@@ -2450,7 +2481,7 @@ mod tests {
                 (&raw const SURFACE8_VTBL).cast(),
                 null_mut(),
                 true,
-                &raw mut out,
+                &OutSlot::claim(&raw mut out, "test").unwrap(),
             )
         };
         assert_eq!(hr, D3D_OK);
@@ -2570,7 +2601,7 @@ mod tests {
                 (&raw const SURFACE8_VTBL).cast(),
                 null_mut(),
                 true,
-                &raw mut out,
+                &OutSlot::claim(&raw mut out, "test").unwrap(),
             )
         };
         assert_eq!(hr, D3D_OK);
@@ -2598,7 +2629,7 @@ mod tests {
                 (&raw const TEXTURE8_VTBL).cast(),
                 null_mut(),
                 false,
-                &raw mut tex_out,
+                &OutSlot::claim(&raw mut tex_out, "test").unwrap(),
             )
         };
         assert_eq!(hr, D3D_OK);
@@ -2643,7 +2674,7 @@ mod tests {
                 (&raw const TEXTURE8_VTBL).cast(),
                 null_mut(),
                 false,
-                &raw mut tex_out,
+                &OutSlot::claim(&raw mut tex_out, "test").unwrap(),
             )
         };
         assert_eq!(hr, D3D_OK);
@@ -2668,7 +2699,7 @@ mod tests {
                 (&raw const TEXTURE8_VTBL).cast(),
                 null_mut(),
                 false,
-                &raw mut live_out,
+                &OutSlot::claim(&raw mut live_out, "test").unwrap(),
             );
             assert_eq!(hr, D3D_OK);
             assert!(matches!(unwrap8_arg(live_out, "test"), Ok(p) if p == live.ptr()));
