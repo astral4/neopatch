@@ -1005,22 +1005,36 @@ struct Buffer8Vtbl {
 
 const _: () = assert!(size_of::<Buffer8Vtbl>() == 14 * 4);
 
-static VERTEX_BUFFER8_VTBL: Buffer8Vtbl = Buffer8Vtbl {
-    query_interface: wrap_query_interface,
-    add_ref: wrap_add_ref,
-    release: resource8_release,
-    get_device: resource8_get_device,
-    set_private_data: resource8_set_private_data,
-    get_private_data: resource8_get_private_data,
-    free_private_data: resource8_free_private_data,
-    set_priority: resource8_set_priority,
-    get_priority: resource8_get_priority,
-    pre_load: resource8_pre_load,
-    get_type: resource8_get_type,
-    lock: vertex_buffer8_lock,
-    unlock: vertex_buffer8_unlock,
-    get_desc: vertex_buffer8_get_desc,
-};
+impl Buffer8Vtbl {
+    const fn new(
+        lock: unsafe extern "system" fn(*mut c_void, u32, u32, *mut *mut u8, u32) -> HRESULT,
+        unlock: unsafe extern "system" fn(*mut c_void) -> HRESULT,
+        get_desc: unsafe extern "system" fn(*mut c_void, *mut c_void) -> HRESULT,
+    ) -> Self {
+        Self {
+            query_interface: wrap_query_interface,
+            add_ref: wrap_add_ref,
+            release: resource8_release,
+            get_device: resource8_get_device,
+            set_private_data: resource8_set_private_data,
+            get_private_data: resource8_get_private_data,
+            free_private_data: resource8_free_private_data,
+            set_priority: resource8_set_priority,
+            get_priority: resource8_get_priority,
+            pre_load: resource8_pre_load,
+            get_type: resource8_get_type,
+            lock,
+            unlock,
+            get_desc,
+        }
+    }
+}
+
+static VERTEX_BUFFER8_VTBL: Buffer8Vtbl = Buffer8Vtbl::new(
+    vertex_buffer8_lock,
+    vertex_buffer8_unlock,
+    vertex_buffer8_get_desc,
+);
 
 forward8!(vertex_buffer8_lock, unwrap8 / vb9_vt.Lock(offset: u32, size: u32, data: *mut *mut u8, flags: u32) -> HRESULT => (offset, size, data.cast(), flags));
 forward8!(vertex_buffer8_unlock, unwrap8 / vb9_vt.Unlock() -> HRESULT);
