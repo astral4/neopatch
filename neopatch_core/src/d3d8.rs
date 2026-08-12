@@ -476,6 +476,10 @@ impl<T: Inert> OutSlot<T> {
     fn set(&self, value: T) {
         unsafe { self.0.write(value) };
     }
+
+    fn as_ptr(&self) -> *mut T {
+        self.0.as_ptr()
+    }
 }
 
 /// Claims a method's [`Inert`] out-params ([`OutSlot::claim`]) or refuses the call.
@@ -2109,45 +2113,113 @@ stub8!(device8_get_light_enable, "IDirect3DDevice8::GetLightEnable"(_index: u32,
 stub8!(device8_set_clip_plane, "IDirect3DDevice8::SetClipPlane"(_index: u32, _plane: *const f32) -> D3D_OK);
 stub8!(device8_get_clip_plane, "IDirect3DDevice8::GetClipPlane"(_index: u32, _plane: *mut f32) -> D3DERR_NOTAVAILABLE);
 
+/// How a D3D8 render state is expressed in D3D9.
+enum Rs8Route {
+    /// Removed in D3D9 with no (or only a lossy) equivalent. `noisy` determines log level.
+    Dropped { noisy: bool },
+    /// Moved to the device-level `SoftwareVertexProcessing` call pair.
+    SoftwareVertexProcessing,
+    /// Moved to the device-level `NPatchMode` call pair.
+    NPatchMode,
+    /// Forwards unchanged.
+    Forward,
+}
+
+impl Rs8Route {
+    fn from_state(state: u32) -> Rs8Route {
+        const D3DRS8_LINEPATTERN: u32 = 10;
+        const D3DRS8_ZVISIBLE: u32 = 30;
+        const D3DRS8_EDGEANTIALIAS: u32 = 40;
+        const D3DRS8_ZBIAS: u32 = 47;
+        const D3DRS8_SOFTWAREVERTEXPROCESSING: u32 = 153;
+        const D3DRS8_PATCHSEGMENTS: u32 = 164;
+
+        match state {
+            // th07/th08 unconditionally set this to 0 (disabled) at initialization, so dropping it is fine.
+            D3DRS8_EDGEANTIALIAS => Rs8Route::Dropped { noisy: false },
+            // LINEPATTERN and ZVISIBLE have no D3D9 equivalent. ZBIAS has only a lossy heuristic translation to DEPTHBIAS, so it's dropped too.
+            D3DRS8_LINEPATTERN | D3DRS8_ZVISIBLE | D3DRS8_ZBIAS => {
+                Rs8Route::Dropped { noisy: true }
+            }
+            D3DRS8_SOFTWAREVERTEXPROCESSING => Rs8Route::SoftwareVertexProcessing,
+            D3DRS8_PATCHSEGMENTS => Rs8Route::NPatchMode,
+            _ => Rs8Route::Forward,
+        }
+    }
+}
+
+/// Drops a refusal from a device-level D3D9 call that a render state was translated to.
+fn drop_render_state_refusal(state: u32, value: u32, hr: HRESULT) -> HRESULT {
+    if hr.is_err() {
+        warn!(
+            kind = "d3d8_render_state_translation_refused",
+            state,
+            value,
+            hr = %fmt_hr!(hr),
+        );
+    }
+    D3D_OK
+}
+
 unsafe extern "system" fn device8_set_render_state(
     this: *mut c_void,
     state: u32,
     value: u32,
 ) -> HRESULT {
-    // These are D3D8 `D3DRENDERSTATETYPE` values that were removed in D3D9.
-    const D3DRS8_LINEPATTERN: u32 = 10;
-    const D3DRS8_ZVISIBLE: u32 = 30;
-    const D3DRS8_EDGEANTIALIAS: u32 = 40;
-    const D3DRS8_ZBIAS: u32 = 47;
-    const D3DRS8_SOFTWAREVERTEXPROCESSING: u32 = 153;
-    const D3DRS8_PATCHSEGMENTS: u32 = 164;
-
     let p = require_live!(unsafe { dev9(this) }, "device8_set_render_state");
-
-    match state {
-        // th07/th08 unconditionally set this to 0 (disabled) at initialization, so dropping this is fine.
-        D3DRS8_EDGEANTIALIAS => {
-            debug!(kind = "d3d8_render_state_dropped", state, value);
+    match Rs8Route::from_state(state) {
+        Rs8Route::Dropped { noisy } => {
+            log_at!(!noisy => debug / warn, kind = "d3d8_render_state_dropped", state, value);
             D3D_OK
         }
-        // LINEPATTERN and ZVISIBLE have no D3D9 equivalent. ZBIAS has only a lossy heuristic translation to DEPTHBIAS, so it's dropped.
-        D3DRS8_LINEPATTERN | D3DRS8_ZVISIBLE | D3DRS8_ZBIAS => {
-            warn!(kind = "d3d8_render_state_dropped", state, value);
-            D3D_OK
+        Rs8Route::SoftwareVertexProcessing => {
+            let hr = unsafe {
+                (dev9_vt(p).base__.SetSoftwareVertexProcessing)(p, BOOL(value.cast_signed()))
+            };
+            drop_render_state_refusal(state, value, hr)
         }
-        D3DRS8_SOFTWAREVERTEXPROCESSING => unsafe {
-            (dev9_vt(p).base__.SetSoftwareVertexProcessing)(p, BOOL(value.cast_signed()))
-        },
-        D3DRS8_PATCHSEGMENTS => unsafe {
-            (dev9_vt(p).base__.SetNPatchMode)(p, f32::from_bits(value))
-        },
-        _ => unsafe {
+        Rs8Route::NPatchMode => {
+            let hr = unsafe { (dev9_vt(p).base__.SetNPatchMode)(p, f32::from_bits(value)) };
+            drop_render_state_refusal(state, value, hr)
+        }
+        Rs8Route::Forward => unsafe {
             (dev9_vt(p).base__.SetRenderState)(p, D3DRENDERSTATETYPE(state.cast_signed()), value)
         },
     }
 }
 
-stub8!(device8_get_render_state, "IDirect3DDevice8::GetRenderState"(_state: u32, _out: *mut u32) -> D3DERR_NOTAVAILABLE);
+unsafe extern "system" fn device8_get_render_state(
+    this: *mut c_void,
+    state: u32,
+    out: *mut u32,
+) -> HRESULT {
+    let out = claim_out!(out; "device8_get_render_state");
+    let p = require_live!(unsafe { dev9(this) }, "device8_get_render_state");
+    match Rs8Route::from_state(state) {
+        // Writes are dropped, so the device doesn't hold anything to read back. This differs from real D3D8,
+        // which would return whatever the game last set.
+        Rs8Route::Dropped { .. } => D3D_OK,
+        Rs8Route::SoftwareVertexProcessing => {
+            let on = unsafe { (dev9_vt(p).base__.GetSoftwareVertexProcessing)(p) };
+            out.set(u32::from(on.as_bool()));
+            D3D_OK
+        }
+        Rs8Route::NPatchMode => {
+            let segments = unsafe { (dev9_vt(p).base__.GetNPatchMode)(p) };
+            out.set(segments.to_bits());
+            D3D_OK
+        }
+        // For states that a game never sets, this returns the D3D9 default.
+        // Notably, the default value of `D3DRS_POINTSIZE_MIN` is 0.0 in D3D8 and 1.0 in D3D9.
+        Rs8Route::Forward => unsafe {
+            (dev9_vt(p).base__.GetRenderState)(
+                p,
+                D3DRENDERSTATETYPE(state.cast_signed()),
+                out.as_ptr(),
+            )
+        },
+    }
+}
 stub8!(device8_begin_state_block, "IDirect3DDevice8::BeginStateBlock"() -> D3DERR_NOTAVAILABLE);
 stub8!(device8_end_state_block, "IDirect3DDevice8::EndStateBlock"(_out_token: *mut u32) clears _out_token -> D3DERR_NOTAVAILABLE);
 
@@ -2688,9 +2760,9 @@ mod tests {
         convert_present_params, copy_rect_valid, device8_apply_state_block,
         device8_capture_state_block, device8_create_index_buffer, device8_create_state_block,
         device8_delete_state_block, device8_draw_indexed_primitive, device8_end_state_block,
-        device8_get_indices, device8_get_transform, device8_release, device8_reset,
-        device8_set_indices, device8_set_texture, resource8_release, surface_desc_9_to_8, unwrap8,
-        unwrap8_arg, wrap_add_ref, wrap_created,
+        device8_get_indices, device8_get_render_state, device8_get_transform, device8_release,
+        device8_reset, device8_set_indices, device8_set_render_state, device8_set_texture,
+        resource8_release, surface_desc_9_to_8, unwrap8, unwrap8_arg, wrap_add_ref, wrap_created,
     };
     use crate::fmt_hr;
     use std::cell::Cell;
@@ -3363,6 +3435,16 @@ mod tests {
         create_sb_calls: Cell<u32>,
         sb_to_return: Cell<*mut c_void>,
         get_transform_calls: Cell<u32>,
+        rs_to_return: Cell<u32>,
+        get_rs_calls: Cell<u32>,
+        svp_to_return: Cell<bool>,
+        npatch_to_return: Cell<f32>,
+        svp_set_calls: Cell<u32>,
+        last_svp_set: Cell<Option<bool>>,
+        fail_svp_set: Cell<bool>,
+        npatch_set_calls: Cell<u32>,
+        last_npatch_set: Cell<f32>,
+        fail_npatch_set: Cell<bool>,
         create_ib_calls: Cell<u32>,
         last_ib_pool: Cell<D3DPOOL>,
         last_ib_usage: Cell<u32>,
@@ -3378,6 +3460,11 @@ mod tests {
         vt.base__.SetIndices = mock9_set_indices;
         vt.base__.DrawIndexedPrimitive = mock9_draw_indexed_primitive;
         vt.base__.GetTransform = mock9_get_transform;
+        vt.base__.GetRenderState = mock9_get_render_state;
+        vt.base__.GetSoftwareVertexProcessing = mock9_get_software_vertex_processing;
+        vt.base__.GetNPatchMode = mock9_get_npatch_mode;
+        vt.base__.SetSoftwareVertexProcessing = mock9_set_software_vertex_processing;
+        vt.base__.SetNPatchMode = mock9_set_npatch_mode;
         vt
     });
 
@@ -3416,6 +3503,50 @@ mod tests {
     ) -> HRESULT {
         let m = unsafe { &*this.cast::<MockDev9>() };
         m.get_transform_calls.update(|n| n + 1);
+        D3D_OK
+    }
+
+    unsafe extern "system" fn mock9_get_render_state(
+        this: *mut c_void,
+        _state: super::D3DRENDERSTATETYPE,
+        out: *mut u32,
+    ) -> HRESULT {
+        let m = unsafe { &*this.cast::<MockDev9>() };
+        m.get_rs_calls.update(|n| n + 1);
+        unsafe { out.write(m.rs_to_return.get()) };
+        D3D_OK
+    }
+
+    unsafe extern "system" fn mock9_get_software_vertex_processing(this: *mut c_void) -> BOOL {
+        let m = unsafe { &*this.cast::<MockDev9>() };
+        BOOL(i32::from(m.svp_to_return.get()))
+    }
+
+    unsafe extern "system" fn mock9_get_npatch_mode(this: *mut c_void) -> f32 {
+        let m = unsafe { &*this.cast::<MockDev9>() };
+        m.npatch_to_return.get()
+    }
+
+    unsafe extern "system" fn mock9_set_software_vertex_processing(
+        this: *mut c_void,
+        software: BOOL,
+    ) -> HRESULT {
+        let m = unsafe { &*this.cast::<MockDev9>() };
+        m.svp_set_calls.update(|n| n + 1);
+        if m.fail_svp_set.get() {
+            return D3DERR_INVALIDCALL;
+        }
+        m.last_svp_set.set(Some(software.as_bool()));
+        D3D_OK
+    }
+
+    unsafe extern "system" fn mock9_set_npatch_mode(this: *mut c_void, segments: f32) -> HRESULT {
+        let m = unsafe { &*this.cast::<MockDev9>() };
+        m.npatch_set_calls.update(|n| n + 1);
+        if m.fail_npatch_set.get() {
+            return D3DERR_INVALIDCALL;
+        }
+        m.last_npatch_set.set(segments);
         D3D_OK
     }
 
@@ -3950,6 +4081,86 @@ mod tests {
             assert_eq!(token, 0);
 
             drop(Box::from_raw(device));
+        }
+    }
+
+    #[test]
+    fn render_state_readback_is_inverse() {
+        let dev9 = MockDev9::new();
+        let device = mock_device8(dev9.nn());
+        dev9.rs_to_return.set(2); // D3DCULL_CW
+        dev9.svp_to_return.set(true);
+        dev9.npatch_to_return.set(4.0);
+        unsafe {
+            let mut v = 0u32;
+            assert_eq!(
+                device8_get_render_state(device.cast(), 22, &raw mut v),
+                D3D_OK,
+            );
+            assert_eq!(v, 2);
+            assert_eq!(dev9.get_rs_calls.get(), 1);
+
+            let mut z = 0xdead_beef_u32;
+            assert_eq!(
+                device8_get_render_state(device.cast(), 47, &raw mut z),
+                D3D_OK,
+            );
+            assert_eq!(z, 0);
+            assert_eq!(dev9.get_rs_calls.get(), 1);
+
+            let mut svp = 0u32;
+            assert_eq!(
+                device8_get_render_state(device.cast(), 153, &raw mut svp),
+                D3D_OK,
+            );
+            assert_eq!(svp, 1);
+
+            let mut seg = 0u32;
+            assert_eq!(
+                device8_get_render_state(device.cast(), 164, &raw mut seg),
+                D3D_OK,
+            );
+            assert_eq!(seg, 4.0f32.to_bits());
+
+            drop_mock_device8(device);
+        }
+    }
+
+    #[test]
+    fn render_state_translation_refusals_dropped() {
+        const D3DRS8_SOFTWAREVERTEXPROCESSING: u32 = 153;
+        const D3DRS8_PATCHSEGMENTS: u32 = 164;
+        let dev9 = MockDev9::new();
+        let device = mock_device8(dev9.nn());
+        unsafe {
+            assert_eq!(
+                device8_set_render_state(device.cast(), D3DRS8_SOFTWAREVERTEXPROCESSING, 1),
+                D3D_OK,
+            );
+            assert_eq!(dev9.last_svp_set.get(), Some(true));
+            assert_eq!(
+                device8_set_render_state(device.cast(), D3DRS8_PATCHSEGMENTS, 4.0f32.to_bits()),
+                D3D_OK,
+            );
+            assert_eq!(dev9.last_npatch_set.get().to_bits(), 4.0f32.to_bits());
+
+            dev9.fail_svp_set.set(true);
+            dev9.fail_npatch_set.set(true);
+            assert_eq!(
+                device8_set_render_state(device.cast(), D3DRS8_SOFTWAREVERTEXPROCESSING, 0),
+                D3D_OK,
+            );
+            assert_eq!(
+                device8_set_render_state(device.cast(), D3DRS8_PATCHSEGMENTS, 1.0f32.to_bits()),
+                D3D_OK,
+            );
+            assert_eq!(dev9.svp_set_calls.get(), 2);
+            assert_eq!(dev9.npatch_set_calls.get(), 2);
+
+            assert_eq!(dev9.last_svp_set.get(), Some(true));
+            assert_eq!(dev9.last_npatch_set.get().to_bits(), 4.0f32.to_bits());
+
+            drop_mock_device8(device);
         }
     }
 
