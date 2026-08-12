@@ -2425,13 +2425,32 @@ stub8!(device8_draw_indexed_primitive_up, "IDirect3DDevice8::DrawIndexedPrimitiv
 stub8!(device8_process_vertices, "IDirect3DDevice8::ProcessVertices"(_src_start: u32, _dest_index: u32, _count: u32, _dest_buffer: *mut c_void, _flags: u32) -> D3DERR_NOTAVAILABLE);
 stub8!(device8_create_vertex_shader, "IDirect3DDevice8::CreateVertexShader"(_declaration: *const u32, _function: *const u32, _handle: *mut u32, _usage: u32) clears _handle -> D3DERR_NOTAVAILABLE);
 
+fn refuse_fabricated_shader_handle(method: &'static str, handle: u32) -> HRESULT {
+    warn!(
+        kind = "d3d8_fabricated_shader_handle",
+        method,
+        handle = format_args!("{handle:#x}"),
+    );
+    D3DERR_INVALIDCALL
+}
+
 unsafe extern "system" fn device8_set_vertex_shader(this: *mut c_void, handle: u32) -> HRESULT {
+    const VS_HIGHESTFIXEDFXF: u32 = 0xF000_0000;
+
     let p = require_live!(unsafe { dev9(this) }, "device8_set_vertex_shader");
-    // The games never create shaders, so every handle is an FVF code.
+    if handle > VS_HIGHESTFIXEDFXF {
+        // D3D8 vertex-shader handles double as FVF codes, with created-shader handles being above the FVF ceiling.
+        // We don't implement `CreateVertexShader`, so no genuine handle can actually exist here.
+        return refuse_fabricated_shader_handle("IDirect3DDevice8::SetVertexShader", handle);
+    }
     unsafe { (dev9_vt(p).base__.SetFVF)(p, handle) }
 }
 
-stub8!(device8_get_vertex_shader, "IDirect3DDevice8::GetVertexShader"(_out: *mut u32) -> D3DERR_NOTAVAILABLE);
+unsafe extern "system" fn device8_get_vertex_shader(this: *mut c_void, out: *mut u32) -> HRESULT {
+    let out = claim_out!(out; "device8_get_vertex_shader");
+    let p = require_live!(unsafe { dev9(this) }, "device8_get_vertex_shader");
+    unsafe { (dev9_vt(p).base__.GetFVF)(p, out.as_ptr()) }
+}
 stub8!(device8_delete_vertex_shader, "IDirect3DDevice8::DeleteVertexShader"(_handle: u32) -> D3D_OK);
 stub8!(device8_set_vertex_shader_constant, "IDirect3DDevice8::SetVertexShaderConstant"(_register: u32, _data: *const c_void, _count: u32) -> D3D_OK);
 stub8!(device8_get_vertex_shader_constant, "IDirect3DDevice8::GetVertexShaderConstant"(_register: u32, _data: *mut c_void, _count: u32) -> D3DERR_NOTAVAILABLE);
@@ -2494,8 +2513,23 @@ unsafe extern "system" fn device8_get_indices(
     D3D_OK
 }
 stub8!(device8_create_pixel_shader, "IDirect3DDevice8::CreatePixelShader"(_function: *const u32, _handle: *mut u32) clears _handle -> D3DERR_NOTAVAILABLE);
-stub8!(device8_set_pixel_shader, "IDirect3DDevice8::SetPixelShader"(_handle: u32) -> D3D_OK);
-stub8!(device8_get_pixel_shader, "IDirect3DDevice8::GetPixelShader"(_out: *mut u32) -> D3DERR_NOTAVAILABLE);
+
+unsafe extern "system" fn device8_set_pixel_shader(this: *mut c_void, handle: u32) -> HRESULT {
+    let p = require_live!(unsafe { dev9(this) }, "device8_set_pixel_shader");
+    if handle != 0 {
+        // The only pixel-shader state reachable through this translation layer is "none", since we don't implement `CreatePixelShader`.
+        return refuse_fabricated_shader_handle("IDirect3DDevice8::SetPixelShader", handle);
+    }
+    unsafe { (dev9_vt(p).base__.SetPixelShader)(p, null_mut()) }
+}
+
+unsafe extern "system" fn device8_get_pixel_shader(this: *mut c_void, out: *mut u32) -> HRESULT {
+    // `CreatePixelShader` is unimplemented and `SetPixelShader` only accepts zero, so the current handle must be the null shader.
+    let _out = claim_out!(out; "device8_get_pixel_shader");
+    let _ = require_live!(unsafe { dev9(this) }, "device8_get_pixel_shader");
+    D3D_OK
+}
+
 stub8!(device8_delete_pixel_shader, "IDirect3DDevice8::DeletePixelShader"(_handle: u32) -> D3D_OK);
 stub8!(device8_set_pixel_shader_constant, "IDirect3DDevice8::SetPixelShaderConstant"(_register: u32, _data: *const c_void, _count: u32) -> D3D_OK);
 stub8!(device8_get_pixel_shader_constant, "IDirect3DDevice8::GetPixelShaderConstant"(_register: u32, _data: *mut c_void, _count: u32) -> D3DERR_NOTAVAILABLE);
@@ -2781,9 +2815,10 @@ mod tests {
         convert_present_params, copy_rect_valid, device8_apply_state_block,
         device8_capture_state_block, device8_create_index_buffer, device8_create_state_block,
         device8_delete_state_block, device8_draw_indexed_primitive, device8_end_state_block,
-        device8_get_indices, device8_get_render_state, device8_get_texture_stage_state,
-        device8_get_transform, device8_release, device8_reset, device8_set_indices,
-        device8_set_render_state, device8_set_texture, resource8_release, surface_desc_9_to_8,
+        device8_get_indices, device8_get_pixel_shader, device8_get_render_state,
+        device8_get_texture_stage_state, device8_get_transform, device8_release, device8_reset,
+        device8_set_indices, device8_set_pixel_shader, device8_set_render_state,
+        device8_set_texture, device8_set_vertex_shader, resource8_release, surface_desc_9_to_8,
         unwrap8, unwrap8_arg, wrap_add_ref, wrap_created,
     };
     use crate::fmt_hr;
@@ -3461,6 +3496,10 @@ mod tests {
         get_rs_calls: Cell<u32>,
         sampler_to_return: Cell<u32>,
         tss_to_return: Cell<u32>,
+        set_pixel_shader_calls: Cell<u32>,
+        last_pixel_shader: Cell<*mut c_void>,
+        set_fvf_calls: Cell<u32>,
+        last_fvf_set: Cell<u32>,
         svp_to_return: Cell<bool>,
         npatch_to_return: Cell<f32>,
         svp_set_calls: Cell<u32>,
@@ -3485,6 +3524,8 @@ mod tests {
         vt.base__.DrawIndexedPrimitive = mock9_draw_indexed_primitive;
         vt.base__.GetTransform = mock9_get_transform;
         vt.base__.GetRenderState = mock9_get_render_state;
+        vt.base__.SetPixelShader = mock9_set_pixel_shader;
+        vt.base__.SetFVF = mock9_set_fvf;
         vt.base__.GetSamplerState = mock9_get_sampler_state;
         vt.base__.GetTextureStageState = mock9_get_texture_stage_state;
         vt.base__.GetSoftwareVertexProcessing = mock9_get_software_vertex_processing;
@@ -3540,6 +3581,23 @@ mod tests {
         let m = unsafe { &*this.cast::<MockDev9>() };
         m.get_rs_calls.update(|n| n + 1);
         unsafe { out.write(m.rs_to_return.get()) };
+        D3D_OK
+    }
+
+    unsafe extern "system" fn mock9_set_pixel_shader(
+        this: *mut c_void,
+        shader: *mut c_void,
+    ) -> HRESULT {
+        let m = unsafe { &*this.cast::<MockDev9>() };
+        m.set_pixel_shader_calls.update(|n| n + 1);
+        m.last_pixel_shader.set(shader);
+        D3D_OK
+    }
+
+    unsafe extern "system" fn mock9_set_fvf(this: *mut c_void, fvf: u32) -> HRESULT {
+        let m = unsafe { &*this.cast::<MockDev9>() };
+        m.set_fvf_calls.update(|n| n + 1);
+        m.last_fvf_set.set(fvf);
         D3D_OK
     }
 
@@ -4129,6 +4187,51 @@ mod tests {
             assert_eq!(token, 0);
 
             drop(Box::from_raw(device));
+        }
+    }
+
+    #[test]
+    fn pixel_shader_pinned_to_null_shader() {
+        let dev9 = MockDev9::new();
+        let device = mock_device8(dev9.nn());
+        unsafe {
+            assert_eq!(device8_set_pixel_shader(device.cast(), 0), D3D_OK);
+            assert_eq!(dev9.set_pixel_shader_calls.get(), 1);
+            assert!(dev9.last_pixel_shader.get().is_null());
+
+            assert_eq!(
+                device8_set_pixel_shader(device.cast(), 0xcb01),
+                D3DERR_INVALIDCALL,
+            );
+            assert_eq!(dev9.set_pixel_shader_calls.get(), 1);
+
+            let mut ps = 0xdead_beef_u32;
+            assert_eq!(device8_get_pixel_shader(device.cast(), &raw mut ps), D3D_OK);
+            assert_eq!(ps, 0);
+
+            drop_mock_device8(device);
+        }
+    }
+
+    #[test]
+    fn set_vertex_shader_fvf_ceiling() {
+        let dev9 = MockDev9::new();
+        let device = mock_device8(dev9.nn());
+        unsafe {
+            assert_eq!(
+                device8_set_vertex_shader(device.cast(), 0xF000_0000),
+                D3D_OK
+            );
+            assert_eq!(dev9.last_fvf_set.get(), 0xF000_0000);
+            assert_eq!(dev9.set_fvf_calls.get(), 1);
+
+            assert_eq!(
+                device8_set_vertex_shader(device.cast(), 0xF000_0001),
+                D3DERR_INVALIDCALL,
+            );
+            assert_eq!(dev9.set_fvf_calls.get(), 1);
+
+            drop_mock_device8(device);
         }
     }
 
