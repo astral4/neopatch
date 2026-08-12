@@ -1,7 +1,38 @@
 //! D3D8 to D3D9Ex translation.
 //!
-//! Rather than calling into `d3d8.dll`, we implement the subset of the D3D8 COM surface the games use.
+//! Rather than calling into `d3d8.dll`, we implement the subset of the D3D8 COM surface used by the games and thprac's ImGui renderer.
 //! `Direct3DCreate8` is intercepted and returns an `IDirect3D8` whose methods translate to an `IDirect3D9Ex`.
+//!
+//! There are two compatibility contracts to keep in mind. First, we replace native `d3d8.dll`, so we reference its behavior
+//! assuming that's what the games and thprac were written against. In situations that are ambiguous or not documented by the DX8.1 SDK,
+//! we reference Wine's `d3d8` test suite. Second, we only emit calls legal on both D3D9Ex backends: native `d3d9.dll` and Wine's `d3d9`.
+//!
+//! For example, in our implementation here, state-block tokens stay valid across `Reset` calls as they observably do on native D3D8.
+//! (Unlike D3D9, the DX8.1 documentation does not say state blocks should be released before `Reset`.) This is only sound because
+//! we translate with a D3D9Ex device, where `ResetEx` does not lose state. If we targeted non-Ex D3D9, then we would have to release
+//! the wrapped blocks before `Reset` and the current design would have to change.
+//!
+//! Intentional divergences:
+//! - In situations where native D3D8 would crash or corrupt (e.g. null out-pointers, stale/fabricated tokens, use after release),
+//!   we instead refuse and log.
+//! - Refusals fill out-params with [`Inert`] values where native D3D8 would only write them on success.
+//! - Wine's `d3d8` abandons leftover state blocks at device death. We release the state blocks because they hold a D3D9Ex device reference
+//!   and would otherwise keep the device alive past the game's release.
+//! - State blocks only support the capture model (`CreateStateBlock`, `ApplyStateBlock`, `CaptureStateBlock`, `DeleteStateBlock`).
+//!   `BeginStateBlock` and `EndStateBlock` recording are stubbed out because D3D9 records `SetIndices` without executing it,
+//!   so the shadowed base vertex index (see below) wouldn't be able to stay faithful to a recorded block.
+//!
+//! State written through this translation layer must also read back coherently in the D3D8 dialect. thprac snapshots the game's state
+//! via `CreateStateBlock(D3DSBT_ALL)` plus `GetTransform` before drawing its overlay, then restores it afterward.
+//! `DrawIndexedPrimitive` itself must recover a value D3D9 no longer stores. So, we make every readable channel have exactly one authority:
+//! the D3D9 device, or a shadow on the wrapper.
+//! - State that D3D9 still carries is read from the device through the same routing its write went through.
+//!   This ensures getters and setters are inverses. The exceptions are `IDirect3DVertexBuffer8::GetDesc` and `IDirect3DIndexBuffer8::GetDesc`,
+//!   which report the translated pool usage rather than what the process asked for. This is because, again, under D3D9Ex,
+//!   nothing is lost across `ResetEx`, so the translated pool correctly steers reset decisions and `DYNAMIC` accurately describes lock behavior.
+//! - State that D3D9 no longer carries is shadowed on the wrapper. For example, D3D8's `SetIndices` has a base vertex index that D3D9 moved into
+//!   `DrawIndexedPrimitive`'s arguments, so we have the device keep the `(buffer, base)` pair of the last accepted `SetIndices`.
+//!   See [`IndicesBinding`] for more details.
 //!
 //! Wrapper state uses `Cell`, so every game that uses this code must call D3D from one thread only.
 
@@ -1492,8 +1523,8 @@ unsafe extern "system" fn device8_release(this: *mut c_void) -> u32 {
 
 forward8!(device8_test_cooperative_level, dev9 / dev9_vt.base__.TestCooperativeLevel() -> HRESULT);
 forward8!(device8_get_available_texture_mem, dev9 / dev9_vt.base__.GetAvailableTextureMem() -> u32);
-// This is vacuously successful because D3D9Ex has no managed pool and `d3d9::translate_managed_pool` rewrites every `D3DPOOL_MANAGED` request
-// to `DEFAULT | DYNAMIC`, so nothing is under management to discard.
+// This is vacuously successful because D3D9Ex has no managed pool and `d3d9::translate_managed_pool`
+// rewrites every `D3DPOOL_MANAGED` request to `DEFAULT | DYNAMIC`, so nothing is under management to discard.
 forward8!(device8_resource_manager_discard_bytes, dev9 / dev9_vt.base__.EvictManagedResources(_bytes: u32) -> HRESULT => ());
 
 unsafe extern "system" fn device8_get_direct3d(
@@ -3048,7 +3079,6 @@ mod tests {
         let surf_a = MockCom::new();
         let surf_b = MockCom::new();
 
-        // Mirrors construction in `d3d8_create_device` with a mock D3D9 device.
         let device = mock_device8(dev9.nn());
 
         unsafe {
