@@ -11,13 +11,16 @@ use crate::iat_hook;
 use crate::log::log_at;
 use crate::untrusted::Untrusted;
 use std::num::NonZero;
+use std::ptr::null;
 use std::sync::atomic::{AtomicU32, Ordering};
 use tracing::{debug, info, warn};
 use windows_sys::Win32::Foundation::{
     ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND, GetLastError, HANDLE, HMODULE,
     INVALID_HANDLE_VALUE, MAX_PATH, SetLastError,
 };
-use windows_sys::Win32::Globalization::{MB_ERR_INVALID_CHARS, MultiByteToWideChar};
+use windows_sys::Win32::Globalization::{
+    GetACP, MB_ERR_INVALID_CHARS, MultiByteToWideChar, WC_NO_BEST_FIT_CHARS, WideCharToMultiByte,
+};
 use windows_sys::Win32::Graphics::Gdi::{
     CreateFontIndirectW, CreateFontW, HFONT, LOGFONTA, LOGFONTW,
 };
@@ -35,6 +38,11 @@ static CODEPAGE: AtomicU32 = AtomicU32::new(0);
 /// The code page registered by [`install`], if any.
 pub(crate) fn codepage() -> Option<NonZero<u32>> {
     NonZero::new(CODEPAGE.load(Ordering::Relaxed))
+}
+
+/// The system ANSI code page, which is what every unhooked ANSI entry point converts through.
+pub(crate) fn system_codepage() -> Option<NonZero<u32>> {
+    NonZero::new(unsafe { GetACP() })
 }
 
 iat_hook! {
@@ -141,6 +149,66 @@ pub(crate) fn to_wide(codepage: NonZero<u32>, bytes: &[u8], strict: bool) -> Opt
     wide.push(0);
 
     Some(wide)
+}
+
+/// Converts `wide` back through `codepage`, refusing anything the code page cannot represent exactly.
+/// Returns `None` on empty input, on conversion failure, or when a character would need a substitute.
+fn to_narrow(codepage: NonZero<u32>, wide: &[u16]) -> Option<Vec<u8>> {
+    if wide.is_empty() {
+        return None;
+    }
+
+    let mut bytes = vec![0; wide.len() * 4];
+    let mut used_default = 0;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let written = unsafe {
+        WideCharToMultiByte(
+            codepage.get(),
+            WC_NO_BEST_FIT_CHARS,
+            wide.as_ptr(),
+            wide.len() as i32,
+            bytes.as_mut_ptr(),
+            bytes.len() as i32,
+            null(),
+            &raw mut used_default,
+        )
+    };
+    // A substituted character means the re-encode invented a byte that the original never had.
+    if written <= 0 || used_default != 0 {
+        debug!(
+            kind = "ansi_narrow_failed",
+            codepage = codepage.get(),
+            written,
+            used_default,
+        );
+        return None;
+    }
+    bytes.truncate(written.cast_unsigned() as usize);
+    Some(bytes)
+}
+
+/// Returns whether `wide` contains a code point that the ANSI code page had no character for and passed through as-is.
+fn has_undecodable_byte(wide: &[u16]) -> bool {
+    wide.iter().any(|&u| (0x80..=0x9f).contains(&u))
+}
+
+/// Attempts to recover text that an ANSI entry point decoded through the wrong code page. Returns `None` if:
+/// - re-encoding through `acp` substitutes a default character
+/// - the bytes are invalid in `game_cp`
+/// - the result is identical to the input
+/// - the input has no undecodable byte
+pub(crate) fn recover_misdecoded(
+    acp: NonZero<u32>,
+    game_cp: NonZero<u32>,
+    wide: &[u16],
+) -> Option<Vec<u16>> {
+    if acp == game_cp || !has_undecodable_byte(wide) {
+        return None;
+    }
+    let bytes = to_narrow(acp, wide)?;
+    let mut recovered = to_wide(game_cp, &bytes, true)?;
+    recovered.pop();
+    (recovered != wide).then_some(recovered)
 }
 
 /// Reads a NUL-terminated ANSI string and converts it through the configured code page.
@@ -344,12 +412,58 @@ unsafe extern "system" fn hook_create_font_indirect_a(logfont: *const LOGFONTA) 
 
 #[cfg(test)]
 mod tests {
-    use super::{CP_SHIFT_JIS, convert_logfont, is_not_found, should_fall_back, to_wide};
+    use super::{
+        CP_SHIFT_JIS, convert_logfont, is_not_found, recover_misdecoded, should_fall_back, to_wide,
+    };
+    use std::num::NonZero;
     use windows_sys::Win32::Foundation::{
         ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND, ERROR_SHARING_VIOLATION,
     };
     use windows_sys::Win32::Graphics::Gdi::{LOGFONTA, SHIFTJIS_CHARSET};
     use windows_sys::Win32::Storage::FileSystem::{CREATE_ALWAYS, OPEN_ALWAYS, OPEN_EXISTING};
+
+    const CP_1252: NonZero<u32> = NonZero::new(1252).unwrap();
+
+    #[test]
+    fn recover_mangled_window_title() {
+        // The start of th06's Shift-JIS window title bytes after decoding through ACP 1252.
+        const MANGLED: &[u16] = &[
+            0x201c, 0x0152, 0x2022, 0x00fb, 0x008d, 0x0067, 0x2013, 0x201a, 0x2039, 0x00bd, 0x0081,
+            0x0040, 0x0081, 0x0060, 0x0020, 0x0074, 0x0068, 0x0065,
+        ];
+
+        let recovered = recover_misdecoded(CP_1252, CP_SHIFT_JIS, MANGLED).expect("invertible");
+        assert_eq!(
+            String::from_utf16(&recovered).unwrap(),
+            "\u{6771}\u{65b9}\u{7d05}\u{9b54}\u{90f7}\u{3000}\u{ff5e} the",
+        );
+    }
+
+    #[test]
+    fn refuse_coincidentally_valid_latin_text() {
+        for text in ["Cél", "Über", "Pokémon", "Café", "naïve"] {
+            let wide: Vec<u16> = text.encode_utf16().collect();
+            assert_eq!(
+                recover_misdecoded(CP_1252, CP_SHIFT_JIS, &wide),
+                None,
+                "{text:?} came from CP1252 text, not Shift-JIS bytes",
+            );
+        }
+    }
+
+    #[test]
+    fn refuse_inexact_recovery() {
+        let wide: Vec<_> = "\u{6771}\u{65b9}\u{7d05}\u{9b54}\u{90f7}"
+            .encode_utf16()
+            .collect();
+        assert_eq!(recover_misdecoded(CP_1252, CP_SHIFT_JIS, &wide), None);
+
+        assert_eq!(recover_misdecoded(CP_SHIFT_JIS, CP_SHIFT_JIS, &wide), None);
+
+        // ASCII converts identically under both code pages, so there is no repair to report.
+        let ascii: Vec<_> = "EoSD".encode_utf16().collect();
+        assert_eq!(recover_misdecoded(CP_1252, CP_SHIFT_JIS, &ascii), None);
+    }
 
     // Shift-JIS bytes of th06 strings and their expected UTF-16 forms.
     const IN_DAT_SJIS: &[u8] = &[

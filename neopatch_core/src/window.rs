@@ -1,6 +1,6 @@
 //! Window setup and hooking.
 
-use crate::ansi::{CP_SHIFT_JIS, to_wide};
+use crate::ansi::{CP_SHIFT_JIS, codepage, recover_misdecoded, system_codepage, to_wide};
 use crate::config::{
     DisplayMode, DisplayModeExt, ResolutionConfig, ResolutionConfigExt, WindowCfg, WindowFrame,
 };
@@ -33,6 +33,8 @@ static MAIN_HWND: AtomicPtr<c_void> = AtomicPtr::new(null_mut());
 
 /// The window last styled by [`prep_main_window`].
 static STYLED_WINDOW: AppliedTo = AppliedTo::new();
+/// The window where we last applied the title suffix.
+static TITLED_WINDOW: AppliedTo = AppliedTo::new();
 
 /// Records which window one piece of window setup was last applied to.
 struct AppliedTo(AtomicPtr<c_void>);
@@ -383,6 +385,7 @@ fn finish_main_window(hwnd: HWND, is_main: bool, build_title: impl FnOnce() -> O
 
     if let Some(title) = build_title() {
         unsafe { set_window_text_lossless(hwnd, &title) };
+        TITLED_WINDOW.claim(hwnd);
     } else {
         warn!(kind = "window_title_not_converted");
     }
@@ -464,6 +467,8 @@ pub(crate) fn restyle_device_window(hwnd: HWND) -> DeviceWindow {
     if recorded.is_null() || unsafe { IsWindow(recorded) } == 0 {
         MAIN_HWND.store(hwnd, Ordering::Release);
     }
+
+    suffix_device_window_title(hwnd);
 
     if STYLED_WINDOW.covers(hwnd) {
         debug!(
@@ -713,6 +718,55 @@ fn is_top_level(hwnd: HWND) -> bool {
         return false;
     }
     unsafe { GetWindowLongA(hwnd, GWL_STYLE) }.cast_unsigned() & WS_CHILD == 0
+}
+
+/// Reads the window's internal Unicode buffer, returning `Ok(_)` with the stored title on success
+/// and `Err(_)` with the reason on failure.
+fn window_title(hwnd: HWND) -> Result<Vec<u16>, &'static str> {
+    let mut buf = [0; TITLE_READ_LEN];
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let read = unsafe { InternalGetWindowText(hwnd, buf.as_mut_ptr(), TITLE_READ_LEN as i32) };
+    let Ok(read) = usize::try_from(read) else {
+        return Err("read_failed");
+    };
+    match read {
+        0 => Err("empty"),
+        n if n >= TITLE_READ_LEN - 1 => Err("full_buffer"),
+        n => Ok(buf[..n].to_vec()),
+    }
+}
+
+/// Applies the title suffix to a window that [`finish_main_window`] never covered.
+fn suffix_device_window_title(hwnd: HWND) {
+    if TITLED_WINDOW.covers(hwnd) {
+        return;
+    }
+
+    let stored = match window_title(hwnd) {
+        Ok(stored) => stored,
+        Err(reason) => {
+            // We claim anyway because `window_title` never rejects for transient reasons,
+            // so retrying on each later device creation would just repeat this log event.
+            warn!(kind = "window_title_late_skipped", reason);
+            TITLED_WINDOW.claim(hwnd);
+            return;
+        }
+    };
+
+    let acp = system_codepage();
+    let recovered = acp
+        .zip(codepage())
+        .and_then(|(acp, game_cp)| recover_misdecoded(acp, game_cp, &stored));
+    info!(
+        kind = "window_title_repair",
+        acp = acp.map_or(0, NonZero::get),
+        repaired = recovered.is_some(),
+    );
+
+    let mut title = recovered.unwrap_or(stored);
+    append_suffix(&mut title);
+    unsafe { set_window_text_lossless(hwnd, &title) };
+    TITLED_WINDOW.claim(hwnd);
 }
 
 /// Reads the game's Shift-JIS title bytes, transcodes through `CP_SHIFT_JIS` to UTF-16, and appends a version identifier for this project.
