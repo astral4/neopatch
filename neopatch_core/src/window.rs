@@ -21,6 +21,9 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WS_OVERLAPPED, WS_POPUP, WS_SYSMENU, WS_VISIBLE,
 };
 
+/// The longest stored window title (in UTF-16 units) that we read back out of a window.
+const TITLE_READ_LEN: usize = 512;
+
 static STATE: OnceLock<State> = OnceLock::new();
 static MAIN_HWND: AtomicPtr<c_void> = AtomicPtr::new(null_mut());
 
@@ -341,7 +344,7 @@ fn log_create_window_call(requested: CreationArgs, args: CreationArgs) {
 }
 
 // Does post-creation bookkeeping for the main render window. This runs on first creation and again on every recreation.
-fn finish_main_window(hwnd: HWND, is_main: bool, build_title: impl FnOnce() -> Vec<u16>) {
+fn finish_main_window(hwnd: HWND, is_main: bool, build_title: impl FnOnce() -> Option<Vec<u16>>) {
     if !is_main {
         return;
     }
@@ -352,8 +355,12 @@ fn finish_main_window(hwnd: HWND, is_main: bool, build_title: impl FnOnce() -> V
 
     MAIN_HWND.store(hwnd, Ordering::Release);
 
-    let title = build_title();
-    unsafe { set_window_text_lossless(hwnd, &title) };
+    if let Some(title) = build_title() {
+        unsafe { set_window_text_lossless(hwnd, &title) };
+    } else {
+        warn!(kind = "window_title_not_converted");
+    }
+
     log_created_style(hwnd);
 }
 
@@ -409,7 +416,7 @@ unsafe fn set_window_text_lossless(hwnd: HWND, title: &[u16]) {
         );
     }
     // `InternalGetWindowText` reads the internal Unicode buffer directly, bypassing the lossy `WM_GETTEXT` ANSI thunk.
-    let mut stored = [0u16; 128];
+    let mut stored = [0; TITLE_READ_LEN];
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let n = unsafe { InternalGetWindowText(hwnd, stored.as_mut_ptr(), stored.len() as i32) };
     info!(
@@ -419,26 +426,31 @@ unsafe fn set_window_text_lossless(hwnd: HWND, title: &[u16]) {
 }
 
 /// Reads the game's Shift-JIS title bytes, transcodes through `CP_SHIFT_JIS` to UTF-16, and appends a version identifier for this project.
+/// Returns `None` if the title is unreadable or cannot be converted.
 ///
 /// This is independent of locale because we use the literal Shift-JIS code page, not the system ANSI code page.
-fn build_extended_title_from_sjis(original: Untrusted<u8>) -> Vec<u16> {
+fn build_extended_title_from_sjis(original: Untrusted<u8>) -> Option<Vec<u16>> {
     const BUF_LEN: usize = 512;
 
     let mut buf = [0u8; BUF_LEN];
     let sjis = original.safe_read_until(&mut buf, 0);
-    let mut wide = to_wide(CP_SHIFT_JIS, sjis, false).unwrap_or_default();
+    let mut wide = to_wide(CP_SHIFT_JIS, sjis, false)?;
     wide.pop();
     append_suffix(&mut wide);
-    wide
+    Some(wide)
 }
 
-/// Reads the game's UTF-16 title bytes and appends a version identifier for this project.
-fn build_extended_title_from_wide(original: Untrusted<u16>) -> Vec<u16> {
+/// Reads the game's UTF-16 title bytes and appends a version identifier for this project. Returns `None` if the title is empty.
+fn build_extended_title_from_wide(original: Untrusted<u16>) -> Option<Vec<u16>> {
     const BUF_LEN: usize = 512;
     let mut buf = [0u16; BUF_LEN];
-    let mut wide = original.safe_read_until(&mut buf, 0).to_vec();
+    let read = original.safe_read_until(&mut buf, 0);
+    if read.is_empty() {
+        return None;
+    }
+    let mut wide = read.to_vec();
     append_suffix(&mut wide);
-    wide
+    Some(wide)
 }
 
 fn append_suffix(wide: &mut Vec<u16>) {
