@@ -5,6 +5,7 @@ use crate::config::{
     DisplayMode, DisplayModeExt, ResolutionConfig, ResolutionConfigExt, WindowCfg, WindowFrame,
 };
 use crate::iat_hook;
+use crate::log::log_at;
 use crate::untrusted::Untrusted;
 use std::ffi::c_void;
 use std::mem::zeroed;
@@ -16,9 +17,10 @@ use tracing::{info, warn};
 use windows_sys::Win32::Foundation::{HMODULE, HWND, RECT};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AdjustWindowRectEx, CW_USEDEFAULT, DefWindowProcW, GWL_EXSTYLE, GWL_STYLE, GetWindowLongA,
-    GetWindowRect, HMENU, InternalGetWindowText, PM_NOREMOVE, PeekMessageA, WINDOW_EX_STYLE,
-    WINDOW_STYLE, WM_SETTEXT, WS_CAPTION, WS_EX_TOPMOST, WS_MAXIMIZEBOX, WS_MINIMIZEBOX,
-    WS_OVERLAPPED, WS_POPUP, WS_SYSMENU, WS_VISIBLE,
+    GetWindowRect, HMENU, InternalGetWindowText, IsWindow, IsWindowVisible, PM_NOREMOVE,
+    PeekMessageA, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW,
+    SetWindowPos, WINDOW_EX_STYLE, WINDOW_STYLE, WM_SETTEXT, WS_CAPTION, WS_CHILD, WS_EX_TOPMOST,
+    WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_POPUP, WS_SYSMENU, WS_VISIBLE,
 };
 
 /// The longest stored window title (in UTF-16 units) that we read back out of a window.
@@ -364,11 +366,74 @@ fn finish_main_window(hwnd: HWND, is_main: bool, build_title: impl FnOnce() -> O
     log_created_style(hwnd);
 }
 
-/// Lets the window system finish realizing the game's window.
-pub(crate) fn service_pending_events() {
+/// Adopts the window a device is about to be created on, in case the creation hook never saw it.
+///
+/// [`install`]'s import hook covers the window it created itself. This is another path in case that slot
+/// was rebound by something that initialized after our `DllMain`, which leaves the game's own window uncovered.
+#[must_use]
+pub(crate) fn adopt_device_window(hwnd: HWND) -> DeviceWindow {
+    let untouched = DeviceWindow { hwnd };
+
+    if hwnd.is_null() {
+        return untouched;
+    }
+    if !is_top_level(hwnd) {
+        warn!(kind = "device_window_skipped", reason = "not_top_level");
+        return untouched;
+    }
+
+    let recorded = MAIN_HWND.load(Ordering::Acquire);
+    if recorded.is_null() || unsafe { IsWindow(recorded) } == 0 {
+        MAIN_HWND.store(hwnd, Ordering::Release);
+    }
+
+    untouched
+}
+
+/// The device's target window.
+pub(crate) struct DeviceWindow {
+    hwnd: HWND,
+}
+
+impl DeviceWindow {
+    /// Puts the device window on screen after a successful `CreateDeviceEx`.
+    pub(crate) fn reveal(&self) {
+        self.show();
+    }
+
+    /// Maps the window, taking activation only on its first appearance.
+    fn show(&self) {
+        if self.hwnd.is_null() {
+            return;
+        }
+
+        let mut flags = SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_SHOWWINDOW;
+        // An already-visible window is left alone so focus isn't stolen mid-session.
+        let was_visible = unsafe { IsWindowVisible(self.hwnd) } != 0;
+        if was_visible {
+            flags |= SWP_NOACTIVATE;
+        }
+
+        let ok = unsafe { SetWindowPos(self.hwnd, null_mut(), 0, 0, 0, 0, flags) } != 0;
+        log_at!(was_visible => debug / info,
+            kind = "device_window_shown",
+            was_visible,
+            ok,
+        );
+
+        settle_after_remap();
+    }
+}
+
+fn settle_after_remap() {
+    let pending = peek_pending();
+    info!(kind = "window_settled_after_remap", pending);
+}
+
+/// Peeks at the thread's message queue. Returns whether anything is pending.
+fn peek_pending() -> bool {
     let mut msg = unsafe { zeroed() };
-    let pending = unsafe { PeekMessageA(&raw mut msg, null_mut(), 0, 0, PM_NOREMOVE) } != 0;
-    info!(kind = "window_events_serviced", pending);
+    unsafe { PeekMessageA(&raw mut msg, null_mut(), 0, 0, PM_NOREMOVE) != 0 }
 }
 
 /// Logs what `CreateWindowEx*` actually produced.
@@ -423,6 +488,14 @@ unsafe fn set_window_text_lossless(hwnd: HWND, title: &[u16]) {
         kind = "window_title_set",
         title = %String::from_utf16_lossy(&stored[..n.max(0).cast_unsigned() as usize]),
     );
+}
+
+/// Returns whether `hwnd` is a live top-level window.
+fn is_top_level(hwnd: HWND) -> bool {
+    if unsafe { IsWindow(hwnd) } == 0 {
+        return false;
+    }
+    unsafe { GetWindowLongA(hwnd, GWL_STYLE) }.cast_unsigned() & WS_CHILD == 0
 }
 
 /// Reads the game's Shift-JIS title bytes, transcodes through `CP_SHIFT_JIS` to UTF-16, and appends a version identifier for this project.
