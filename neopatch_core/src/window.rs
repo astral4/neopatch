@@ -198,18 +198,18 @@ macro_rules! create_window_hook {
             // We match by class name "BASE" to catch both fullscreen (`WS_POPUP`) and windowed (no `WS_POPUP`) branches.
             let is_main = h_wnd_parent.is_null()
                 && Untrusted::from_raw(lp_class_name).matches_nul_terminated($class);
-            let args = prep_main_window(
-                STATE.get().unwrap(),
-                is_main,
-                CreationArgs {
-                    x,
-                    y,
-                    width: n_width,
-                    height: n_height,
-                    style: dw_style,
-                    ex_style: dw_ex_style,
-                },
-            );
+            let requested = CreationArgs {
+                x,
+                y,
+                width: n_width,
+                height: n_height,
+                style: dw_style,
+                ex_style: dw_ex_style,
+            };
+            let args = prep_main_window(STATE.get().unwrap(), is_main, requested);
+            if is_main {
+                log_create_window_call(requested, args);
+            }
             let hwnd = unsafe {
                 $real(
                     args.ex_style,
@@ -233,6 +233,7 @@ macro_rules! create_window_hook {
         }
     };
 }
+
 create_window_hook!(
     hook_create_window_ex_a,
     u8,
@@ -292,7 +293,7 @@ fn prep_main_window(state: &State, is_main: bool, requested: CreationArgs) -> Cr
         State::DeferToGame { always_on_top } => *always_on_top,
     };
 
-    let args = match state {
+    match state {
         State::Restyle { restyle } if (requested.style & WS_POPUP) == 0 => {
             let style = frame_style(restyle.frame);
             let ex_style = topmost_ex_style(0, always_on_top);
@@ -318,24 +319,25 @@ fn prep_main_window(state: &State, is_main: bool, requested: CreationArgs) -> Cr
             ex_style: topmost_ex_style(requested.ex_style, always_on_top),
             ..requested
         },
-    };
+    }
+}
 
+fn log_create_window_call(requested: CreationArgs, args: CreationArgs) {
     info!(
         kind = "create_window_call",
-        dw_style = format_args!("{:#x}", requested.style),
-        dw_ex_style = format_args!("{:#x}", requested.ex_style),
-        x = requested.x,
-        y = requested.y,
+        style_in = format_args!("{:#x}", requested.style),
+        ex_style_in = format_args!("{:#x}", requested.ex_style),
+        x_in = requested.x,
+        y_in = requested.y,
         width_in = requested.width,
         height_in = requested.height,
+        style_out = format_args!("{:#x}", args.style),
+        ex_style_out = format_args!("{:#x}", args.ex_style),
         x_out = args.x,
         y_out = args.y,
         width_out = args.width,
         height_out = args.height,
-        style_out = format_args!("{:#x}", args.style),
-        ex_style_out = format_args!("{:#x}", args.ex_style),
     );
-    args
 }
 
 // Does post-creation bookkeeping for the main render window. This runs on first creation and again on every recreation.
