@@ -327,6 +327,8 @@ pub(crate) enum SlotStatus {
     Reasserted,
     /// We declined to write or to adopt what we found, because another tool owns the slot.
     Refused,
+    /// A slot we had installed into no longer holds our hook, so whatever it was for is no longer running.
+    Displaced,
     /// The slot is null, so there is nothing to chain through.
     NullSlot,
     /// The named import is not in the host's import table.
@@ -347,6 +349,7 @@ impl Display for SlotStatus {
             Self::Unchanged => "UNCHANGED",
             Self::Reasserted => "REASSERTED",
             Self::Refused => "REFUSED",
+            Self::Displaced => "DISPLACED",
             Self::NullSlot => "NULL_SLOT",
             Self::NotImported => "NOT_IMPORTED",
             Self::ProtectFailed => "PROTECT_FAILED",

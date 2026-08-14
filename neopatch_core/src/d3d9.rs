@@ -16,6 +16,7 @@
 //! Per-instance clones break because `d3d9.dll` dispatches through private vtable slots beyond the public COM footprint.
 
 use crate::config::{CONFIG, RefreshRateMode};
+use crate::iat::audit_installed;
 use crate::log::log_at;
 use crate::pacer::{PACER, Pacer, PacingPolicy};
 use crate::patches::PatchSite;
@@ -258,6 +259,10 @@ pub(crate) unsafe fn create_hooked_d3d9_with(
     sdk_version: u32,
     policy: PresentPolicy,
 ) -> Option<NonNull<c_void>> {
+    // Both the D3D8 shim and direct D3D9 reach here from a call-site patch, which makes this the first point in every game
+    // that is both game code (so anything injecting after our `DllMain` has already run) and ahead of window creation.
+    audit_installed();
+
     // The Ex object's first 17 vtable slots are the `IDirect3D9` vtable,
     // so the game can keep using the returned pointer as plain `IDirect3D9` while we get the Ex methods.
     let ex = match unsafe { Direct3DCreate9Ex(sdk_version) } {
