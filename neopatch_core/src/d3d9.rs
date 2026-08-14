@@ -28,7 +28,7 @@ use crate::session::{
 };
 use crate::thread::{MainCell, MainToken};
 use crate::vtable::{install_vtable, vtable_field, vtable_slot};
-use crate::window::adopt_device_window;
+use crate::window::restyle_device_window;
 use crate::{fmt_hr, iat_hook, match_named};
 use std::cmp::min;
 use std::ffi::c_void;
@@ -1059,7 +1059,7 @@ unsafe extern "system" fn hook_create_device(
     device_creating(&tok);
     on_device_creating(&tok);
 
-    // The focus window is documented as top-level, which is relevant to `main_hwnd`, so it comes first.
+    // The focus window is documented as top-level, which is relevant to the window policy and `main_hwnd`, so it comes first.
     // If there is no focus window, we use `pp.hDeviceWindow`, which is legal on its own for a windowed device but may be a child window.
     // The supported games pass their render window as the focus window. th06's D3D8 path leaves `hDeviceWindow` null.
     let game_window = if focus_window.0.is_null() {
@@ -1068,8 +1068,10 @@ unsafe extern "system" fn hook_create_device(
         focus_window.0
     };
 
-    // The successful exit path uses the returned value to put the window on screen.
-    let device_window = adopt_device_window(game_window);
+    // This restyle is in case the window creation hook didn't apply because another tool held its slot.
+    // This runs before the device exists, so the runtime sizes its swap chain against the window that the configuration actually asked for.
+    // Every exit path in this function uses the returned value to put the window back on screen.
+    let device_window = restyle_device_window(game_window);
 
     let behavior_flags_in = behavior_flags;
     let behavior_flags = rewrite_behavior_flags(behavior_flags);
@@ -1121,6 +1123,7 @@ unsafe extern "system" fn hook_create_device(
             if let (Some(p), Some(req)) = (unsafe { pp.as_mut() }, requested) {
                 *p = req;
             }
+            device_window.restore();
             return D3DERR_INVALIDCALL;
         };
 
@@ -1139,6 +1142,8 @@ unsafe extern "system" fn hook_create_device(
         if let Some(before) = ctx.snapshot.desktop_mode {
             unsafe { warn_if_exclusive_degraded(adapter, before, attempt.as_ref()) };
         }
+    } else {
+        device_window.restore();
     }
     hr
 }

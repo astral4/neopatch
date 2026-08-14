@@ -13,14 +13,16 @@ use std::num::NonZero;
 use std::ptr::null_mut;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicPtr, Ordering};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use windows_sys::Win32::Foundation::{HMODULE, HWND, RECT};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AdjustWindowRectEx, CW_USEDEFAULT, DefWindowProcW, GWL_EXSTYLE, GWL_STYLE, GetWindowLongA,
-    GetWindowRect, HMENU, InternalGetWindowText, IsWindow, IsWindowVisible, PM_NOREMOVE,
-    PeekMessageA, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW,
-    SetWindowPos, WINDOW_EX_STYLE, WINDOW_STYLE, WM_SETTEXT, WS_CAPTION, WS_CHILD, WS_EX_TOPMOST,
-    WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_POPUP, WS_SYSMENU, WS_VISIBLE,
+    GetWindowRect, HMENU, HWND_NOTOPMOST, HWND_TOPMOST, InternalGetWindowText, IsWindow,
+    IsWindowVisible, PM_NOREMOVE, PeekMessageA, SWP_FRAMECHANGED, SWP_HIDEWINDOW, SWP_NOACTIVATE,
+    SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SetWindowLongA, SetWindowPos,
+    WINDOW_EX_STYLE, WINDOW_STYLE, WM_SETTEXT, WS_CAPTION, WS_CHILD, WS_CLIPSIBLINGS,
+    WS_EX_TOPMOST, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_OVERLAPPEDWINDOW, WS_POPUP,
+    WS_SYSMENU, WS_THICKFRAME, WS_VISIBLE,
 };
 
 /// The longest stored window title (in UTF-16 units) that we read back out of a window.
@@ -28,6 +30,28 @@ const TITLE_READ_LEN: usize = 512;
 
 static STATE: OnceLock<State> = OnceLock::new();
 static MAIN_HWND: AtomicPtr<c_void> = AtomicPtr::new(null_mut());
+
+/// The window last styled by [`prep_main_window`].
+static STYLED_WINDOW: AppliedTo = AppliedTo::new();
+
+/// Records which window one piece of window setup was last applied to.
+struct AppliedTo(AtomicPtr<c_void>);
+
+impl AppliedTo {
+    const fn new() -> Self {
+        Self(AtomicPtr::new(null_mut()))
+    }
+
+    /// Whether this work was already done for `hwnd`.
+    fn covers(&self, hwnd: HWND) -> bool {
+        !hwnd.is_null() && self.0.load(Ordering::Acquire) == hwnd
+    }
+
+    /// Claims `hwnd` as done.
+    fn claim(&self, hwnd: HWND) {
+        self.0.store(hwnd, Ordering::Release);
+    }
+}
 
 /// Returns the game's main render window, or null before the first creation.
 pub(crate) fn main_hwnd() -> HWND {
@@ -265,7 +289,7 @@ struct CreationArgs {
     ex_style: WINDOW_EX_STYLE,
 }
 
-fn frame_style(frame: WindowFrame) -> WINDOW_STYLE {
+const fn frame_style(frame: WindowFrame) -> WINDOW_STYLE {
     // `CreateWindowEx*` force-adds `WS_CAPTION` to any window that is neither a child nor a popup,
     // so the captionless options must be popup-based.
     match frame {
@@ -363,16 +387,70 @@ fn finish_main_window(hwnd: HWND, is_main: bool, build_title: impl FnOnce() -> O
         warn!(kind = "window_title_not_converted");
     }
 
+    STYLED_WINDOW.claim(hwnd);
     log_created_style(hwnd);
 }
 
-/// Adopts the window a device is about to be created on, in case the creation hook never saw it.
+/// The style bits that can be affected by our window policies. Everything outside this mask stays as whatever the live window has.
+const POLICY_STYLE_MASK: WINDOW_STYLE = (frame_style(WindowFrame::Framed)
+    | frame_style(WindowFrame::Frameless)
+    | frame_style(WindowFrame::Borderless)
+    | WS_THICKFRAME)
+    & !WS_VISIBLE;
+
+// th06–th10 create windows with `WS_OVERLAPPEDWINDOW`. The policy must be able to strip every bit of it that a frame doesn't re-add,
+// or else device-time restyling leaves a resizable border behind.
+const _: () = assert!(WS_OVERLAPPEDWINDOW & !WS_VISIBLE & !POLICY_STYLE_MASK == 0);
+// Conversely, bits maintained by the system have to stay outside the mask since a restyle sources everything outside it from the live window.
+// The system re-adds them after a plain `SetWindowLong`, so a mask claiming one would leave the restyle plan permanently unsatisfied.
+const _: () = assert!(POLICY_STYLE_MASK & WS_CLIPSIBLINGS == 0);
+
+struct RestylePlan {
+    /// The full replacement style, or `None` to leave the live one alone.
+    style: Option<WINDOW_STYLE>,
+    /// The topmost band to move into, or `None` to stay in the one the window is already in.
+    band: Option<bool>,
+    /// The position to change to, or `None` to keep the position already chosen by the system.
+    position: Option<(i32, i32)>,
+    /// The window size to change to, or `None` to keep the current size.
+    size: Option<(i32, i32)>,
+}
+
+/// Returns the window properties to be applied by [`restyle_device_window`], or `None` when the live window already satisfies the policy.
+fn restyle_plan(state: &State, live: CreationArgs) -> Option<RestylePlan> {
+    let args = prep_main_window(state, true, live);
+
+    let styled = (live.style & !POLICY_STYLE_MASK) | (args.style & POLICY_STYLE_MASK);
+    let style = (styled != live.style).then_some(styled);
+    let wants_topmost = args.ex_style & WS_EX_TOPMOST != 0;
+    let band = (wants_topmost != (live.ex_style & WS_EX_TOPMOST != 0)).then_some(wants_topmost);
+    let position = (args.x != CW_USEDEFAULT && (args.x, args.y) != (live.x, live.y))
+        .then_some((args.x, args.y));
+    let size = ((args.width, args.height) != (live.width, live.height))
+        .then_some((args.width, args.height));
+
+    let satisfied = style.is_none() && band.is_none() && position.is_none() && size.is_none();
+    (!satisfied).then_some(RestylePlan {
+        style,
+        band,
+        position,
+        size,
+    })
+}
+
+/// Applies the window policy at device-creation time to a window that wasn't covered by the creation hook.
 ///
-/// [`install`]'s import hook covers the window it created itself. This is another path in case that slot
-/// was rebound by something that initialized after our `DllMain`, which leaves the game's own window uncovered.
+/// [`install`]'s import hook gets the window created in its final state without needing to restyle. This is another path in case that slot
+/// was rebound by something that initialized after our `DllMain`. This path has the same effect after `SWP_FRAMECHANGED` recomputes the frame.
+///
+/// Frame changes are only applied to unmapped windows, since restyling a mapped one desyncs the window manager's frame from the Win32 rect.
+/// So, visible windows get hidden for the restyle and stay hidden until the returned [`DeviceWindow`] is revealed.
 #[must_use]
-pub(crate) fn adopt_device_window(hwnd: HWND) -> DeviceWindow {
-    let untouched = DeviceWindow { hwnd };
+pub(crate) fn restyle_device_window(hwnd: HWND) -> DeviceWindow {
+    let untouched = DeviceWindow {
+        hwnd,
+        hidden_for_restyle: false,
+    };
 
     if hwnd.is_null() {
         return untouched;
@@ -387,18 +465,146 @@ pub(crate) fn adopt_device_window(hwnd: HWND) -> DeviceWindow {
         MAIN_HWND.store(hwnd, Ordering::Release);
     }
 
-    untouched
+    if STYLED_WINDOW.covers(hwnd) {
+        debug!(
+            kind = "window_restyle_not_needed",
+            reason = "styled_at_creation"
+        );
+        return untouched;
+    }
+    let Some(hidden_for_restyle) = apply_window_policy(hwnd) else {
+        return untouched;
+    };
+    STYLED_WINDOW.claim(hwnd);
+    DeviceWindow {
+        hwnd,
+        hidden_for_restyle,
+    }
+}
+
+/// Reads the live window, plans the policy against it, and applies the result.
+///
+/// `Some` reports whether the window had to be hidden for a frame change, which only a reveal may undo.
+/// `None` means the policy could not be evaluated at all, so the window should not be claimed.
+fn apply_window_policy(hwnd: HWND) -> Option<bool> {
+    let state = STATE.get()?;
+    let Some(rc) = window_rect(hwnd) else {
+        warn!(kind = "window_restyle_skipped", reason = "rect_unreadable");
+        return None;
+    };
+    let live = CreationArgs {
+        x: rc.left,
+        y: rc.top,
+        width: rc.right - rc.left,
+        height: rc.bottom - rc.top,
+        style: unsafe { GetWindowLongA(hwnd, GWL_STYLE) }.cast_unsigned(),
+        ex_style: unsafe { GetWindowLongA(hwnd, GWL_EXSTYLE) }.cast_unsigned(),
+    };
+
+    let Some(plan) = restyle_plan(state, live) else {
+        // The policy was evaluated and the window already satisfies it, so this counts as applied.
+        debug!(kind = "window_restyle_not_needed");
+        return Some(false);
+    };
+
+    let frame_changed = plan.style.is_some();
+    let hide = frame_changed && live.style & WS_VISIBLE != 0;
+    if hide {
+        unsafe {
+            SetWindowPos(
+                hwnd,
+                null_mut(),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_HIDEWINDOW,
+            );
+        }
+    }
+
+    if let Some(style) = plan.style {
+        let style = if hide { style & !WS_VISIBLE } else { style };
+        unsafe {
+            SetWindowLongA(hwnd, GWL_STYLE, style.cast_signed());
+        }
+    }
+
+    let (x, y) = plan.position.unwrap_or((0, 0));
+    let (width, height) = plan.size.unwrap_or((0, 0));
+
+    let mut flags = SWP_NOACTIVATE;
+    if frame_changed {
+        flags |= SWP_FRAMECHANGED;
+    }
+    if plan.position.is_none() {
+        flags |= SWP_NOMOVE;
+    }
+    if plan.size.is_none() {
+        flags |= SWP_NOSIZE;
+    }
+    // Only `SetWindowPos` with `HWND_TOPMOST`/`HWND_NOTOPMOST` actually moves a window across the topmost band boundary.
+    let insert_after = match plan.band {
+        Some(true) => HWND_TOPMOST,
+        Some(false) => HWND_NOTOPMOST,
+        None => {
+            flags |= SWP_NOZORDER;
+            null_mut()
+        }
+    };
+
+    let ok = unsafe { SetWindowPos(hwnd, insert_after, x, y, width, height, flags) } != 0;
+
+    let (style_now, ex_style_now, rect) = window_snapshot(hwnd);
+    log_at!(ok => info / warn,
+        kind = "window_restyled_late",
+        style_in = format_args!("{:#x}", live.style),
+        ex_style_in = format_args!("{:#x}", live.ex_style),
+        x_in = live.x,
+        y_in = live.y,
+        width_in = live.width,
+        height_in = live.height,
+        style_out = format_args!("{:#x}", plan.style.unwrap_or(live.style)),
+        x_out = plan.position.map_or(live.x, |(x, _)| x),
+        y_out = plan.position.map_or(live.y, |(_, y)| y),
+        width_out = plan.size.map_or(live.width, |(w, _)| w),
+        height_out = plan.size.map_or(live.height, |(_, h)| h),
+        zorder = match plan.band {
+            Some(true) => "TOPMOST",
+            Some(false) => "NOTOPMOST",
+            None => "KEPT",
+        },
+        hidden_for_restyle = hide,
+        ok,
+        style_now = format_args!("{style_now:#x}"),
+        ex_style_now = format_args!("{ex_style_now:#x}"),
+        rect,
+    );
+
+    Some(hide)
 }
 
 /// The device's target window.
 pub(crate) struct DeviceWindow {
     hwnd: HWND,
+    hidden_for_restyle: bool,
 }
 
 impl DeviceWindow {
     /// Puts the device window on screen after a successful `CreateDeviceEx`.
     pub(crate) fn reveal(&self) {
+        if self.hidden_for_restyle {
+            settle_before_remap();
+        }
         self.show();
+    }
+
+    /// Undoes the restyle's window hide after a failed `CreateDeviceEx`.
+    pub(crate) fn restore(&self) {
+        if self.hidden_for_restyle {
+            settle_before_remap();
+            self.show();
+        }
     }
 
     /// Maps the window, taking activation only on its first appearance.
@@ -409,7 +615,7 @@ impl DeviceWindow {
 
         let mut flags = SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_SHOWWINDOW;
         // An already-visible window is left alone so focus isn't stolen mid-session.
-        let was_visible = unsafe { IsWindowVisible(self.hwnd) } != 0;
+        let was_visible = self.hidden_for_restyle || unsafe { IsWindowVisible(self.hwnd) } != 0;
         if was_visible {
             flags |= SWP_NOACTIVATE;
         }
@@ -425,6 +631,11 @@ impl DeviceWindow {
     }
 }
 
+fn settle_before_remap() {
+    let pending = peek_pending();
+    debug!(kind = "window_settled_before_remap", pending);
+}
+
 fn settle_after_remap() {
     let pending = peek_pending();
     info!(kind = "window_settled_after_remap", pending);
@@ -436,27 +647,33 @@ fn peek_pending() -> bool {
     unsafe { PeekMessageA(&raw mut msg, null_mut(), 0, 0, PM_NOREMOVE) != 0 }
 }
 
-/// Logs what `CreateWindowEx*` actually produced.
-fn log_created_style(hwnd: HWND) {
+/// Returns the window's outer rect, or `None` when the handle can't be read.
+fn window_rect(hwnd: HWND) -> Option<RECT> {
+    let mut rc = unsafe { zeroed() };
+    (unsafe { GetWindowRect(hwnd, &raw mut rc) } != 0).then_some(rc)
+}
+
+/// Gets the live style, ex-style, and outer rect of `hwnd` for logging.
+fn window_snapshot(hwnd: HWND) -> (WINDOW_STYLE, WINDOW_EX_STYLE, String) {
     let style = unsafe { GetWindowLongA(hwnd, GWL_STYLE) }.cast_unsigned();
     let ex_style = unsafe { GetWindowLongA(hwnd, GWL_EXSTYLE) }.cast_unsigned();
-    let mut rc = RECT {
-        left: 0,
-        top: 0,
-        right: 0,
-        bottom: 0,
-    };
-    let rect = if unsafe { GetWindowRect(hwnd, &raw mut rc) } != 0 {
-        format!(
-            "{}x{} at ({},{})",
-            rc.right - rc.left,
-            rc.bottom - rc.top,
-            rc.left,
-            rc.top
-        )
-    } else {
-        String::from("<unavailable>")
-    };
+    let rect = window_rect(hwnd).map_or_else(
+        || String::from("<unavailable>"),
+        |rc| {
+            format!(
+                "{}x{} at ({},{})",
+                rc.right - rc.left,
+                rc.bottom - rc.top,
+                rc.left,
+                rc.top
+            )
+        },
+    );
+    (style, ex_style, rect)
+}
+
+fn log_created_style(hwnd: HWND) {
+    let (style, ex_style, rect) = window_snapshot(hwnd);
     info!(
         kind = "window_created",
         style = format_args!("{style:#x}"),
@@ -536,7 +753,7 @@ fn append_suffix(wide: &mut Vec<u16>) {
 mod tests {
     use super::{
         CreationArgs, ResolvedWindowCfg, State, WindowPolicy, frame_style, prep_main_window,
-        topmost_ex_style,
+        restyle_plan, topmost_ex_style,
     };
     use crate::config::{
         DisplayMode, DisplayModeExt, Resolution, ResolutionConfig, ResolutionConfigExt, WindowCfg,
@@ -544,7 +761,8 @@ mod tests {
     };
     use std::num::NonZero;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        CW_USEDEFAULT, WS_CAPTION, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
+        CW_USEDEFAULT, WS_CAPTION, WS_CLIPSIBLINGS, WS_EX_TOPMOST, WS_EX_WINDOWEDGE,
+        WS_OVERLAPPEDWINDOW, WS_POPUP, WS_VISIBLE,
     };
 
     #[test]
@@ -694,6 +912,126 @@ mod tests {
         let got = prep_main_window(&state, true, requested(0x100a_0000));
         assert_eq!((got.x, got.y), (CW_USEDEFAULT, CW_USEDEFAULT));
         assert_eq!((got.width, got.height), (640, 480));
+    }
+
+    #[test]
+    fn restyle_plan_for_displaced_hook() {
+        let live = CreationArgs {
+            x: 0,
+            y: 0,
+            width: 640,
+            height: 480,
+            style: WS_OVERLAPPEDWINDOW | WS_CLIPSIBLINGS,
+            ex_style: WS_EX_WINDOWEDGE,
+        };
+
+        let state = restyle_state(WindowFrame::Framed, false);
+        let plan = restyle_plan(&state, live).expect("policy differs from the game's window");
+        // The policy's frame bits replace the game's, while bits outside the mask survive.
+        assert_eq!(
+            plan.style,
+            Some(WS_CLIPSIBLINGS | (frame_style(WindowFrame::Framed) & !WS_VISIBLE))
+        );
+        assert_eq!(plan.band, None);
+        assert_eq!(plan.position, Some((100, 120)));
+        let (w, h) = plan
+            .size
+            .expect("frame changed, so the outer rect for 640x480 changed");
+        assert!(w >= 640 && h > 480);
+
+        let applied = CreationArgs {
+            x: 100,
+            y: 120,
+            width: w,
+            height: h,
+            style: plan.style.expect("the frame changed") | WS_VISIBLE,
+            // The restyle never writes the ex-style, so the live one carries over untouched.
+            ex_style: live.ex_style,
+        };
+        assert!(restyle_plan(&state, applied).is_none());
+    }
+
+    #[test]
+    fn restyle_plan_skip_satisfied_window() {
+        let live = CreationArgs {
+            x: 0,
+            y: 0,
+            width: 640,
+            height: 480,
+            style: WS_POPUP | WS_VISIBLE | WS_CLIPSIBLINGS,
+            ex_style: 0,
+        };
+        assert!(restyle_plan(&restyle_state(WindowFrame::Framed, false), live).is_none());
+        assert!(
+            restyle_plan(
+                &State::DeferToGame {
+                    always_on_top: false
+                },
+                live
+            )
+            .is_none()
+        );
+
+        let state = State::DeferToGame {
+            always_on_top: true,
+        };
+        let plan = restyle_plan(&state, live).expect("topmost band not entered yet");
+        assert_eq!(plan.style, None);
+        assert_eq!(plan.band, Some(true));
+        assert!(plan.position.is_none() && plan.size.is_none());
+        let applied = CreationArgs {
+            ex_style: WS_EX_TOPMOST,
+            ..live
+        };
+        assert!(restyle_plan(&state, applied).is_none());
+    }
+
+    #[test]
+    fn restyle_plan_demote_topmost() {
+        let live = CreationArgs {
+            x: 0,
+            y: 0,
+            width: 640,
+            height: 480,
+            style: WS_OVERLAPPEDWINDOW | WS_CLIPSIBLINGS,
+            ex_style: WS_EX_TOPMOST,
+        };
+        let state = restyle_state(WindowFrame::Framed, false);
+        let plan = restyle_plan(&state, live).expect("frame and band both differ");
+        assert_eq!(plan.band, Some(false));
+
+        // The passthrough arm keeps the game's ex-style, so a popup fullscreen window is never demoted.
+        let popup = CreationArgs {
+            style: WS_POPUP | WS_VISIBLE | WS_CLIPSIBLINGS,
+            ..live
+        };
+        assert!(restyle_plan(&state, popup).is_none());
+    }
+
+    #[test]
+    fn restyle_plan_keep_system_position() {
+        let state = State::Restyle {
+            restyle: ResolvedWindowCfg {
+                position: None,
+                width: 640,
+                height: 480,
+                frame: WindowFrame::Borderless,
+                always_on_top: false,
+            },
+        };
+        let live = CreationArgs {
+            x: 32,
+            y: 64,
+            width: 646,
+            height: 512,
+            style: WS_OVERLAPPEDWINDOW | WS_CLIPSIBLINGS,
+            ex_style: 0,
+        };
+        let plan = restyle_plan(&state, live).expect("frame and size differ");
+        assert_eq!(plan.position, None);
+        assert_eq!(plan.size, Some((640, 480)));
+        assert_eq!(plan.style, Some(WS_CLIPSIBLINGS | WS_POPUP));
+        assert_eq!(plan.band, None);
     }
 
     #[test]
