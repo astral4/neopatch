@@ -4,6 +4,8 @@ All notable changes to neopatch will be documented in this file.
 
 ## [Unreleased]
 
+## [0.12.1] - 2026-08-14
+
 ### Changed
 
 - When another tool (e.g. [thcrap](https://github.com/thpatch/thcrap) or [thprac](https://github.com/touhouworldcup/thprac)) layers its own hook over one of neopatch's between two device creations, its hook is now left in place instead of silently displacing it.

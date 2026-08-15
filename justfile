@@ -1,5 +1,5 @@
 triple := "i686-pc-windows-gnu"
-ship_toolchain := "nightly-2026-08-12"
+ship_toolchain := "nightly-2026-08-14"
 ship_build_std := "-Zbuild-std=std,panic_abort"
 ship_rustflags := "-Zunstable-options -Cpanic=immediate-abort -Clink-arg=-Wl,--enable-stdcall-fixup"
 
