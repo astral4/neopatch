@@ -4,6 +4,10 @@ All notable changes to neopatch will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- Touhou 11 through Touhou 20 now always render to a 32-bit back buffer, ignoring the 16-bit color option in `custom.exe`.
+
 ## [0.12.1] - 2026-08-14
 
 ### Changed

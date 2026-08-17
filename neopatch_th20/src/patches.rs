@@ -44,7 +44,7 @@ unsafe extern "stdcall" fn screenshot_trampoline(_filename: *const c_char) -> u3
     );
 }
 
-pub(crate) fn sites(slide: usize) -> [PatchSite; 7] {
+pub(crate) fn sites(slide: usize) -> [PatchSite; 9] {
     [
         call_site_rewrite(DIRECT3DCREATE9_CALL_VA, &DIRECT3DCREATE9_CALL_BYTES),
         PatchSite::replace(
@@ -66,6 +66,16 @@ pub(crate) fn sites(slide: usize) -> [PatchSite; 7] {
             &[0x0f, 0x85, 0xf4, 0x00, 0x00, 0x00],
             &[0xe9, 0xf5, 0x00, 0x00, 0x00, 0x90],
             "replay speed control skip",
+        ),
+        PatchSite::nop(
+            0x0041_c4fc,
+            &[0x75, 0x09],
+            "32-bit color ignore persistent choice (device init)",
+        ),
+        PatchSite::nop(
+            0x0041_ec2d,
+            &[0x75, 0x0c],
+            "32-bit color ignore persistent choice (device reset)",
         ),
         PatchSite::jmp(
             SCREENSHOT_SAVE_FN_VA,

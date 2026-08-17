@@ -38,6 +38,16 @@ pub(crate) const PATCHES: &[PatchSite] = &[
         "force fast input latency",
     ),
     PatchSite::nop(0x0044_e633, &[0x75, 0x3a], "replay speed control skip"),
+    PatchSite::nop(
+        0x0046_2f5a,
+        &[0x0f, 0x95, 0xc0],
+        "32-bit color ignore persistent choice (device init)",
+    ),
+    PatchSite::nop(
+        0x0046_134a,
+        &[0x0f, 0x95, 0xc0],
+        "32-bit color ignore persistent choice (device reset)",
+    ),
     PatchSite::jmp(
         ANM_MODE57_SPLICE,
         &[0xf3, 0x0f, 0x11, 0x5d, 0x9c],

@@ -48,6 +48,22 @@ pub(crate) const PATCHES: &[PatchSite] = &[
         &[0xeb, 0x1d],
         "replay speed control skip",
     ),
+    PatchSite::replace(
+        0x0045_dd25,
+        &[0x74, 0x11],
+        &[0xeb, 0x11],
+        "32-bit color skip force-16-bit branch",
+    ),
+    PatchSite::nop(
+        0x0045_dd67,
+        &[0x0f, 0x95, 0xc2],
+        "32-bit color ignore persistent choice (device init)",
+    ),
+    PatchSite::nop(
+        0x0045_c692,
+        &[0x0f, 0x95, 0xc0],
+        "32-bit color ignore persistent choice (device reset)",
+    ),
     PatchSite::jmp(
         ANM_MODE57_SPLICE,
         &[0x8b, 0x9b, 0x70, 0x05, 0x00, 0x00],
